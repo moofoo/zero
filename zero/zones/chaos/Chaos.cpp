@@ -55,7 +55,7 @@ struct ChaosBehavior : public SvsBehavior {
     // Without configured waypoints the list is empty, so the bot holds position when there's nothing to fight
     // rather than flying at SVS map coordinates that land in Chaos walls.
     std::vector<Vector2f> waypoints;
-    auto opt_waypoints = ctx.bot->config->GetString("Chaos", "Waypoints");
+    auto opt_waypoints = ctx.bot->config->GetString(to_string(Zone::Chaos), "Waypoints");
     if (opt_waypoints) {
       waypoints = ParseWaypoints(*opt_waypoints);
     }
@@ -68,7 +68,7 @@ struct ChaosBehavior : public SvsBehavior {
   }
 
   static float ReadFloat(behavior::ExecuteContext& ctx, const char* key, float default_value) {
-    auto opt_value = ctx.bot->config->GetString("Chaos", key);
+    auto opt_value = ctx.bot->config->GetString(to_string(Zone::Chaos), key);
     return opt_value ? (float)atof(*opt_value) : default_value;
   }
 

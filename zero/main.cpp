@@ -154,6 +154,7 @@ static void PrintUsage(std::string_view path) {
       "--ship\t\t\t\tsets default ship\n"
       "-b, --behavior\t\t\tsets default behavior\n"
       "\t\t\t\tvalues depend on server\n"
+      "--freq\t\t\t\tsets the frequency (team) to join, for zones that support it\n"
       "-l, --loglevel\t\t\toverrides log level\n"
       "\t\t\t\tvalues: j, d, i, w, e\n"
 #ifdef GLFW_AVAILABLE

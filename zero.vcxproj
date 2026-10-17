@@ -85,6 +85,7 @@
     <ClCompile Include="zero\game\Soccer.cpp" />
     <ClCompile Include="zero\game\WeaponManager.cpp" />
     <ClCompile Include="zero\game\WorkQueue.cpp" />
+    <ClCompile Include="zero\zones\chaos\Chaos.cpp" />
     <ClCompile Include="zero\zones\devastation\BaseManager.cpp" />
     <ClCompile Include="zero\zones\devastation\base\TestBehavior.cpp" />
     <ClCompile Include="zero\zones\devastation\center\CenterBehavior.cpp" />

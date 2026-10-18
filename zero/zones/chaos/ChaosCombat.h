@@ -8,6 +8,8 @@
 namespace zero {
 namespace chaos {
 
+struct EnergyEstimate;
+
 // How a Chaos bot fights. Every ship flies the same combat tree; these settings decide its style. Chaos reads them
 // from the bot's aggression preset ([Aggression.<name>], chosen with --aggression), then its ship's section
 // ([Ship.<name>], e.g. the Terrier's closer, more aggressive style), and a value set in neither keeps the built-in
@@ -40,8 +42,8 @@ struct CombatSettings {
 };
 
 // The tree every Chaos bot flies: enter its ship, then fight the nearest enemy, or else chase greens, or else
-// patrol the waypoints.
-std::unique_ptr<behavior::BehaviorNode> CreateCombatTree(const CombatSettings& settings);
+// patrol the waypoints. Enemy energy comes only from the estimate, which must outlive the tree.
+std::unique_ptr<behavior::BehaviorNode> CreateCombatTree(const CombatSettings& settings, EnergyEstimate& estimate);
 
 }  // namespace chaos
 }  // namespace zero

@@ -262,7 +262,9 @@ struct PlayerEnergyPercentThresholdNode : public behavior::BehaviorNode {
 
     if (!player) return behavior::ExecuteResult::Failure;
 
-    float percent = player->energy / (float)ctx.bot->game->ship_controller.ship.energy;
+    // Another player's energy is the energy tracker's estimate against their ship's estimated maximum.
+    float percent = player_key ? ctx.bot->bot_controller->energy_tracker.GetEnergyPercent(*player)
+                               : player->energy / (float)ctx.bot->game->ship_controller.ship.energy;
 
     return percent >= threshold ? behavior::ExecuteResult::Success : behavior::ExecuteResult::Failure;
   }

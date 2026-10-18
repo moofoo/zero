@@ -9,7 +9,9 @@
 #include <zero/game/Logger.h>
 #include <zero/zones/ZoneController.h>
 #include <zero/zones/chaos/ChaosCombat.h>
+#include <zero/zones/chaos/EnergyEstimate.h>
 
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -43,6 +45,11 @@ static std::vector<Vector2f> ParseWaypoints(std::string_view text) {
 
 constexpr float kDefaultGreenUpgradeTarget = 0.75f;
 constexpr float kDefaultGreenMaxDistance = 25.0f;
+// How likely the bot is to notice a shot or hit on its screen, for its estimate of enemy energy.
+constexpr float kDefaultAttention = 0.7f;
+// The bot's screen, in pixels: what it can see of weapons, shots and hits.
+constexpr int kDefaultViewWidth = 1920;
+constexpr int kDefaultViewHeight = 1080;
 
 // A float from the config, if the key is there.
 static std::optional<float> ReadOptionalFloat(Config& config, const std::string& group, const char* key) {
@@ -128,6 +135,16 @@ struct ChaosBehavior : public behavior::Behavior {
     }
     Log(LogLevel::Info, "Engage: %s", settings.engage_close ? "close" : "range");
 
+    // What the bot can see: weapons, shots and hits on its screen only.
+    int view_width = config.GetInt(to_string(Zone::Chaos), "ViewWidth").value_or(kDefaultViewWidth);
+    int view_height = config.GetInt(to_string(Zone::Chaos), "ViewHeight").value_or(kDefaultViewHeight);
+    Vector2f view_extent(view_width / 16.0f / 2.0f, view_height / 16.0f / 2.0f);
+    ctx.blackboard.Set("view_extent", view_extent);
+
+    float attention = lookup.GetFloat("Attention").value_or(kDefaultAttention);
+    estimate = std::make_unique<EnergyEstimate>(*ctx.bot, attention, view_extent);
+    Log(LogLevel::Info, "View %dx%d, attention %.2f", view_width, view_height, attention);
+
     auto leash_distance = lookup.GetFloat("LeashDistance");
     if (leash_distance) ctx.blackboard.Set("leash_distance", *leash_distance);
 
@@ -169,7 +186,7 @@ struct ChaosBehavior : public behavior::Behavior {
               .Child<TimerSetNode>("next_freq_change_tick", 300)
               .Child<PlayerChangeFrequencyNode>("request_freq")
               .End()
-          .Composite(CreateCombatTree(settings))
+          .Composite(CreateCombatTree(settings, *estimate))
           .End();
     // clang-format on
 
@@ -177,6 +194,7 @@ struct ChaosBehavior : public behavior::Behavior {
   }
 
   CombatSettings settings;
+  std::unique_ptr<EnergyEstimate> estimate;
 };
 
 struct ChaosController : ZoneController {

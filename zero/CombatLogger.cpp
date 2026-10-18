@@ -135,6 +135,19 @@ void CombatLogger::Update() {
   fflush(file);
 }
 
+void CombatLogger::WriteEstimate(const char* target, float energy, float sd, float heuristic) {
+  if (!file) return;
+
+  u32 tick = ServerTick();
+  if (TICK_GT(next_estimate_tick, tick)) return;
+  next_estimate_tick = tick + kStateInterval;
+
+  fprintf(file, "{\"e\":\"estimate\",\"tick\":%u,\"target\":", tick);
+  WriteJsonString(file, target);
+  fprintf(file, ",\"energy\":%d,\"sd\":%d,\"heuristic\":%d}\n", (int)energy, (int)sd, (int)heuristic);
+  fflush(file);
+}
+
 void CombatLogger::HandleEvent(const WeaponFireEvent& event) {
   if (!file || !bot.game) return;
   Game& game = *bot.game;

@@ -5,6 +5,7 @@
 #include <zero/InfluenceMap.h>
 #include <zero/ZeroBot.h>
 #include <zero/behavior/BehaviorTree.h>
+#include <zero/behavior/nodes/ViewNode.h>
 #include <zero/game/Game.h>
 
 #include <random>
@@ -104,10 +105,13 @@ struct DodgeIncomingDamage : public behavior::BehaviorNode {
     float average_damage = 0.0f;
     size_t incoming_count = 0;
 
+    WeaponView view(ctx, self->position);
+
     auto& weapon_man = ctx.bot->game->weapon_manager;
     for (size_t i = 0; i < weapon_man.weapon_count; ++i) {
       Weapon& weapon = weapon_man.weapons[i];
 
+      if (!view.Contains(weapon)) continue;
       if (weapon.frequency == self->frequency) continue;
       if (weapon.data.type == WeaponType::Repel || weapon.data.type == WeaponType::Decoy) continue;
       if (weapon.data.type == WeaponType::Burst && !(weapon.flags & WEAPON_FLAG_BURST_ACTIVE)) continue;
@@ -560,9 +564,12 @@ struct PositionThreatQueryNode : public BehaviorNode {
 
     links.clear();
 
+    WeaponView view(ctx, self->position);
+
     for (size_t i = 0; i < weapon_manager.weapon_count; ++i) {
       Weapon& weapon = weapon_manager.weapons[i];
 
+      if (!view.Contains(weapon)) continue;
       if (weapon.frequency == freq) continue;
       if (weapon.data.type == WeaponType::Repel || weapon.data.type == WeaponType::Decoy) continue;
       if (weapon.data.type == WeaponType::Burst && !(weapon.flags & WEAPON_FLAG_BURST_ACTIVE)) continue;

@@ -4,6 +4,7 @@
 #include <zero/RegionRegistry.h>
 #include <zero/ZeroBot.h>
 #include <zero/behavior/BehaviorTree.h>
+#include <zero/behavior/nodes/ViewNode.h>
 #include <zero/game/Game.h>
 
 #include <unordered_set>
@@ -51,10 +52,15 @@ struct IncomingDamageQueryNode : public behavior::BehaviorNode {
 
     links.clear();
 
+    // The weapons the bot can see are those on its own screen, even when checking damage heading at another player.
+    Player* self = ctx.bot->game->player_manager.GetSelf();
+    behavior::WeaponView view(ctx, self ? self->position : player->position);
+
     auto& weapon_man = ctx.bot->game->weapon_manager;
     for (size_t i = 0; i < weapon_man.weapon_count; ++i) {
       Weapon& weapon = weapon_man.weapons[i];
 
+      if (!view.Contains(weapon)) continue;
       if (weapon.frequency == player->frequency) continue;
       if (weapon.data.type == WeaponType::Repel || weapon.data.type == WeaponType::Decoy) continue;
       if (weapon.data.type == WeaponType::Burst && !(weapon.flags & WEAPON_FLAG_BURST_ACTIVE)) continue;

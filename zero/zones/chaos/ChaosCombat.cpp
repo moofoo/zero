@@ -1,5 +1,7 @@
 #include "ChaosCombat.h"
 
+#include "EnergyEstimate.h"
+
 #include <zero/behavior/BehaviorBuilder.h>
 #include <zero/behavior/BehaviorTree.h>
 #include <zero/behavior/nodes/AimNode.h>
@@ -14,6 +16,8 @@
 #include <zero/behavior/nodes/ThreatNode.h>
 #include <zero/behavior/nodes/TimerNode.h>
 #include <zero/behavior/nodes/WaypointNode.h>
+#include <zero/CombatLogger.h>
+#include <zero/ZeroBot.h>
 #include <zero/zones/svs/nodes/BurstAreaQueryNode.h>
 #include <zero/zones/svs/nodes/DynamicPlayerBoundingBoxQueryNode.h>
 #include <zero/zones/svs/nodes/FindNearestGreenNode.h>
@@ -96,6 +100,34 @@ struct ShotSpreadNode : public behavior::BehaviorNode {
   float period = 1.0f;
 };
 
+// Writes the bot's estimate of a player's energy, and how unsure it is, to the blackboard, and logs it.
+struct EnergyEstimateQueryNode : public behavior::BehaviorNode {
+  EnergyEstimateQueryNode(EnergyEstimate* estimate, const char* player_key, const char* energy_key, const char* sd_key)
+      : estimate(estimate), player_key(player_key), energy_key(energy_key), sd_key(sd_key) {}
+
+  behavior::ExecuteResult Execute(behavior::ExecuteContext& ctx) override {
+    auto opt_player = ctx.blackboard.Value<Player*>(player_key);
+    if (!opt_player || !*opt_player) return behavior::ExecuteResult::Failure;
+    Player& player = **opt_player;
+
+    EnergyEstimate::Reading reading = estimate->Get(player);
+    ctx.blackboard.Set(energy_key, reading.energy);
+    ctx.blackboard.Set(sd_key, reading.sd);
+
+    if (ctx.bot->combat_logger) {
+      float heuristic = ctx.bot->bot_controller->energy_tracker.GetEnergy(player);
+      ctx.bot->combat_logger->WriteEstimate(player.name, reading.energy, reading.sd, heuristic);
+    }
+
+    return behavior::ExecuteResult::Success;
+  }
+
+  EnergyEstimate* estimate;
+  const char* player_key;
+  const char* energy_key;
+  const char* sd_key;
+};
+
 // Dodge when incoming damage is at least the threshold fraction of max energy, unless a low-energy enemy we'd rush
 // is close by (then stay on them).
 static std::unique_ptr<behavior::BehaviorNode> CreateDodge(const CombatSettings& settings) {
@@ -110,7 +142,6 @@ static std::unique_ptr<behavior::BehaviorNode> CreateDodge(const CombatSettings&
   builder
     .Sequence()
         .Sequence(CompositeDecorator::Invert)
-            .Child<PlayerEnergyQueryNode>("nearest_target", "nearest_target_energy")
             .InvertChild<ScalarThresholdNode<float>>("nearest_target_energy", rush_enemy_energy)
             .InvertChild<DistanceThresholdNode>("nearest_target_position", "self_position", kNearbyEnemyThreshold)
             .End()
@@ -131,7 +162,6 @@ static std::unique_ptr<behavior::BehaviorNode> CreateRush(const CombatSettings& 
   // clang-format off
   builder
     .Sequence()
-        .Child<PlayerEnergyQueryNode>("nearest_target", "nearest_target_energy")
         .InvertChild<ScalarThresholdNode<float>>("nearest_target_energy", *settings.rush_enemy_energy)
         .Child<FaceNode>("aimshot")
         .Child<SeekNode>("aimshot", 0.0f, SeekNode::DistanceResolveType::Static)
@@ -256,7 +286,7 @@ static std::unique_ptr<behavior::BehaviorNode> CreateBombOverlapCheck(const Comb
   return builder.Build();
 }
 
-std::unique_ptr<behavior::BehaviorNode> CreateCombatTree(const CombatSettings& settings) {
+std::unique_ptr<behavior::BehaviorNode> CreateCombatTree(const CombatSettings& settings, EnergyEstimate& estimate) {
   using namespace behavior;
 
   BehaviorBuilder builder;
@@ -282,6 +312,7 @@ std::unique_ptr<behavior::BehaviorNode> CreateCombatTree(const CombatSettings& s
                     .Child<PlayerPositionQueryNode>("self_position")
                     .Child<NearestMemoryTargetNode>("nearest_target")
                     .Child<PlayerPositionQueryNode>("nearest_target", "nearest_target_position")
+                    .Child<EnergyEstimateQueryNode>(&estimate, "nearest_target", "nearest_target_energy", "nearest_target_energy_sd")
                     .End()
                 .Sequence(CompositeDecorator::Success) // If we have a portal but no location, lay one down.
                     .Child<ShipItemCountThresholdNode>(ShipItemType::Portal, 1)

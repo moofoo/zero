@@ -25,6 +25,10 @@ struct CombatLogger : EventHandler<WeaponFireEvent>,
   // Call once per game tick. Writes the bot's position, velocity and energy twice a second.
   void Update();
 
+  // The bot's estimate of its target's energy (mean and standard deviation), and zero's heuristic for comparison.
+  // Call as often as the estimate is read; it's written at most twice a second.
+  void WriteEstimate(const char* target, float energy, float sd, float heuristic);
+
   void HandleEvent(const WeaponFireEvent& event) override;
   void HandleEvent(const WeaponSelfDamageEvent& event) override;
   void HandleEvent(const WeaponHitEvent& event) override;
@@ -35,6 +39,7 @@ struct CombatLogger : EventHandler<WeaponFireEvent>,
   ZeroBot& bot;
   FILE* file = nullptr;
   u32 next_state_tick = 0;
+  u32 next_estimate_tick = 0;
   // The last bomb that damaged the bot (by shooter and tick), so its explosion isn't also counted as a near miss.
   // Not a Weapon pointer: the weapon array is compacted, so another bomb can later sit at the same address.
   u16 last_damaging_shooter = 0xFFFF;

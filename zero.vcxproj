@@ -88,6 +88,7 @@
     <ClCompile Include="zero\game\WorkQueue.cpp" />
     <ClCompile Include="zero\zones\chaos\Chaos.cpp" />
     <ClCompile Include="zero\zones\chaos\ChaosCombat.cpp" />
+    <ClCompile Include="zero\zones\chaos\EnergyEstimate.cpp" />
     <ClCompile Include="zero\zones\devastation\BaseManager.cpp" />
     <ClCompile Include="zero\zones\devastation\base\TestBehavior.cpp" />
     <ClCompile Include="zero\zones\devastation\center\CenterBehavior.cpp" />
@@ -163,6 +164,7 @@
     <ClInclude Include="zero\behavior\nodes\ShipNode.h" />
     <ClInclude Include="zero\behavior\nodes\TargetNode.h" />
     <ClInclude Include="zero\behavior\nodes\ThreatNode.h" />
+    <ClInclude Include="zero\behavior\nodes\ViewNode.h" />
     <ClInclude Include="zero\behavior\nodes\TimerNode.h" />
     <ClInclude Include="zero\behavior\nodes\WaypointNode.h" />
     <ClInclude Include="zero\BotController.h" />
@@ -290,6 +292,7 @@
     <ClInclude Include="zero\zones\nexus\ThreesBehavior.h" />
     <ClInclude Include="zero\zones\svs\PowerballBehavior.h" />
     <ClInclude Include="zero\zones\chaos\ChaosCombat.h" />
+    <ClInclude Include="zero\zones\chaos\EnergyEstimate.h" />
     <ClInclude Include="zero\zones\svs\TerrierBehavior.h" />
     <ClInclude Include="zero\zones\svs\WarbirdBehavior.h" />
     <ClInclude Include="zero\zones\svs\WarzoneBehavior.h" />

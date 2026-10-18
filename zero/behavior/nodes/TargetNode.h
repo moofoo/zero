@@ -79,7 +79,8 @@ struct NearestTargetNode : public behavior::BehaviorNode {
   }
 
   inline static bool IsVisible(ArenaSettings& settings, const Player& self, const Player& target) {
-    constexpr Vector2f kViewDim(1920.0f, 1080.0f);
+    // A 1920x1080 screen, in tiles like the positions it's compared with.
+    constexpr Vector2f kViewDim(1920.0f / 16.0f, 1080.0f / 16.0f);
 
     // XRadar can see no matter what.
     if (self.togglables & Status_XRadar) return true;

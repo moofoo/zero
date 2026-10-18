@@ -159,6 +159,7 @@ struct ChaosBehavior : public behavior::Behavior {
     settings.hit_box_scale = skill_float("HitBoxScale").value_or(1.0f);
     settings.min_shot_speed = skill_float("MinShotSpeed").value_or(0.0f);
     settings.commit_decision = lookup.GetFloat("CommitDecision").value_or(0.0f) > 0.5f;
+    settings.shot_judgement = lookup.GetFloat("ShotJudgement").value_or(1.0f);
     if (engage && !settings.engage_close && std::string_view(*engage) != "range") {
       Log(LogLevel::Warning, "Engage should be range or close, not %s: using range", *engage);
     }

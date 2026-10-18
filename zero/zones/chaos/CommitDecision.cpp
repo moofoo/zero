@@ -44,6 +44,17 @@ const char* to_string(CombatMode mode) {
   return "?";
 }
 
+float BulletHitChance(float distance) {
+  int step = (int)(distance / kHitChanceStep);
+  int steps = (int)(sizeof(kBulletHitChance) / sizeof(kBulletHitChance[0]));
+  if (step < 0) step = 0;
+  return kBulletHitChance[step < steps ? step : steps - 1];
+}
+
+float BombExpectedDamage(float direct_hit_damage) {
+  return direct_hit_damage * kBombAverageDamage * kBombHitsPerBomb;
+}
+
 // The standard normal distribution's cumulative probability.
 static float NormalCdf(float x) {
   return 0.5f * erfcf(-x / sqrtf(2.0f));
@@ -62,10 +73,7 @@ float CombatDecision::DamageRate(Player& shooter, Player& victim, bool shooter_i
   float guns = shooter_is_self ? (float)own.guns : (ship.InitialGuns + ship.MaxGuns) / 2.0f;
   float bombs = shooter_is_self ? (float)own.bombs : (ship.InitialBombs + ship.MaxBombs) / 2.0f;
 
-  float distance = shooter.position.Distance(victim.position);
-  int step = (int)(distance / kHitChanceStep);
-  int steps = (int)(sizeof(kBulletHitChance) / sizeof(kBulletHitChance[0]));
-  float hit_chance = kBulletHitChance[step < steps ? step : steps - 1];
+  float hit_chance = BulletHitChance(shooter.position.Distance(victim.position));
 
   float rate = 0.0f;
   if (guns > 0.0f && ship.BulletFireDelay > 0) {
@@ -73,8 +81,7 @@ float CombatDecision::DamageRate(Player& shooter, Player& victim, bool shooter_i
     rate += 100.0f / ship.BulletFireDelay * kEngagedFireFraction * hit_chance * damage;
   }
   if (bombs > 0.0f && ship.BombFireDelay > 0) {
-    float damage = arena.BombDamageLevel / 1000.0f * kBombAverageDamage;
-    rate += 100.0f / ship.BombFireDelay * kEngagedFireFraction * kBombHitsPerBomb * damage;
+    rate += 100.0f / ship.BombFireDelay * kEngagedFireFraction * BombExpectedDamage(arena.BombDamageLevel / 1000.0f);
   }
 
   // Facing away, they have to turn first.

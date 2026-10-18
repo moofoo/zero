@@ -314,6 +314,72 @@ struct MinShotSpeedNode : public behavior::BehaviorNode {
   float min_speed;
 };
 
+// Shot choice by expected value (ticket 05b): fire when the shot's chance of hitting times its damage is worth the
+// energy it costs. Energy is cheap with plenty to spare and dear near the reserve the bot's mode needs, and below the
+// reserve no shot is worth it. A shot slower than the weapon's own speed towards the target is less likely to land.
+// A bot that judges shots poorly overestimates their chance, up to double.
+struct ShotValueNode : public behavior::BehaviorNode {
+  ShotValueNode(WeaponType weapon, const char* velocity_key, float judgement)
+      : weapon(weapon), velocity_key(velocity_key), judgement(judgement) {}
+
+  // The share of max energy each mode keeps in reserve: commit, pressure, hold, disengage, recharge.
+  static constexpr float kReserve[] = {0.1f, 0.25f, 0.35f, 0.5f, 0.5f};
+  // With this much more than the reserve, energy is at its cheapest; at the reserve, its dearest.
+  static constexpr float kPlenty = 0.3f;
+  static constexpr float kCheapest = 0.1f;
+  static constexpr float kDearest = 2.0f;
+
+  behavior::ExecuteResult Execute(behavior::ExecuteContext& ctx) override {
+    Game& game = *ctx.bot->game;
+    Player* self = game.player_manager.GetSelf();
+    auto opt_velocity = ctx.blackboard.Value<Vector2f>(velocity_key);
+    auto opt_target = ctx.blackboard.Value<Vector2f>("nearest_target_position");
+    if (!self || self->ship >= 8 || !opt_velocity || !opt_target) return behavior::ExecuteResult::Failure;
+
+    auto& arena = game.connection.settings;
+    auto& ship_settings = arena.ShipSettings[self->ship];
+    Ship& ship = game.ship_controller.ship;
+    bool bomb = weapon == WeaponType::Bomb;
+
+    // How fast the shot heads at the target compared with the weapon's own speed.
+    Vector2f to_target = *opt_target - self->position;
+    float distance = to_target.Length();
+    float weapon_speed = (bomb ? ship_settings.BombSpeed : ship_settings.BulletSpeed) / 16.0f / 10.0f;
+    float speed = opt_velocity->Dot(Normalize(to_target));
+    if (speed <= 0.0f || weapon_speed <= 0.0f) return behavior::ExecuteResult::Failure;
+    float speed_factor = speed / weapon_speed < 1.0f ? speed / weapon_speed : 1.0f;
+
+    // The shot's expected damage, as the bot judges it, and its energy cost.
+    float value;
+    float cost;
+    if (bomb) {
+      float level = ship.bombs > 0 ? ship.bombs - 1.0f : 0.0f;
+      value = BombExpectedDamage(arena.BombDamageLevel / 1000.0f) * speed_factor;
+      cost = ship_settings.BombFireEnergy + ship_settings.BombFireEnergyUpgrade * level;
+    } else {
+      float level = ship.guns > 0 ? ship.guns - 1.0f : 0.0f;
+      float damage = (arena.BulletDamageLevel + arena.BulletDamageUpgrade * level) / 1000.0f;
+      float chance = BulletHitChance(distance) * speed_factor;
+      value = (chance < 1.0f ? chance : 1.0f) * damage;
+      cost = ship_settings.BulletFireEnergy * (level + 1.0f);
+    }
+    value *= 2.0f - judgement;  // poor judgement overestimates
+
+    // What energy is worth now, from how much the bot has over its mode's reserve.
+    int mode = ctx.blackboard.ValueOr<int>("combat_mode", 1);
+    float reserve = kReserve[mode >= 0 && mode < 5 ? mode : 1];
+    float spare = self->energy / (float)ship.energy - reserve;
+    if (spare <= 0.0f) return behavior::ExecuteResult::Failure;
+    float worth = spare >= kPlenty ? kCheapest : kDearest + (kCheapest - kDearest) * (spare / kPlenty);
+
+    return value >= cost * worth ? behavior::ExecuteResult::Success : behavior::ExecuteResult::Failure;
+  }
+
+  WeaponType weapon;
+  const char* velocity_key;
+  float judgement;
+};
+
 // Dodge when incoming damage is at least the threshold fraction of max energy, unless a low-energy enemy we'd rush
 // is close by (then stay on them). Dodging only steers: while fighting, the bot keeps facing its aim point, and aiming
 // and firing carry on, as a player dodges and shoots at once.
@@ -579,6 +645,47 @@ static std::unique_ptr<behavior::BehaviorNode> CreateShotSpeedCheck(const Combat
   return builder.Build();
 }
 
+// Fire only above the energy floor (bullets: or while rushing). With the commit decision, shot choice weighs energy
+// instead. Succeeds when the bot may fire.
+static std::unique_ptr<behavior::BehaviorNode> CreateEnergyFloor(const CombatSettings& settings, float floor,
+                                                                 bool rushing_ignores) {
+  using namespace behavior;
+  if (settings.commit_decision) return std::make_unique<PassNode>();
+  if (!rushing_ignores) return std::make_unique<PlayerEnergyPercentThresholdNode>(floor);
+
+  BehaviorBuilder builder;
+
+  // clang-format off
+  builder
+    .Selector()
+        .Child<BlackboardSetQueryNode>("rushing")
+        .Child<PlayerEnergyPercentThresholdNode>(floor)
+        .End();
+  // clang-format on
+
+  return builder.Build();
+}
+
+// Whether a shot is worth taking: by expected value with the commit decision (cover shots while backing off always
+// are), else the minimum shot speed check.
+static std::unique_ptr<behavior::BehaviorNode> CreateShotChoice(const CombatSettings& settings, WeaponType weapon,
+                                                                const char* velocity_key) {
+  using namespace behavior;
+  if (!settings.commit_decision) return CreateShotSpeedCheck(settings, velocity_key);
+
+  BehaviorBuilder builder;
+
+  // clang-format off
+  builder
+    .Selector()
+        .Child<BlackboardSetQueryNode>("backing_off")
+        .Child<ShotValueNode>(weapon, velocity_key, settings.shot_judgement)
+        .End();
+  // clang-format on
+
+  return builder.Build();
+}
+
 // Bomb only into enough of our own bullet damage already heading at the target. Succeeds when that's the case, or
 // when the settings don't ask for it.
 static std::unique_ptr<behavior::BehaviorNode> CreateBombOverlapCheck(const CombatSettings& settings) {
@@ -713,13 +820,13 @@ std::unique_ptr<behavior::BehaviorNode> CreateCombatTree(const CombatSettings& s
                                 .Child<InputActionNode>(InputAction::Burst)
                                 .End()
                             .Sequence(CompositeDecorator::Success) // Bomb fire check.
-                                .Child<PlayerEnergyPercentThresholdNode>(bomb_energy)
+                                .Composite(CreateEnergyFloor(settings, bomb_energy, false))
                                 .Child<ShipWeaponCapabilityQueryNode>(WeaponType::Bomb)
                                 .InvertChild<ShipWeaponCooldownQueryNode>(WeaponType::Bomb)
                                 .Composite(CreateBombOverlapCheck(settings))
                                 .Child<DistanceThresholdNode>("nearest_target_position", bomb_min_range)
                                 .Child<ShotVelocityQueryNode>(WeaponType::Bomb, "bomb_fire_velocity")
-                                .Composite(CreateShotSpeedCheck(settings, "bomb_fire_velocity"))
+                                .Composite(CreateShotChoice(settings, WeaponType::Bomb, "bomb_fire_velocity"))
                                 .Child<RayNode>("self_position", "bomb_fire_velocity", "bomb_fire_ray")
                                 .Child<DynamicPlayerBoundingBoxQueryNode>("nearest_target", "target_bounds", 3.0f)
                                 .Composite(CreateHitBoxScale(settings))
@@ -730,15 +837,12 @@ std::unique_ptr<behavior::BehaviorNode> CreateCombatTree(const CombatSettings& s
                                 .Child<InputActionNode>(InputAction::Bomb)
                                 .End()
                             .Sequence(CompositeDecorator::Success) // Determine if a shot should be fired by using weapon trajectory and bounding boxes.
-                                .Selector() // Above the energy floor, or rushing.
-                                    .Child<BlackboardSetQueryNode>("rushing")
-                                    .Child<PlayerEnergyPercentThresholdNode>(bullet_energy)
-                                    .End()
+                                .Composite(CreateEnergyFloor(settings, bullet_energy, true))
                                 .InvertChild<ShipWeaponCooldownQueryNode>(WeaponType::Bullet)
                                 .InvertChild<InputQueryNode>(InputAction::Bomb) // Don't try to shoot a bullet when shooting a bomb.
                                 .InvertChild<TileQueryNode>(kTileIdSafe)
                                 .Child<ShotVelocityQueryNode>(WeaponType::Bullet, "bullet_fire_velocity")
-                                .Composite(CreateShotSpeedCheck(settings, "bullet_fire_velocity"))
+                                .Composite(CreateShotChoice(settings, WeaponType::Bullet, "bullet_fire_velocity"))
                                 .Child<RayNode>("self_position", "bullet_fire_velocity", "bullet_fire_ray")
                                 .Child<DynamicPlayerBoundingBoxQueryNode>("nearest_target", "target_bounds", 4.0f)
                                 .Composite(CreateHitBoxScale(settings))

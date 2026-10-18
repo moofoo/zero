@@ -23,6 +23,11 @@ enum class CombatMode { Commit, Pressure, Hold, Disengage, Recharge };
 
 const char* to_string(CombatMode mode);
 
+// A bullet's chance of hitting an enemy this far away (tiles), measured from Chaos games.
+float BulletHitChance(float distance);
+// A bomb's expected damage per bomb fired, measured from Chaos games: hits per bomb times the average hit.
+float BombExpectedDamage(float direct_hit_damage);
+
 struct DecisionSettings {
   // Commit when the chance of winning the exchange is at least this; disengage below the other (aggression).
   float commit_confidence = 0.6f;

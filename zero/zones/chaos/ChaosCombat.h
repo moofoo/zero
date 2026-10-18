@@ -58,6 +58,9 @@ struct CombatSettings {
   // The commit decision (ticket 05) chooses how to move in a fight, in place of the RushEnemyEnergy and RetreatEnergy
   // triggers.
   bool commit_decision = false;
+  // With the commit decision, shots are chosen by expected value; this is how well the bot judges a shot's chance of
+  // hitting (1: accurately; lower overestimates it, so the bot sprays) (skill).
+  float shot_judgement = 1.0f;
 };
 
 // The tree every Chaos bot flies: enter its ship, then fight the nearest enemy, or else chase greens, or else

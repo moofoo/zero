@@ -133,6 +133,7 @@ struct ChaosBehavior : public behavior::Behavior {
     settings.bomb_energy = lookup.GetFloat("BombEnergy");
     settings.bullet_energy = lookup.GetFloat("BulletEnergy");
     settings.retreat_energy = lookup.GetFloat("RetreatEnergy");
+    settings.retreat_distance = lookup.GetFloat("RetreatDistance");
     settings.rush_enemy_energy = lookup.GetFloat("RushEnemyEnergy");
     settings.bomb_min_range = lookup.GetFloat("BombMinRange");
     settings.dodge_threshold = lookup.GetFloat("DodgeThreshold");

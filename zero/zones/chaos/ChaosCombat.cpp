@@ -277,10 +277,18 @@ static std::unique_ptr<behavior::BehaviorNode> CreateRush(const CombatSettings& 
   return builder.Build();
 }
 
-// Back off to the leash distance below the energy fraction.
+// Back off below the energy fraction: to the retreat distance, further than the bot hovers, or without one to the
+// leash distance.
 static std::unique_ptr<behavior::BehaviorNode> CreateRetreat(const CombatSettings& settings) {
   using namespace behavior;
   if (!settings.retreat_energy) return std::make_unique<FailureNode>();
+
+  std::unique_ptr<BehaviorNode> seek;
+  if (settings.retreat_distance) {
+    seek = std::make_unique<SeekNode>("aimshot", *settings.retreat_distance, SeekNode::DistanceResolveType::Dynamic);
+  } else {
+    seek = std::make_unique<SeekNode>("aimshot", "leash_distance", SeekNode::DistanceResolveType::Dynamic);
+  }
 
   BehaviorBuilder builder;
 
@@ -289,7 +297,7 @@ static std::unique_ptr<behavior::BehaviorNode> CreateRetreat(const CombatSetting
     .Sequence()
         .InvertChild<PlayerEnergyPercentThresholdNode>(*settings.retreat_energy)
         .Child<FaceNode>("aimshot")
-        .Child<SeekNode>("aimshot", "leash_distance", SeekNode::DistanceResolveType::Dynamic)
+        .Composite(std::move(seek))
         .Child<ScalarNode>(1.0f, "backing_off")
         .End();
   // clang-format on

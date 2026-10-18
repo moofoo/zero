@@ -19,8 +19,9 @@ struct CombatSettings {
   // Fire bombs / bullets only above this fraction of max energy.
   std::optional<float> bomb_energy;
   std::optional<float> bullet_energy;
-  // Back off to the leash distance below this fraction of max energy.
+  // Back off below this fraction of max energy: to the retreat distance, or without one to the leash distance.
   std::optional<float> retreat_energy;
+  std::optional<float> retreat_distance;
   // Rush an enemy whose energy is below this.
   std::optional<float> rush_enemy_energy;
   // Don't bomb an enemy closer than this (tiles).

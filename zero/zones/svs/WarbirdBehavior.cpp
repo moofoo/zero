@@ -32,6 +32,8 @@ static std::unique_ptr<behavior::BehaviorNode> CreateDodge(const AggressionSetti
   using namespace behavior;
   if (!aggression.dodge_threshold) return std::make_unique<FailureNode>();
 
+  // Without a rush threshold, no enemy is low enough to stay on.
+  float rush_enemy_energy = aggression.rush_enemy_energy.value_or(0.0f);
   BehaviorBuilder builder;
 
   // clang-format off
@@ -39,7 +41,7 @@ static std::unique_ptr<behavior::BehaviorNode> CreateDodge(const AggressionSetti
     .Sequence()
         .Sequence(CompositeDecorator::Invert)
             .Child<PlayerEnergyQueryNode>("nearest_target", "nearest_target_energy")
-            .InvertChild<ScalarThresholdNode<float>>("nearest_target_energy", aggression.rush_enemy_energy.value_or(0.0f))
+            .InvertChild<ScalarThresholdNode<float>>("nearest_target_energy", rush_enemy_energy)
             .InvertChild<DistanceThresholdNode>("nearest_target_position", "self_position", 20.0f)
             .End()
         .Child<DodgeIncomingDamage>(*aggression.dodge_threshold, 35.0f)

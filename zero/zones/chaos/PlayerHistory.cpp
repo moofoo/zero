@@ -50,5 +50,9 @@ void PlayerHistory::HandleEvent(const BotController::UpdateEvent& event) {
   }
 }
 
+void PlayerHistory::HandleEvent(const PlayerLeaveEvent& event) {
+  tracks.erase(event.player.id);
+}
+
 }  // namespace chaos
 }  // namespace zero

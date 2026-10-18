@@ -51,6 +51,8 @@ constexpr float kDefaultAttention = 0.7f;
 // The bot's screen, in pixels: what it can see of weapons, shots and hits.
 constexpr int kDefaultViewWidth = 1920;
 constexpr int kDefaultViewHeight = 1080;
+// Milliseconds in a game tick.
+constexpr float kMsPerTick = 10.0f;
 
 // A float from the config, if the key is there.
 static std::optional<float> ReadOptionalFloat(Config& config, const std::string& group, const char* key) {
@@ -77,7 +79,7 @@ static int GetRequestedShip(ZeroBot& bot) {
   return ship >= 0 && ship < (int)ZERO_ARRAY_SIZE(kShipNames) ? ship : -1;
 }
 
-// Looks a setting up in the bot's aggression preset, then its ship's section.
+// Looks a setting up in the bot's aggression preset, then its ship's section, then [Chaos] (every bot's).
 struct SettingLookup {
   Config& config;
   std::string preset_group;
@@ -87,14 +89,14 @@ struct SettingLookup {
     std::optional<const char*> value;
     if (!preset_group.empty()) value = config.GetString(preset_group, key);
     if (!value && !ship_group.empty()) value = config.GetString(ship_group, key);
+    if (!value) value = config.GetString(to_string(Zone::Chaos), key);
     return value;
   }
 
   std::optional<float> GetFloat(const char* key) const {
-    std::optional<float> value;
-    if (!preset_group.empty()) value = ReadOptionalFloat(config, preset_group, key);
-    if (!value && !ship_group.empty()) value = ReadOptionalFloat(config, ship_group, key);
-    return value;
+    auto value = Get(key);
+    if (!value) return {};
+    return (float)atof(*value);
   }
 };
 
@@ -113,8 +115,9 @@ struct ChaosBehavior : public behavior::Behavior {
     Config& config = *ctx.bot->config;
     std::string preset(ctx.bot->args->GetValue({"aggression"}));
     int ship = GetRequestedShip(*ctx.bot);
-    SettingLookup lookup{config, preset.empty() ? std::string() : "Aggression." + preset,
-                         ship >= 0 && ship < (int)ZERO_ARRAY_SIZE(kShipNames) ? std::string("Ship.") + kShipNames[ship] : std::string()};
+    std::string ship_group;
+    if (ship >= 0 && ship < (int)ZERO_ARRAY_SIZE(kShipNames)) ship_group = std::string("Ship.") + kShipNames[ship];
+    SettingLookup lookup{config, preset.empty() ? std::string() : "Aggression." + preset, ship_group};
     if (!preset.empty()) Log(LogLevel::Info, "Aggression preset: %s", preset.c_str());
 
     // Skill: how well the bot plays, from its [Skill.<name>] section only. Without one, aim and reactions are perfect.
@@ -140,8 +143,7 @@ struct ChaosBehavior : public behavior::Behavior {
     settings.shot_spread_range = lookup.GetFloat("ShotSpreadRange");
     auto engage = lookup.Get("Engage");
     settings.engage_close = engage && std::string_view(*engage) == "close";
-    // Reaction time in milliseconds, as ticks.
-    settings.reaction_ticks = (int)(skill_float("ReactionMs").value_or(0.0f) / 10.0f);
+    settings.reaction_ticks = (int)(skill_float("ReactionMs").value_or(0.0f) / kMsPerTick);
     settings.aim_error = skill_float("AimError").value_or(0.0f);
     settings.hit_box_scale = skill_float("HitBoxScale").value_or(1.0f);
     settings.min_shot_speed = skill_float("MinShotSpeed").value_or(0.0f);
@@ -181,13 +183,8 @@ struct ChaosBehavior : public behavior::Behavior {
     ctx.blackboard.Set("waypoints", waypoints);
 
     // Chase greens like a player: anywhere while the ship still needs upgrades, then only nearby ones.
-    // The preset's or ship's values win over [Chaos].
-    float green_upgrade_target =
-        ReadOptionalFloat(config, to_string(Zone::Chaos), "GreenUpgradeTarget").value_or(kDefaultGreenUpgradeTarget);
-    float green_max_distance =
-        ReadOptionalFloat(config, to_string(Zone::Chaos), "GreenMaxDistance").value_or(kDefaultGreenMaxDistance);
-    green_upgrade_target = lookup.GetFloat("GreenUpgradeTarget").value_or(green_upgrade_target);
-    green_max_distance = lookup.GetFloat("GreenMaxDistance").value_or(green_max_distance);
+    float green_upgrade_target = lookup.GetFloat("GreenUpgradeTarget").value_or(kDefaultGreenUpgradeTarget);
+    float green_max_distance = lookup.GetFloat("GreenMaxDistance").value_or(kDefaultGreenMaxDistance);
     ctx.blackboard.Set("green_upgrade_target", green_upgrade_target);
     ctx.blackboard.Set("green_max_distance", green_max_distance);
   }

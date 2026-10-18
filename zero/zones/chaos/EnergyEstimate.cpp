@@ -128,9 +128,9 @@ float EnergyEstimate::NoticeChance(Vector2f position) {
   return attention * (1.0f - 0.5f * edge);
 }
 
-bool EnergyEstimate::Notices(Vector2f position, float& chance) {
-  chance = NoticeChance(position);
-  return chance > 0.0f && std::uniform_real_distribution<float>(0.0f, 1.0f)(random) < chance;
+float EnergyEstimate::Notices(Vector2f position) {
+  float chance = NoticeChance(position);
+  return std::uniform_real_distribution<float>(0.0f, 1.0f)(random) < chance ? chance : 0.0f;
 }
 
 void EnergyEstimate::Spend(Player& player, float amount, float amount_sd, float chance) {
@@ -151,8 +151,8 @@ void EnergyEstimate::Spend(Player& player, float amount, float amount_sd, float 
 void EnergyEstimate::HandleEvent(const WeaponFireEvent& event) {
   Player& player = event.player;
   if (player.ship >= 8 || player.id == bot.game->player_manager.player_id) return;
-  float chance;
-  if (!Notices(player.position, chance)) return;
+  float chance = Notices(player.position);
+  if (chance <= 0.0f) return;
 
   float cost = (float)GetWeaponFireCost(bot.game->connection.settings.ShipSettings[player.ship], event.data);
   if (cost <= 0.0f) return;
@@ -180,8 +180,8 @@ void EnergyEstimate::HandleEvent(const WeaponHitEvent& event) {
       last_blast_shooter = weapon.player_id;
       last_blast_position = weapon.position;
 
-      float chance;
-      if (!Notices(weapon.position, chance)) return;
+      float chance = Notices(weapon.position);
+      if (chance <= 0.0f) return;
 
       float damage = settings.BombDamageLevel / 1000.0f;
       float radius = (float)(settings.BombExplodePixels + settings.BombExplodePixels * weapon.data.level) / 16.0f;
@@ -205,8 +205,8 @@ void EnergyEstimate::HandleEvent(const WeaponHitEvent& event) {
     case WeaponType::Burst: {
       Player* target = event.target;
       if (!target || target->ship >= 8 || target->id == player_manager.player_id) return;
-      float chance;
-      if (!Notices(target->position, chance)) return;
+      float chance = Notices(target->position);
+      if (chance <= 0.0f) return;
 
       float damage;
       if (weapon.data.type == WeaponType::Burst) {

@@ -133,7 +133,7 @@ struct EnergyEstimateQueryNode : public behavior::BehaviorNode {
 
 // Aims at the target as the bot saw it `delay` ticks ago: a player's reaction time.
 struct PerceivedAimNode : public behavior::BehaviorNode {
-  PerceivedAimNode(PlayerHistory* history, const char* target_key, const char* position_key, int delay)
+  PerceivedAimNode(PlayerHistory* history, const char* target_key, const char* position_key, u32 delay)
       : history(history), target_key(target_key), position_key(position_key), delay(delay) {}
 
   behavior::ExecuteResult Execute(behavior::ExecuteContext& ctx) override {
@@ -141,7 +141,7 @@ struct PerceivedAimNode : public behavior::BehaviorNode {
     auto opt_target = ctx.blackboard.Value<Player*>(target_key);
     if (!self || !opt_target || !*opt_target) return behavior::ExecuteResult::Failure;
 
-    PlayerHistory::Sample seen = history->Get(**opt_target, (u32)delay);
+    PlayerHistory::Sample seen = history->Get(**opt_target, delay);
     Vector2f aimshot = behavior::CalculateAimshot(*ctx.bot->game, *self, WeaponType::Bullet, seen.position,
                                                   seen.velocity);
     ctx.blackboard.Set(position_key, aimshot);
@@ -152,14 +152,14 @@ struct PerceivedAimNode : public behavior::BehaviorNode {
   PlayerHistory* history;
   const char* target_key;
   const char* position_key;
-  int delay;
+  u32 delay;
 };
 
 // Turns the aim point around the bot by an angle that drifts smoothly (mean-reverting, like a hand), about
 // `degrees` off on average.
 struct AimErrorNode : public behavior::BehaviorNode {
   AimErrorNode(const char* position_key, float degrees)
-      : position_key(position_key), sd(degrees * 3.14159265f / 180.0f), random(std::random_device{}()) {}
+      : position_key(position_key), sd(Radians(degrees)), random(std::random_device{}()) {}
 
   behavior::ExecuteResult Execute(behavior::ExecuteContext& ctx) override {
     Player* self = ctx.bot->game->player_manager.GetSelf();
@@ -177,7 +177,8 @@ struct AimErrorNode : public behavior::BehaviorNode {
 
     Vector2f offset = *opt_position - self->position;
     float c = cosf(angle), s = sinf(angle);
-    ctx.blackboard.Set(position_key, self->position + Vector2f(offset.x * c - offset.y * s, offset.x * s + offset.y * c));
+    Vector2f turned(offset.x * c - offset.y * s, offset.x * s + offset.y * c);
+    ctx.blackboard.Set(position_key, self->position + turned);
 
     return behavior::ExecuteResult::Success;
   }
@@ -377,7 +378,7 @@ static std::unique_ptr<behavior::BehaviorNode> CreateAim(const CombatSettings& s
   using namespace behavior;
   if (settings.reaction_ticks <= 0) return std::make_unique<AimNode>(WeaponType::Bullet, "nearest_target", "aimshot");
 
-  return std::make_unique<PerceivedAimNode>(&history, "nearest_target", "aimshot", settings.reaction_ticks);
+  return std::make_unique<PerceivedAimNode>(&history, "nearest_target", "aimshot", (u32)settings.reaction_ticks);
 }
 
 // Aim drift, when the skill has any. Always succeeds.

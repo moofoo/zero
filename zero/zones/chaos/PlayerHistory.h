@@ -3,6 +3,7 @@
 #include <zero/BotController.h>
 #include <zero/Math.h>
 #include <zero/Types.h>
+#include <zero/game/GameEvent.h>
 
 #include <array>
 #include <unordered_map>
@@ -16,7 +17,7 @@ namespace chaos {
 
 // Where other players have been over the last moment, so a bot with a reaction time can act on where it saw them
 // rather than where they are this instant.
-struct PlayerHistory : EventHandler<BotController::UpdateEvent> {
+struct PlayerHistory : EventHandler<BotController::UpdateEvent>, EventHandler<PlayerLeaveEvent> {
   struct Sample {
     u32 tick = 0;
     Vector2f position;
@@ -33,6 +34,8 @@ struct PlayerHistory : EventHandler<BotController::UpdateEvent> {
   Sample Get(const Player& player, u32 delay) const;
 
   void HandleEvent(const BotController::UpdateEvent& event) override;
+  // Forgets a player who leaves, so whoever gets their id next isn't aimed at with their movement.
+  void HandleEvent(const PlayerLeaveEvent& event) override;
 
  private:
   struct Track {

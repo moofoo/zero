@@ -26,11 +26,10 @@ namespace chaos {
 // - Over time, while off screen: they could be fighting anyone, so the estimate relaxes towards a typical energy
 //   (60% of the average maximum) with the widest deviation, over a few seconds.
 // - Shots and hits: only those on the bot's screen, each noticed with probability `attention` at the screen's centre,
-//   falling to half that at its edge. A noticed shot
-//   costs its weapon's fire cost (with a little noise, as a player judges it); a noticed hit costs a coarse amount
-//   (a bullet; a bomb direct, near or glancing) and widens the deviation. Knowing they miss some, the bot counts
-//   each noticed event for 1/attention of itself, with the extra deviation that guess carries, so low attention
-//   makes the estimate noisier rather than optimistic.
+//   falling to half that at its edge. A noticed shot costs its weapon's fire cost (with a little noise, as a player
+//   judges it); a noticed hit costs a coarse amount (a bullet; a bomb direct, near or glancing) and widens the
+//   deviation. Knowing they miss some, the bot counts each noticed event for one over the chance it had of noticing
+//   it, with the extra deviation that guess carries, so low attention makes the estimate noisier, not optimistic.
 // Energy the server does send (a teammate in a SeeEnergy = Team arena) is used exactly while it's fresh.
 struct EnergyEstimate : EventHandler<WeaponFireEvent>,
                         EventHandler<WeaponHitEvent>,
@@ -83,8 +82,8 @@ struct EnergyEstimate : EventHandler<WeaponFireEvent>,
   bool InView(Vector2f position);
   // The chance the bot notices something happening at this position: 0 off screen.
   float NoticeChance(Vector2f position);
-  // Whether it does, this time; `chance` is set to the chance it had.
-  bool Notices(Vector2f position, float& chance);
+  // Whether it notices this time: the chance it had if so, else 0.
+  float Notices(Vector2f position);
   // Takes a noticed amount of energy off a player's belief. The bot noticed it with this chance, so counts it for
   // what it probably missed too.
   void Spend(Player& player, float amount, float amount_sd, float chance);

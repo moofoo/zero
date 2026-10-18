@@ -18,7 +18,7 @@ namespace behavior {
 // Weapons fired by the bot's own team always count.
 struct WeaponView {
   WeaponView(ExecuteContext& ctx, const Player& self)
-      : settings(ctx.bot->game->connection.settings), center(self.position), self_id(self.id), freq(self.frequency) {
+      : weapon_manager(ctx.bot->game->weapon_manager), center(self.position), self_id(self.id), freq(self.frequency) {
     auto opt_extent = ctx.blackboard.Value<Vector2f>("view_extent");
     if (opt_extent) {
       limited = true;
@@ -43,11 +43,7 @@ struct WeaponView {
 
   // How long ago a weapon was fired, in ticks, from its lifetime and when it ends.
   s32 GetAge(const Weapon& weapon) const {
-    s32 alive_time = settings.BulletAliveTime;
-    if (weapon.data.type == WeaponType::Bomb || weapon.data.type == WeaponType::ProximityBomb ||
-        weapon.data.type == WeaponType::Thor) {
-      alive_time = weapon.data.alternate ? settings.MineAliveTime : settings.BombAliveTime;
-    }
+    s32 alive_time = weapon_manager.GetWeaponTotalAliveTime(weapon.data.type, weapon.data.alternate);
     return alive_time - TICK_DIFF(weapon.end_tick, GetCurrentTick());
   }
 
@@ -62,7 +58,7 @@ struct WeaponView {
     return (h >> 8) / (float)(1 << 24);
   }
 
-  const ArenaSettings& settings;
+  WeaponManager& weapon_manager;
   Vector2f center;
   u16 self_id;
   u16 freq;

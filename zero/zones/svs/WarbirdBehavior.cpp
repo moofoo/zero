@@ -26,83 +26,12 @@
 namespace zero {
 namespace svs {
 
-// The Terrier's dodge, which an aggression preset can give the Warbird: dodge when incoming damage is at least the
-// threshold fraction of max energy, unless a low-energy enemy is close by (then stay on them).
-static std::unique_ptr<behavior::BehaviorNode> CreateDodge(const AggressionSettings& aggression) {
-  using namespace behavior;
-  if (!aggression.dodge_threshold) return std::make_unique<FailureNode>();
-
-  // Without a rush threshold, no enemy is low enough to stay on.
-  float rush_enemy_energy = aggression.rush_enemy_energy.value_or(0.0f);
-  BehaviorBuilder builder;
-
-  // clang-format off
-  builder
-    .Sequence()
-        .Sequence(CompositeDecorator::Invert)
-            .Child<PlayerEnergyQueryNode>("nearest_target", "nearest_target_energy")
-            .InvertChild<ScalarThresholdNode<float>>("nearest_target_energy", rush_enemy_energy)
-            .InvertChild<DistanceThresholdNode>("nearest_target_position", "self_position", 20.0f)
-            .End()
-        .Child<DodgeIncomingDamage>(*aggression.dodge_threshold, 35.0f)
-        .End();
-  // clang-format on
-
-  return builder.Build();
-}
-
-// Rushing an enemy whose energy is below the preset's threshold, as the Terrier does.
-static std::unique_ptr<behavior::BehaviorNode> CreateRush(const AggressionSettings& aggression) {
-  using namespace behavior;
-  if (!aggression.rush_enemy_energy) return std::make_unique<FailureNode>();
-
-  BehaviorBuilder builder;
-
-  // clang-format off
-  builder
-    .Sequence()
-        .Child<PlayerEnergyQueryNode>("nearest_target", "nearest_target_energy")
-        .InvertChild<ScalarThresholdNode<float>>("nearest_target_energy", *aggression.rush_enemy_energy)
-        .Child<FaceNode>("aimshot")
-        .Child<SeekNode>("aimshot", 0.0f, SeekNode::DistanceResolveType::Static)
-        .End();
-  // clang-format on
-
-  return builder.Build();
-}
-
-// Backing off to the leash distance below the preset's energy fraction, as the Terrier does.
-static std::unique_ptr<behavior::BehaviorNode> CreateRetreat(const AggressionSettings& aggression) {
-  using namespace behavior;
-  if (!aggression.retreat_energy) return std::make_unique<FailureNode>();
-
-  BehaviorBuilder builder;
-
-  // clang-format off
-  builder
-    .Sequence()
-        .InvertChild<PlayerEnergyPercentThresholdNode>(*aggression.retreat_energy)
-        .Child<FaceNode>("aimshot")
-        .Child<SeekNode>("aimshot", "leash_distance", SeekNode::DistanceResolveType::Dynamic)
-        .End();
-  // clang-format on
-
-  return builder.Build();
-}
-
 std::unique_ptr<behavior::BehaviorNode> WarbirdBehavior::CreateTree(behavior::ExecuteContext& ctx) {
   using namespace behavior;
 
   BehaviorBuilder builder;
 
   const Vector2f center(512, 512);
-  // Thresholds an aggression preset can change; the defaults are this tree's own numbers.
-  const float multifire_range = aggression.multifire_range.value_or(15.0f);
-  const float antiwarp_energy = aggression.antiwarp_energy.value_or(0.75f);
-  const float repel_trigger = aggression.repel_trigger.value_or(1.0f);
-  const float bomb_energy = aggression.bomb_energy.value_or(0.65f);
-  const float bomb_min_range = aggression.bomb_min_range.value_or(10.0f);
-  const float bullet_energy = aggression.bullet_energy.value_or(0.3f);
 
   // clang-format off
   builder
@@ -126,13 +55,13 @@ std::unique_ptr<behavior::BehaviorNode> WarbirdBehavior::CreateTree(behavior::Ex
                 .Selector(CompositeDecorator::Success) // Enable multifire if ship supports it and it's disabled.
                     .Sequence()
                         .Child<ShipCapabilityQueryNode>(ShipCapability_Multifire)
-                        .Child<DistanceThresholdNode>("nearest_target_position", multifire_range) // If we are far from enemy, use multifire
+                        .Child<DistanceThresholdNode>("nearest_target_position", 15.0f) // If we are far from enemy, use multifire
                         .InvertChild<ShipMultifireQueryNode>()
                         .Child<InputActionNode>(InputAction::Multifire)
                         .End()
                     .Sequence()
                         .Child<ShipCapabilityQueryNode>(ShipCapability_Multifire)
-                        .InvertChild<DistanceThresholdNode>("nearest_target_position", multifire_range) // If we are far from enemy, use multifire
+                        .InvertChild<DistanceThresholdNode>("nearest_target_position", 15.0f) // If we are far from enemy, use multifire
                         .Child<ShipMultifireQueryNode>()
                         .Child<InputActionNode>(InputAction::Multifire)
                         .End()
@@ -140,19 +69,18 @@ std::unique_ptr<behavior::BehaviorNode> WarbirdBehavior::CreateTree(behavior::Ex
                 .Selector(CompositeDecorator::Success) // Toggle antiwarp based on energy
                     .Sequence() // Enable antiwarp if we are healthy
                         .Child<ShipCapabilityQueryNode>(ShipCapability_Antiwarp)
-                        .Child<PlayerEnergyPercentThresholdNode>(antiwarp_energy)
+                        .Child<PlayerEnergyPercentThresholdNode>(0.75f)
                         .InvertChild<PlayerStatusQueryNode>(Status_Antiwarp)
                         .Child<InputActionNode>(InputAction::Antiwarp)
                         .End()
                     .Sequence() // Disable antiwarp if we aren't healthy
                         .Child<ShipCapabilityQueryNode>(ShipCapability_Antiwarp)
-                        .InvertChild<PlayerEnergyPercentThresholdNode>(antiwarp_energy)
+                        .InvertChild<PlayerEnergyPercentThresholdNode>(0.75f)
                         .Child<PlayerStatusQueryNode>(Status_Antiwarp)
                         .Child<InputActionNode>(InputAction::Antiwarp)
                         .End()
                     .End()
                 .Selector()
-                    .Composite(CreateDodge(aggression)) // Only with an aggression preset that sets a dodge threshold.
                     .Sequence() // Path to target if they aren't immediately visible.
                         .InvertChild<VisibilityQueryNode>("nearest_target_position")
                         .Child<GoToNode>("nearest_target_position")
@@ -162,8 +90,6 @@ std::unique_ptr<behavior::BehaviorNode> WarbirdBehavior::CreateTree(behavior::Ex
                         .Child<AimNode>(WeaponType::Bullet, "nearest_target", "aimshot")
                         .Parallel()
                             .Selector() // Select between hovering around a territory position and seeking to enemy.
-                                .Composite(CreateRush(aggression)) // Only with an aggression preset that sets these.
-                                .Composite(CreateRetreat(aggression))
                                 .Sequence()
                                     .Child<FindTerritoryPosition>("nearest_target", "leash_distance", "territory_position")
                                     .Sequence(CompositeDecorator::Success)
@@ -200,12 +126,11 @@ std::unique_ptr<behavior::BehaviorNode> WarbirdBehavior::CreateTree(behavior::Ex
                                     .Child<RepelDistanceQueryNode>("repel_distance")
                                     .Child<IncomingDamageQueryNode>("repel_distance", "incoming_damage")
                                     .Child<PlayerCurrentEnergyQueryNode>("self_energy")
-                                    .Child<ScaleNode>("self_energy", repel_trigger, "repel_energy")
                                     .End()
                                 .Sequence(CompositeDecorator::Success) // If we are in danger but can't repel, use our portal.
                                     .InvertChild<ShipItemCountThresholdNode>(ShipItemType::Repel)
                                     .Child<ShipPortalPositionQueryNode>() // Check if we have a portal down.
-                                    .Child<ScalarThresholdNode<float>>("incoming_damage", "repel_energy")
+                                    .Child<ScalarThresholdNode<float>>("incoming_damage", "self_energy")
                                     .Child<TimerExpiredNode>("defense_timer")
                                     .Child<InputActionNode>(InputAction::Warp)
                                     .Child<TimerSetNode>("defense_timer", 100)
@@ -213,7 +138,7 @@ std::unique_ptr<behavior::BehaviorNode> WarbirdBehavior::CreateTree(behavior::Ex
                                 .Sequence(CompositeDecorator::Success) // Use repel when in danger.
                                     .Child<ShipWeaponCapabilityQueryNode>(WeaponType::Repel)
                                     .Child<TimerExpiredNode>("defense_timer")
-                                    .Child<ScalarThresholdNode<float>>("incoming_damage", "repel_energy")
+                                    .Child<ScalarThresholdNode<float>>("incoming_damage", "self_energy")
                                     .Child<InputActionNode>(InputAction::Repel)
                                     .Child<TimerSetNode>("defense_timer", 100)
                                     .End()
@@ -225,10 +150,10 @@ std::unique_ptr<behavior::BehaviorNode> WarbirdBehavior::CreateTree(behavior::Ex
                                     .Child<InputActionNode>(InputAction::Burst)
                                     .End()
                                 .Sequence(CompositeDecorator::Success) // Bomb fire check.
-                                    .Child<PlayerEnergyPercentThresholdNode>(bomb_energy)
+                                    .Child<PlayerEnergyPercentThresholdNode>(0.65f)
                                     .Child<ShipWeaponCapabilityQueryNode>(WeaponType::Bomb)
                                     .InvertChild<ShipWeaponCooldownQueryNode>(WeaponType::Bomb)
-                                    .Child<DistanceThresholdNode>("nearest_target_position", bomb_min_range)
+                                    .Child<DistanceThresholdNode>("nearest_target_position", 10.0f)
                                     .Child<ShotVelocityQueryNode>(WeaponType::Bomb, "bomb_fire_velocity")
                                     .Child<RayNode>("self_position", "bomb_fire_velocity", "bomb_fire_ray")
                                     .Child<DynamicPlayerBoundingBoxQueryNode>("nearest_target", "target_bounds", 3.0f)
@@ -239,7 +164,7 @@ std::unique_ptr<behavior::BehaviorNode> WarbirdBehavior::CreateTree(behavior::Ex
                                     .Child<InputActionNode>(InputAction::Bomb)
                                     .End()
                                 .Sequence(CompositeDecorator::Success) // Determine if a shot should be fired by using weapon trajectory and bounding boxes.
-                                    .Child<PlayerEnergyPercentThresholdNode>(bullet_energy)
+                                    .Child<PlayerEnergyPercentThresholdNode>(0.3f)
                                     .InvertChild<ShipWeaponCooldownQueryNode>(WeaponType::Bullet)
                                     .InvertChild<InputQueryNode>(InputAction::Bomb) // Don't try to shoot a bullet when shooting a bomb.
                                     .InvertChild<TileQueryNode>(kTileIdSafe)

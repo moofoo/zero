@@ -87,6 +87,7 @@
     <ClCompile Include="zero\game\WeaponManager.cpp" />
     <ClCompile Include="zero\game\WorkQueue.cpp" />
     <ClCompile Include="zero\zones\chaos\Chaos.cpp" />
+    <ClCompile Include="zero\zones\chaos\ChaosCombat.cpp" />
     <ClCompile Include="zero\zones\devastation\BaseManager.cpp" />
     <ClCompile Include="zero\zones\devastation\base\TestBehavior.cpp" />
     <ClCompile Include="zero\zones\devastation\center\CenterBehavior.cpp" />
@@ -288,7 +289,7 @@
     <ClInclude Include="zero\zones\svs\nodes\NearbyEnemyWeaponQueryNode.h" />
     <ClInclude Include="zero\zones\nexus\ThreesBehavior.h" />
     <ClInclude Include="zero\zones\svs\PowerballBehavior.h" />
-    <ClInclude Include="zero\zones\svs\Aggression.h" />
+    <ClInclude Include="zero\zones\chaos\ChaosCombat.h" />
     <ClInclude Include="zero\zones\svs\TerrierBehavior.h" />
     <ClInclude Include="zero\zones\svs\WarbirdBehavior.h" />
     <ClInclude Include="zero\zones\svs\WarzoneBehavior.h" />

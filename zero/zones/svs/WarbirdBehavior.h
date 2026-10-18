@@ -3,7 +3,6 @@
 #include <zero/Math.h>
 #include <zero/behavior/Behavior.h>
 #include <zero/behavior/BehaviorBuilder.h>
-#include <zero/zones/svs/Aggression.h>
 
 namespace zero {
 namespace svs {
@@ -22,9 +21,6 @@ struct WarbirdBehavior : public behavior::Behavior {
   }
 
   std::unique_ptr<behavior::BehaviorNode> CreateTree(behavior::ExecuteContext& ctx) override;
-
-  // Set before CreateTree to change the tree's thresholds (Chaos aggression presets).
-  AggressionSettings aggression;
 };
 
 }  // namespace svs

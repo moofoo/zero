@@ -66,7 +66,15 @@ std::unique_ptr<behavior::BehaviorNode> TerrierBehavior::CreateTree(behavior::Ex
   BehaviorBuilder builder;
 
   const Vector2f center(512, 512);
-  constexpr float kLowEnergyThreshold = 450.0f;
+  // Thresholds an aggression preset can change; the defaults are this tree's own numbers.
+  const float rush_enemy_energy = aggression.rush_enemy_energy.value_or(450.0f);
+  const float antiwarp_energy = aggression.antiwarp_energy.value_or(0.75f);
+  const float repel_trigger = aggression.repel_trigger.value_or(1.0f);
+  const float dodge_threshold = aggression.dodge_threshold.value_or(0.4f);
+  const float retreat_energy = aggression.retreat_energy.value_or(0.3f);
+  const float bomb_energy = aggression.bomb_energy.value_or(0.35f);
+  const float bomb_min_range = aggression.bomb_min_range.value_or(10.0f);
+  const float bullet_energy = aggression.bullet_energy.value_or(0.3f);
   // This is how far away to check for enemies that are rushing at us with low energy.
   // We will stop dodging and try to finish them off if they are within this distance and low energy.
   constexpr float kNearbyEnemyThreshold = 20.0f;
@@ -99,13 +107,13 @@ std::unique_ptr<behavior::BehaviorNode> TerrierBehavior::CreateTree(behavior::Ex
                 .Selector(CompositeDecorator::Success) // Toggle antiwarp based on energy
                     .Sequence() // Enable antiwarp if we are healthy
                         .Child<ShipCapabilityQueryNode>(ShipCapability_Antiwarp)
-                        .Child<PlayerEnergyPercentThresholdNode>(0.75f)
+                        .Child<PlayerEnergyPercentThresholdNode>(antiwarp_energy)
                         .InvertChild<PlayerStatusQueryNode>(Status_Antiwarp)
                         .Child<InputActionNode>(InputAction::Antiwarp)
                         .End()
                     .Sequence() // Disable antiwarp if we aren't healthy
                         .Child<ShipCapabilityQueryNode>(ShipCapability_Antiwarp)
-                        .InvertChild<PlayerEnergyPercentThresholdNode>(0.75f)
+                        .InvertChild<PlayerEnergyPercentThresholdNode>(antiwarp_energy)
                         .Child<PlayerStatusQueryNode>(Status_Antiwarp)
                         .Child<InputActionNode>(InputAction::Antiwarp)
                         .End()
@@ -115,11 +123,12 @@ std::unique_ptr<behavior::BehaviorNode> TerrierBehavior::CreateTree(behavior::Ex
                         .Sequence(CompositeDecorator::Success) // Always check incoming damage so we can use it in repel and portal sequences.
                             .Child<IncomingDamageQueryNode>(kRepelDistance, "incoming_damage")
                             .Child<PlayerCurrentEnergyQueryNode>("self_energy")
+                            .Child<ScaleNode>("self_energy", repel_trigger, "repel_energy")
                             .End()
                         .Sequence(CompositeDecorator::Success) // If we are in danger but can't repel, use our portal.
                             .InvertChild<ShipItemCountThresholdNode>(ShipItemType::Repel)
                             .Child<ShipPortalPositionQueryNode>() // Check if we have a portal down.
-                            .Child<ScalarThresholdNode<float>>("incoming_damage", "self_energy")
+                            .Child<ScalarThresholdNode<float>>("incoming_damage", "repel_energy")
                             .Child<TimerExpiredNode>("defense_timer")
                             .Child<InputActionNode>(InputAction::Warp)
                             .Child<TimerSetNode>("defense_timer", 100)
@@ -127,16 +136,16 @@ std::unique_ptr<behavior::BehaviorNode> TerrierBehavior::CreateTree(behavior::Ex
                         .Sequence(CompositeDecorator::Success) // Use repel when in danger.
                             .Child<ShipWeaponCapabilityQueryNode>(WeaponType::Repel)
                             .Child<TimerExpiredNode>("defense_timer")
-                            .Child<ScalarThresholdNode<float>>("incoming_damage", "self_energy")
+                            .Child<ScalarThresholdNode<float>>("incoming_damage", "repel_energy")
                             .Child<InputActionNode>(InputAction::Repel)
                             .Child<TimerSetNode>("defense_timer", 100)
                             .End()
                         .Sequence(CompositeDecorator::Invert) // Check if enemy is very low energy and close to use. Don't bother dodging if they are rushing us with low energy.
                             .Child<PlayerEnergyQueryNode>("nearest_target", "nearest_target_energy")
-                            .InvertChild<ScalarThresholdNode<float>>("nearest_target_energy", kLowEnergyThreshold)
+                            .InvertChild<ScalarThresholdNode<float>>("nearest_target_energy", rush_enemy_energy)
                             .InvertChild<DistanceThresholdNode>("nearest_target_position", "self_position", kNearbyEnemyThreshold)
                             .End()
-                        .Child<DodgeIncomingDamage>(0.4f, 35.0f)
+                        .Child<DodgeIncomingDamage>(dodge_threshold, 35.0f)
                         .End()
                     .Sequence() // Path to target if they aren't immediately visible.
                         .InvertChild<VisibilityQueryNode>("nearest_target_position")
@@ -155,12 +164,12 @@ std::unique_ptr<behavior::BehaviorNode> TerrierBehavior::CreateTree(behavior::Ex
                             .Selector()
                                 .Sequence() // If our target is very low energy, rush at them
                                     .Child<PlayerEnergyQueryNode>("nearest_target", "nearest_target_energy")
-                                    .InvertChild<ScalarThresholdNode<float>>("nearest_target_energy", kLowEnergyThreshold)
+                                    .InvertChild<ScalarThresholdNode<float>>("nearest_target_energy", rush_enemy_energy)
                                     .Child<SeekNode>("aimshot", 0.0f, SeekNode::DistanceResolveType::Static)
                                     .Child<ScalarNode>(1.0f, "rushing")
                                     .End()
                                 .Sequence() // Begin moving away if our energy is low.
-                                    .InvertChild<PlayerEnergyPercentThresholdNode>(0.3f)
+                                    .InvertChild<PlayerEnergyPercentThresholdNode>(retreat_energy)
                                     .Child<SeekNode>("aimshot", "leash_distance", SeekNode::DistanceResolveType::Dynamic)
                                     .End()
                                 .Child<SeekNode>("aimshot", 0.0f, SeekNode::DistanceResolveType::Zero)
@@ -173,12 +182,12 @@ std::unique_ptr<behavior::BehaviorNode> TerrierBehavior::CreateTree(behavior::Ex
                                 .Child<InputActionNode>(InputAction::Burst)
                                 .End()
                             .Sequence(CompositeDecorator::Success) // Bomb fire check.
-                                .Child<PlayerEnergyPercentThresholdNode>(0.35f)
+                                .Child<PlayerEnergyPercentThresholdNode>(bomb_energy)
                                 .Child<ShipWeaponCapabilityQueryNode>(WeaponType::Bomb)
                                 .InvertChild<ShipWeaponCooldownQueryNode>(WeaponType::Bomb)
                                 .Child<IncomingDamageQueryNode>("nearest_target", kRepelDistance * 2.5f, 2.75f, "outgoing_damage")
                                 .Child<ScalarThresholdNode<float>>("outgoing_damage", kBombRequiredDamageOverlap) // Check if we have enough bullets overlapping outgoing damage to fire a bomb into.
-                                .Child<DistanceThresholdNode>("nearest_target_position", 10.0f)
+                                .Child<DistanceThresholdNode>("nearest_target_position", bomb_min_range)
                                 .Child<ShotVelocityQueryNode>(WeaponType::Bomb, "bomb_fire_velocity")
                                 .Child<RayNode>("self_position", "bomb_fire_velocity", "bomb_fire_ray")
                                 .Child<DynamicPlayerBoundingBoxQueryNode>("nearest_target", "target_bounds", 3.0f)
@@ -194,7 +203,7 @@ std::unique_ptr<behavior::BehaviorNode> TerrierBehavior::CreateTree(behavior::Ex
                                 .Child<RenderRectNode>("world_camera", "target_bounds", Vector3f(1.0f, 0.0f, 0.0f))
                                 .Selector()
                                     .Child<BlackboardSetQueryNode>("rushing")
-                                    .Child<PlayerEnergyPercentThresholdNode>(0.3f)
+                                    .Child<PlayerEnergyPercentThresholdNode>(bullet_energy)
                                     .End()
                                 .InvertChild<ShipWeaponCooldownQueryNode>(WeaponType::Bullet)
                                 .InvertChild<InputQueryNode>(InputAction::Bomb) // Don't try to shoot a bullet when shooting a bomb.

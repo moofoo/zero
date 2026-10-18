@@ -288,6 +288,7 @@
     <ClInclude Include="zero\zones\svs\nodes\NearbyEnemyWeaponQueryNode.h" />
     <ClInclude Include="zero\zones\nexus\ThreesBehavior.h" />
     <ClInclude Include="zero\zones\svs\PowerballBehavior.h" />
+    <ClInclude Include="zero\zones\svs\Aggression.h" />
     <ClInclude Include="zero\zones\svs\TerrierBehavior.h" />
     <ClInclude Include="zero\zones\svs\WarbirdBehavior.h" />
     <ClInclude Include="zero\zones\svs\WarzoneBehavior.h" />

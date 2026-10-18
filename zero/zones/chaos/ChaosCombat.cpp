@@ -42,6 +42,12 @@ struct FailureNode : public behavior::BehaviorNode {
   behavior::ExecuteResult Execute(behavior::ExecuteContext& ctx) override { return behavior::ExecuteResult::Failure; }
 };
 
+// Stands in for a check the settings leave out: always succeeds, so the sequence it's in carries on as if it weren't
+// there. (zero's SuccessNode without a child fails.)
+struct PassNode : public behavior::BehaviorNode {
+  behavior::ExecuteResult Execute(behavior::ExecuteContext& ctx) override { return behavior::ExecuteResult::Success; }
+};
+
 // Writes a blackboard float multiplied by a constant to another key.
 struct ScaleNode : public behavior::BehaviorNode {
   ScaleNode(const char* input_key, float scale, const char* output_key)
@@ -216,7 +222,7 @@ static std::unique_ptr<behavior::BehaviorNode> CreateEngage(const CombatSettings
 // Spread shots around targets beyond the range. Always succeeds.
 static std::unique_ptr<behavior::BehaviorNode> CreateShotSpread(const CombatSettings& settings) {
   using namespace behavior;
-  if (!settings.shot_spread_range) return std::make_unique<SuccessNode>();
+  if (!settings.shot_spread_range) return std::make_unique<PassNode>();
 
   BehaviorBuilder builder;
 
@@ -235,7 +241,7 @@ static std::unique_ptr<behavior::BehaviorNode> CreateShotSpread(const CombatSett
 // when the settings don't ask for it.
 static std::unique_ptr<behavior::BehaviorNode> CreateBombOverlapCheck(const CombatSettings& settings) {
   using namespace behavior;
-  if (!settings.bomb_overlap_damage) return std::make_unique<SuccessNode>();
+  if (!settings.bomb_overlap_damage) return std::make_unique<PassNode>();
 
   BehaviorBuilder builder;
 

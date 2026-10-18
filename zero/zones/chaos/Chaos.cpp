@@ -58,11 +58,15 @@ static const char* const kShipNames[] = {"Warbird", "Javelin", "Spider", "Leviat
 // The ship the bot will fly (0-7) from --ship, else the RequestShip config value; -1 if neither names a ship.
 static int GetRequestedShip(ZeroBot& bot) {
   std::string_view ship_override = bot.args->GetValue({"ship"});
-  if (!ship_override.empty()) return ship_override[0] - '1';
+  if (!ship_override.empty()) {
+    int ship = ship_override[0] - '1';
+    return ship >= 0 && ship < (int)ZERO_ARRAY_SIZE(kShipNames) ? ship : -1;
+  }
 
   const char* group_lookups[] = {to_string(Zone::Chaos), "General"};
   auto request_ship = bot.config->GetInt(group_lookups, ZERO_ARRAY_SIZE(group_lookups), "RequestShip");
-  return request_ship ? *request_ship - 1 : -1;
+  int ship = request_ship ? *request_ship - 1 : -1;
+  return ship >= 0 && ship < (int)ZERO_ARRAY_SIZE(kShipNames) ? ship : -1;
 }
 
 // Looks a setting up in the bot's aggression preset, then its ship's section.
@@ -79,9 +83,10 @@ struct SettingLookup {
   }
 
   std::optional<float> GetFloat(const char* key) const {
-    auto value = Get(key);
-    if (!value) return {};
-    return (float)atof(*value);
+    std::optional<float> value;
+    if (!preset_group.empty()) value = ReadOptionalFloat(config, preset_group, key);
+    if (!value && !ship_group.empty()) value = ReadOptionalFloat(config, ship_group, key);
+    return value;
   }
 };
 
@@ -101,7 +106,7 @@ struct ChaosBehavior : public behavior::Behavior {
     std::string preset(ctx.bot->args->GetValue({"aggression"}));
     int ship = GetRequestedShip(*ctx.bot);
     SettingLookup lookup{config, preset.empty() ? std::string() : "Aggression." + preset,
-                         ship >= 0 && ship < 8 ? std::string("Ship.") + kShipNames[ship] : std::string()};
+                         ship >= 0 && ship < (int)ZERO_ARRAY_SIZE(kShipNames) ? std::string("Ship.") + kShipNames[ship] : std::string()};
     if (!preset.empty()) Log(LogLevel::Info, "Aggression preset: %s", preset.c_str());
 
     settings = CombatSettings();
@@ -118,6 +123,9 @@ struct ChaosBehavior : public behavior::Behavior {
     settings.shot_spread_range = lookup.GetFloat("ShotSpreadRange");
     auto engage = lookup.Get("Engage");
     settings.engage_close = engage && std::string_view(*engage) == "close";
+    if (engage && !settings.engage_close && std::string_view(*engage) != "range") {
+      Log(LogLevel::Warning, "Engage should be range or close, not %s: using range", *engage);
+    }
     Log(LogLevel::Info, "Engage: %s", settings.engage_close ? "close" : "range");
 
     auto leash_distance = lookup.GetFloat("LeashDistance");

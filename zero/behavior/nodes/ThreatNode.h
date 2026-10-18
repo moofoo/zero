@@ -5,7 +5,7 @@
 #include <zero/InfluenceMap.h>
 #include <zero/ZeroBot.h>
 #include <zero/behavior/BehaviorTree.h>
-#include <zero/behavior/nodes/ViewNode.h>
+#include <zero/behavior/nodes/WeaponView.h>
 #include <zero/game/Game.h>
 
 #include <random>

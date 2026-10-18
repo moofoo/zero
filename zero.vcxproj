@@ -164,7 +164,7 @@
     <ClInclude Include="zero\behavior\nodes\ShipNode.h" />
     <ClInclude Include="zero\behavior\nodes\TargetNode.h" />
     <ClInclude Include="zero\behavior\nodes\ThreatNode.h" />
-    <ClInclude Include="zero\behavior\nodes\ViewNode.h" />
+    <ClInclude Include="zero\behavior\nodes\WeaponView.h" />
     <ClInclude Include="zero\behavior\nodes\TimerNode.h" />
     <ClInclude Include="zero\behavior\nodes\WaypointNode.h" />
     <ClInclude Include="zero\BotController.h" />

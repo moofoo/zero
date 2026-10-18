@@ -135,7 +135,8 @@ struct ChaosBehavior : public behavior::Behavior {
     }
     Log(LogLevel::Info, "Engage: %s", settings.engage_close ? "close" : "range");
 
-    // What the bot can see: weapons, shots and hits on its screen only.
+    // What the bot can see: weapons, shots and hits on its screen only. The screen is the player's window, the same
+    // for every bot, so it's a [Chaos] setting rather than a preset or ship key; attention is a trait of the bot.
     int view_width = config.GetInt(to_string(Zone::Chaos), "ViewWidth").value_or(kDefaultViewWidth);
     int view_height = config.GetInt(to_string(Zone::Chaos), "ViewHeight").value_or(kDefaultViewHeight);
     Vector2f view_extent(view_width / 16.0f / 2.0f, view_height / 16.0f / 2.0f);

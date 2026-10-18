@@ -13,6 +13,21 @@ static float UniformSd(float width) {
   return width / sqrtf(12.0f);
 }
 
+// What a player can assume of a ship's maximum energy before seeing it fight: the middle of its initial-to-maximum
+// range, and the spread of that range.
+static float AverageMaxEnergy(const ShipSettings& settings) {
+  return (settings.InitialEnergy + settings.MaximumEnergy) / 2.0f;
+}
+
+static float MaxEnergySd(const ShipSettings& settings) {
+  return UniformSd((float)(settings.MaximumEnergy - settings.InitialEnergy));
+}
+
+// Without exact damage, a hit does sqrt(uniform(0, damage^2)) damage: two thirds of it on average, with this standard
+// deviation as a fraction of it.
+constexpr float kRandomDamageMean = 2.0f / 3.0f;
+constexpr float kRandomDamageSd = 0.236f;
+
 // How far off a player's judgement of a noticed shot's cost is, as a fraction of it.
 constexpr float kShotCostNoise = 0.1f;
 // A belief isn't advanced over more than this many ticks at once (a minute): longer than any recharge.
@@ -21,6 +36,8 @@ constexpr s32 kMaxAdvanceTicks = 6000;
 // (bots go into exchanges at about 60% on average), with this time constant in ticks.
 constexpr float kUnseenTypicalEnergy = 0.6f;
 constexpr float kUnseenTicks = 500.0f;
+// Every belief is advanced this often (ticks), so on and off screen are told apart in steps this short.
+constexpr u32 kAdvanceInterval = 10;
 
 EnergyEstimate::EnergyEstimate(ZeroBot& bot, float attention, Vector2f view_extent)
     : bot(bot), attention(attention), view_extent(view_extent), random(std::random_device{}()) {}
@@ -41,8 +58,8 @@ void EnergyEstimate::Spawn(Player& player) {
   if (player.ship >= 8) return;
 
   auto& settings = bot.game->connection.settings.ShipSettings[player.ship];
-  belief.mean = (settings.InitialEnergy + settings.MaximumEnergy) / 2.0f;
-  belief.sd = UniformSd((float)(settings.MaximumEnergy - settings.InitialEnergy));
+  belief.mean = AverageMaxEnergy(settings);
+  belief.sd = MaxEnergySd(settings);
   belief.tick = GetCurrentTick();
   belief.valid = true;
 }
@@ -61,14 +78,14 @@ EnergyEstimate::Belief& EnergyEstimate::Advance(Player& player) {
   if (ticks > kMaxAdvanceTicks) ticks = kMaxAdvanceTicks;
 
   auto& settings = bot.game->connection.settings.ShipSettings[player.ship];
-  float max_energy = (settings.InitialEnergy + settings.MaximumEnergy) / 2.0f;
+  float average_max = AverageMaxEnergy(settings);
 
   if (!InView(player.position)) {
     // Unseen, they could be fighting anyone: drift towards a typical energy, anything from empty to full. The
     // result is the mixture of the old belief and that prior.
     float keep = expf(-ticks / kUnseenTicks);
-    float typical = max_energy * kUnseenTypicalEnergy;
-    float typical_sd = UniformSd(max_energy);
+    float typical = average_max * kUnseenTypicalEnergy;
+    float typical_sd = UniformSd(average_max);
     float mean = keep * belief.mean + (1.0f - keep) * typical;
     float variance = keep * belief.sd * belief.sd + (1.0f - keep) * typical_sd * typical_sd +
                      keep * (1.0f - keep) * (belief.mean - typical) * (belief.mean - typical);
@@ -85,9 +102,9 @@ EnergyEstimate::Belief& EnergyEstimate::Advance(Player& player) {
   belief.sd += recharge_sd * ticks;
 
   // Recharged to full: what's left to doubt is how high full is.
-  if (belief.mean >= max_energy) {
-    belief.mean = max_energy;
-    belief.sd = UniformSd((float)(settings.MaximumEnergy - settings.InitialEnergy));
+  if (belief.mean >= average_max) {
+    belief.mean = average_max;
+    belief.sd = MaxEnergySd(settings);
   }
 
   return belief;
@@ -163,11 +180,11 @@ void EnergyEstimate::HandleEvent(const WeaponHitEvent& event) {
         Player& player = player_manager.players[i];
         if (player.ship >= 8 || player.id == player_manager.player_id) continue;
 
-        float distance = player.position.Distance(weapon.position) / radius;
-        if (distance >= 1.0f) continue;
+        float blast_fraction = player.position.Distance(weapon.position) / radius;
+        if (blast_fraction >= 1.0f) continue;
 
         // Direct, near or glancing: the middle of each third of the blast's falloff.
-        int bucket = (int)(distance * 3.0f);
+        int bucket = (int)(blast_fraction * 3.0f);
         if (bucket > 2) bucket = 2;
         Spend(player, damage * (1.0f - (bucket + 0.5f) / 3.0f), UniformSd(damage / 3.0f));
       }
@@ -187,15 +204,27 @@ void EnergyEstimate::HandleEvent(const WeaponHitEvent& event) {
         if (weapon.data.shrap > 0) damage *= settings.ShrapnelDamagePercent / 1000.0f;
       }
 
-      // Without exact damage, a hit does a random amount up to its damage, two thirds of it on average.
       if (settings.ExactDamage) {
         Spend(*target, damage, 0.0f);
       } else {
-        Spend(*target, damage * 2.0f / 3.0f, damage * 0.24f);
+        Spend(*target, damage * kRandomDamageMean, damage * kRandomDamageSd);
       }
     } break;
     default: {
     } break;
+  }
+}
+
+void EnergyEstimate::HandleEvent(const BotController::UpdateEvent& event) {
+  u32 now = GetCurrentTick();
+  if (TICK_GT(next_advance_tick, now)) return;
+  next_advance_tick = now + kAdvanceInterval;
+
+  auto& player_manager = bot.game->player_manager;
+  for (size_t i = 0; i < player_manager.player_count; ++i) {
+    Player& player = player_manager.players[i];
+    if (player.ship >= 8 || player.id == player_manager.player_id) continue;
+    Advance(player);
   }
 }
 

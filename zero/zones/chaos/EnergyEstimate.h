@@ -1,6 +1,7 @@
 #pragma once
 
 #include <zero/Math.h>
+#include <zero/BotController.h>
 #include <zero/Types.h>
 #include <zero/game/GameEvent.h>
 
@@ -34,7 +35,8 @@ struct EnergyEstimate : EventHandler<WeaponFireEvent>,
                         EventHandler<WeaponHitEvent>,
                         EventHandler<PlayerDeathEvent>,
                         EventHandler<PlayerEnterEvent>,
-                        EventHandler<PlayerFreqAndShipChangeEvent> {
+                        EventHandler<PlayerFreqAndShipChangeEvent>,
+                        EventHandler<BotController::UpdateEvent> {
   struct Reading {
     float energy;
     float sd;
@@ -50,6 +52,8 @@ struct EnergyEstimate : EventHandler<WeaponFireEvent>,
   void HandleEvent(const PlayerDeathEvent& event) override;
   void HandleEvent(const PlayerEnterEvent& event) override;
   void HandleEvent(const PlayerFreqAndShipChangeEvent& event) override;
+  // Advances every belief in short steps, so whether a player was on screen is judged as it happens.
+  void HandleEvent(const BotController::UpdateEvent& event) override;
 
  private:
   struct Belief {
@@ -68,6 +72,7 @@ struct EnergyEstimate : EventHandler<WeaponFireEvent>,
   u32 last_blast_tick = 0;
   u16 last_blast_shooter = 0xFFFF;
   Vector2f last_blast_position;
+  u32 next_advance_tick = 0;
 
   // Resets a player's belief to a freshly spawned ship.
   void Spawn(Player& player);

@@ -8,7 +8,7 @@
 namespace zero {
 namespace chaos {
 
-struct CombatDecision;
+struct CommitDecision;
 struct EnergyEstimate;
 struct PlayerHistory;
 struct TargetLock;
@@ -55,7 +55,7 @@ struct CombatSettings {
   // Hold shots slower than this along the line to the target (tiles/s), except while backing off.
   float min_shot_speed = 0.0f;
 
-  // The commit decision (ticket 05) chooses how to move in a fight, in place of the RushEnemyEnergy and RetreatEnergy
+  // The commit decision chooses how to move in a fight, in place of the RushEnemyEnergy and RetreatEnergy
   // triggers.
   bool commit_decision = false;
   // With the commit decision, shots are chosen by expected value; this is how well the bot judges a shot's chance of
@@ -71,7 +71,7 @@ struct CombatSenses {
   EnergyEstimate& estimate;
   PlayerHistory& history;
   TargetLock& target_lock;
-  CombatDecision& decision;
+  CommitDecision& decision;
 };
 
 std::unique_ptr<behavior::BehaviorNode> CreateCombatTree(const CombatSettings& settings, CombatSenses senses);

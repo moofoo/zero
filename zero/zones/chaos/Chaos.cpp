@@ -60,6 +60,8 @@ constexpr float kTicksPerSecond = 1000.0f / kMsPerTick;
 // no damage between them (seconds).
 constexpr float kDefaultTargetLeashDistance = 120.0f;
 constexpr float kDefaultTargetLockSeconds = 10.0f;
+// How far bots hover from the enemy (tiles) without a LeashDistance.
+constexpr float kDefaultLeashDistance = 35.0f;
 
 // A float from the config, if the key is there.
 static std::optional<float> ReadOptionalFloat(Config& config, const std::string& group, const char* key) {
@@ -118,7 +120,7 @@ struct ChaosBehavior : public behavior::Behavior {
   void OnInitialize(behavior::ExecuteContext& ctx) override {
     // The zone controller sets request_ship from --ship after this.
     ctx.blackboard.Set("request_ship", 0);
-    ctx.blackboard.Set("leash_distance", 35.0f);
+    ctx.blackboard.Set("leash_distance", kDefaultLeashDistance);
 
     // A section with no keys isn't kept by the config loader, so a preset that changes nothing (standard) and a
     // missing one look the same. chaos.py checks the names before starting bots.
@@ -159,7 +161,7 @@ struct ChaosBehavior : public behavior::Behavior {
     settings.hit_box_scale = skill_float("HitBoxScale").value_or(1.0f);
     settings.min_shot_speed = skill_float("MinShotSpeed").value_or(0.0f);
     settings.commit_decision = lookup.GetFloat("CommitDecision").value_or(0.0f) > 0.5f;
-    settings.shot_judgement = lookup.GetFloat("ShotJudgement").value_or(1.0f);
+    settings.shot_judgement = skill_float("ShotJudgement").value_or(1.0f);
     if (engage && !settings.engage_close && std::string_view(*engage) != "range") {
       Log(LogLevel::Warning, "Engage should be range or close, not %s: using range", *engage);
     }
@@ -187,11 +189,12 @@ struct ChaosBehavior : public behavior::Behavior {
         lookup.GetFloat("CommitConfidence").value_or(decision_settings.commit_confidence);
     decision_settings.disengage_confidence =
         lookup.GetFloat("DisengageConfidence").value_or(decision_settings.disengage_confidence);
-    decision_settings.judgement_noise = lookup.GetFloat("JudgementNoise").value_or(0.0f);
-    decision_settings.decision_ticks = (u32)(lookup.GetFloat("DecisionMs").value_or(100.0f) / kMsPerTick);
-    decision_settings.retreat_distance = settings.retreat_distance.value_or(
-        lookup.GetFloat("LeashDistance").value_or(35.0f));
-    decision = std::make_unique<CombatDecision>(*ctx.bot, *estimate, decision_settings);
+    decision_settings.judgement_noise = skill_float("JudgementNoise").value_or(decision_settings.judgement_noise);
+    auto decision_ms = skill_float("DecisionMs");
+    if (decision_ms) decision_settings.decision_ticks = (u32)(*decision_ms / kMsPerTick);
+    auto leash = lookup.GetFloat("LeashDistance");
+    decision_settings.retreat_distance = settings.retreat_distance.value_or(leash.value_or(kDefaultLeashDistance));
+    decision = std::make_unique<CommitDecision>(*ctx.bot, *estimate, decision_settings);
     if (settings.commit_decision) {
       Log(LogLevel::Info, "Commit decision: commit at %.2f, disengage below %.2f, noise %.2f",
           decision_settings.commit_confidence, decision_settings.disengage_confidence,
@@ -249,7 +252,7 @@ struct ChaosBehavior : public behavior::Behavior {
   std::unique_ptr<EnergyEstimate> estimate;
   std::unique_ptr<PlayerHistory> history;
   std::unique_ptr<TargetLock> target_lock;
-  std::unique_ptr<CombatDecision> decision;
+  std::unique_ptr<CommitDecision> decision;
 };
 
 struct ChaosController : ZoneController {

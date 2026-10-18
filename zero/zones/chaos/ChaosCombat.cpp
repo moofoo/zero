@@ -136,7 +136,7 @@ struct EnergyEstimateQueryNode : public behavior::BehaviorNode {
 
 // Runs the commit decision against the target, writes the mode to the blackboard as an int, and logs each change.
 struct CommitDecisionNode : public behavior::BehaviorNode {
-  CommitDecisionNode(CombatDecision* decision, const char* target_key) : decision(decision), target_key(target_key) {}
+  CommitDecisionNode(CommitDecision* decision, const char* target_key) : decision(decision), target_key(target_key) {}
 
   behavior::ExecuteResult Execute(behavior::ExecuteContext& ctx) override {
     Player* self = ctx.bot->game->player_manager.GetSelf();
@@ -153,7 +153,7 @@ struct CommitDecisionNode : public behavior::BehaviorNode {
     return behavior::ExecuteResult::Success;
   }
 
-  CombatDecision* decision;
+  CommitDecision* decision;
   const char* target_key;
   CombatMode logged = CombatMode::Pressure;
   bool logged_once = false;
@@ -314,16 +314,17 @@ struct MinShotSpeedNode : public behavior::BehaviorNode {
   float min_speed;
 };
 
-// Shot choice by expected value (ticket 05b): fire when the shot's chance of hitting times its damage is worth the
-// energy it costs. Energy is cheap with plenty to spare and dear near the reserve the bot's mode needs, and below the
-// reserve no shot is worth it. A shot slower than the weapon's own speed towards the target is less likely to land.
-// A bot that judges shots poorly overestimates their chance, up to double.
+// Shot choice by expected value, with the commit decision: fire when the shot's chance of hitting times its damage is
+// worth the energy it costs. Energy is cheap with plenty to spare and dear near the reserve the bot's mode needs, and
+// below the reserve no shot is worth it. A shot slower than the weapon's own speed towards the target is less likely
+// to land. A bot that judges shots poorly overestimates their chance, up to double.
 struct ShotValueNode : public behavior::BehaviorNode {
   ShotValueNode(WeaponType weapon, const char* velocity_key, float judgement)
       : weapon(weapon), velocity_key(velocity_key), judgement(judgement) {}
 
-  // The share of max energy each mode keeps in reserve: commit, pressure, hold, disengage, recharge.
-  static constexpr float kReserve[] = {0.1f, 0.25f, 0.35f, 0.5f, 0.5f};
+  // The share of max energy each mode keeps in reserve: commit, pressure, hold, disengage, recharge. Backing off keeps
+  // enough for a few cover shots; recharging keeps the most.
+  static constexpr float kReserve[(int)CombatMode::Count] = {0.1f, 0.25f, 0.35f, 0.3f, 0.5f};
   // With this much more than the reserve, energy is at its cheapest; at the reserve, its dearest.
   static constexpr float kPlenty = 0.3f;
   static constexpr float kCheapest = 0.1f;
@@ -357,17 +358,17 @@ struct ShotValueNode : public behavior::BehaviorNode {
       value = BombExpectedDamage(arena.BombDamageLevel / 1000.0f) * speed_factor;
       cost = ship_settings.BombFireEnergy + ship_settings.BombFireEnergyUpgrade * level;
     } else {
-      float level = ship.guns > 0 ? ship.guns - 1.0f : 0.0f;
-      float damage = (arena.BulletDamageLevel + arena.BulletDamageUpgrade * level) / 1000.0f;
+      float guns = ship.guns > 0 ? (float)ship.guns : 1.0f;
       float chance = BulletHitChance(distance) * speed_factor;
-      value = (chance < 1.0f ? chance : 1.0f) * damage;
-      cost = ship_settings.BulletFireEnergy * (level + 1.0f);
+      value = (chance < 1.0f ? chance : 1.0f) * BulletDamage(arena, guns);
+      cost = ship_settings.BulletFireEnergy * guns;
     }
     value *= 2.0f - judgement;  // poor judgement overestimates
 
     // What energy is worth now, from how much the bot has over its mode's reserve.
-    int mode = ctx.blackboard.ValueOr<int>("combat_mode", 1);
-    float reserve = kReserve[mode >= 0 && mode < 5 ? mode : 1];
+    int mode = ctx.blackboard.ValueOr<int>("combat_mode", (int)CombatMode::Pressure);
+    if (mode < 0 || mode >= (int)CombatMode::Count) mode = (int)CombatMode::Pressure;
+    float reserve = kReserve[mode];
     float spare = self->energy / (float)ship.energy - reserve;
     if (spare <= 0.0f) return behavior::ExecuteResult::Failure;
     float worth = spare >= kPlenty ? kCheapest : kDearest + (kCheapest - kDearest) * (spare / kPlenty);
@@ -387,15 +388,23 @@ static std::unique_ptr<behavior::BehaviorNode> CreateDodge(const CombatSettings&
   using namespace behavior;
   if (!settings.dodge_threshold) return std::make_unique<FailureNode>();
 
-  // Without a rush threshold, no enemy is low enough to stay on.
-  float rush_enemy_energy = settings.rush_enemy_energy.value_or(0.0f);
+  // Stay on them instead: with the commit decision, while committing; without it, when the enemy is below the rush
+  // threshold (without one, no enemy is low enough).
+  std::unique_ptr<BehaviorNode> pressing;
+  if (settings.commit_decision) {
+    pressing = std::make_unique<CombatModeIsNode>(CombatMode::Commit);
+  } else {
+    float rush_enemy_energy = settings.rush_enemy_energy.value_or(0.0f);
+    pressing = std::make_unique<InvertNode>(
+        std::make_unique<ScalarThresholdNode<float>>("nearest_target_energy", rush_enemy_energy));
+  }
   BehaviorBuilder builder;
 
   // clang-format off
   builder
     .Sequence()
         .Sequence(CompositeDecorator::Invert)
-            .InvertChild<ScalarThresholdNode<float>>("nearest_target_energy", rush_enemy_energy)
+            .Composite(std::move(pressing))
             .InvertChild<DistanceThresholdNode>("nearest_target_position", "self_position", kNearbyEnemyThreshold)
             .End()
         .Child<DodgeIncomingDamage>(*settings.dodge_threshold, 35.0f)
@@ -468,7 +477,8 @@ static std::unique_ptr<behavior::BehaviorNode> CreateModeMovement(const CombatSe
 
   std::unique_ptr<BehaviorNode> back_off;
   if (settings.retreat_distance) {
-    back_off = std::make_unique<SeekNode>("aimshot", *settings.retreat_distance, SeekNode::DistanceResolveType::Dynamic);
+    float distance = *settings.retreat_distance;
+    back_off = std::make_unique<SeekNode>("aimshot", distance, SeekNode::DistanceResolveType::Dynamic);
   } else {
     back_off = std::make_unique<SeekNode>("aimshot", "leash_distance", SeekNode::DistanceResolveType::Dynamic);
   }
@@ -579,7 +589,8 @@ static std::unique_ptr<behavior::BehaviorNode> CreateMovement(const CombatSettin
 }
 
 // The commit decision, when it's on. Always succeeds.
-static std::unique_ptr<behavior::BehaviorNode> CreateDecision(const CombatSettings& settings, CombatDecision& decision) {
+static std::unique_ptr<behavior::BehaviorNode> CreateDecision(const CombatSettings& settings,
+                                                              CommitDecision& decision) {
   if (!settings.commit_decision) return std::make_unique<PassNode>();
 
   return std::make_unique<CommitDecisionNode>(&decision, "nearest_target");
@@ -666,24 +677,13 @@ static std::unique_ptr<behavior::BehaviorNode> CreateEnergyFloor(const CombatSet
   return builder.Build();
 }
 
-// Whether a shot is worth taking: by expected value with the commit decision (cover shots while backing off always
-// are), else the minimum shot speed check.
+// Whether a shot is worth taking: by expected value with the commit decision (which also keeps the energy a backing
+// off or recharging bot needs), else the minimum shot speed check.
 static std::unique_ptr<behavior::BehaviorNode> CreateShotChoice(const CombatSettings& settings, WeaponType weapon,
                                                                 const char* velocity_key) {
-  using namespace behavior;
   if (!settings.commit_decision) return CreateShotSpeedCheck(settings, velocity_key);
 
-  BehaviorBuilder builder;
-
-  // clang-format off
-  builder
-    .Selector()
-        .Child<BlackboardSetQueryNode>("backing_off")
-        .Child<ShotValueNode>(weapon, velocity_key, settings.shot_judgement)
-        .End();
-  // clang-format on
-
-  return builder.Build();
+  return std::make_unique<ShotValueNode>(weapon, velocity_key, settings.shot_judgement);
 }
 
 // Bomb only into enough of our own bullet damage already heading at the target. Succeeds when that's the case, or

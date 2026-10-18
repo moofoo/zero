@@ -79,15 +79,18 @@ static int GetRequestedShip(ZeroBot& bot) {
   return ship >= 0 && ship < (int)ZERO_ARRAY_SIZE(kShipNames) ? ship : -1;
 }
 
-// Looks a setting up in the bot's aggression preset, then its ship's section, then [Chaos] (every bot's).
+// Looks a setting up in the bot's skill level, then its aggression preset, then its ship's section, then [Chaos]
+// (every bot's). A skill level can so override any style key, e.g. a veteran's own RetreatEnergy.
 struct SettingLookup {
   Config& config;
+  std::string skill_group;
   std::string preset_group;
   std::string ship_group;
 
   std::optional<const char*> Get(const char* key) const {
     std::optional<const char*> value;
-    if (!preset_group.empty()) value = config.GetString(preset_group, key);
+    if (!skill_group.empty()) value = config.GetString(skill_group, key);
+    if (!value && !preset_group.empty()) value = config.GetString(preset_group, key);
     if (!value && !ship_group.empty()) value = config.GetString(ship_group, key);
     if (!value) value = config.GetString(to_string(Zone::Chaos), key);
     return value;
@@ -117,12 +120,12 @@ struct ChaosBehavior : public behavior::Behavior {
     int ship = GetRequestedShip(*ctx.bot);
     std::string ship_group;
     if (ship >= 0 && ship < (int)ZERO_ARRAY_SIZE(kShipNames)) ship_group = std::string("Ship.") + kShipNames[ship];
-    SettingLookup lookup{config, preset.empty() ? std::string() : "Aggression." + preset, ship_group};
-    if (!preset.empty()) Log(LogLevel::Info, "Aggression preset: %s", preset.c_str());
-
-    // Skill: how well the bot plays, from its [Skill.<name>] section only. Without one, aim and reactions are perfect.
+    // Skill: how well the bot plays. Its skill keys come from its [Skill.<name>] section only; without one, aim and
+    // reactions are perfect. The section can also set style keys, which win over the preset's and ship's.
     std::string skill(ctx.bot->args->GetValue({"skill"}));
     std::string skill_group = skill.empty() ? std::string() : "Skill." + skill;
+    SettingLookup lookup{config, skill_group, preset.empty() ? std::string() : "Aggression." + preset, ship_group};
+    if (!preset.empty()) Log(LogLevel::Info, "Aggression preset: %s", preset.c_str());
     auto skill_float = [&](const char* key) -> std::optional<float> {
       if (skill_group.empty()) return {};
       return ReadOptionalFloat(config, skill_group, key);
@@ -164,8 +167,7 @@ struct ChaosBehavior : public behavior::Behavior {
     ctx.blackboard.Set("weapon_reaction_ticks", settings.reaction_ticks);
     ctx.blackboard.Set("weapon_notice", skill_float("NoticeWeapon").value_or(1.0f));
 
-    // The skill level's attention wins over the preset's or ship's.
-    float attention = skill_float("Attention").value_or(lookup.GetFloat("Attention").value_or(kDefaultAttention));
+    float attention = lookup.GetFloat("Attention").value_or(kDefaultAttention);
     estimate = std::make_unique<EnergyEstimate>(*ctx.bot, attention, view_extent);
     history = std::make_unique<PlayerHistory>(*ctx.bot);
     Log(LogLevel::Info, "View %dx%d, attention %.2f", view_width, view_height, attention);

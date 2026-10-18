@@ -2,6 +2,7 @@
 
 #include "EnergyEstimate.h"
 #include "PlayerHistory.h"
+#include "TargetLock.h"
 
 #include <zero/behavior/BehaviorBuilder.h>
 #include <zero/behavior/BehaviorTree.h>
@@ -18,6 +19,7 @@
 #include <zero/behavior/nodes/TimerNode.h>
 #include <zero/behavior/nodes/WaypointNode.h>
 #include <zero/CombatLogger.h>
+#include <zero/RegionRegistry.h>
 #include <zero/ZeroBot.h>
 #include <zero/zones/svs/nodes/BurstAreaQueryNode.h>
 #include <zero/zones/svs/nodes/DynamicPlayerBoundingBoxQueryNode.h>
@@ -129,6 +131,44 @@ struct EnergyEstimateQueryNode : public behavior::BehaviorNode {
   const char* player_key;
   const char* energy_key;
   const char* sd_key;
+};
+
+// Chooses the bot's target through its target lock, from the enemies it could fight: in a ship, not respawning, not
+// in a safe zone, reachable over the map, and not vanished from where it was last seen (as NearestMemoryTargetNode).
+struct LockedTargetNode : public behavior::BehaviorNode {
+  LockedTargetNode(TargetLock* lock, const char* player_key) : lock(lock), player_key(player_key) {}
+
+  behavior::ExecuteResult Execute(behavior::ExecuteContext& ctx) override {
+    Game& game = *ctx.bot->game;
+    Player* self = game.player_manager.GetSelf();
+    if (!self) return behavior::ExecuteResult::Failure;
+
+    candidates.clear();
+    for (size_t i = 0; i < game.player_manager.player_count; ++i) {
+      Player* player = game.player_manager.players + i;
+
+      if (player->ship >= 8) continue;
+      if (player->frequency == self->frequency) continue;
+      if (player->IsRespawning()) continue;
+      if (player->position == Vector2f(0, 0)) continue;
+      // In view but sending nothing: they left where they were last seen.
+      if (game.radar.InRadarView(player->position) && !game.player_manager.IsSynchronized(*player)) continue;
+      if (!ctx.bot->bot_controller->region_registry->IsConnected(self->position, player->position)) continue;
+      if (game.connection.map.GetTileId(player->position) == kTileIdSafe) continue;
+
+      candidates.push_back(player);
+    }
+
+    Player* target = lock->Choose(candidates);
+    if (!target) return behavior::ExecuteResult::Failure;
+
+    ctx.blackboard.Set(player_key, target);
+    return behavior::ExecuteResult::Success;
+  }
+
+  TargetLock* lock;
+  const char* player_key;
+  std::vector<Player*> candidates;
 };
 
 // Aims at the target as the bot saw it `delay` ticks ago: a player's reaction time.
@@ -445,8 +485,7 @@ static std::unique_ptr<behavior::BehaviorNode> CreateBombOverlapCheck(const Comb
   return builder.Build();
 }
 
-std::unique_ptr<behavior::BehaviorNode> CreateCombatTree(const CombatSettings& settings, EnergyEstimate& estimate,
-                                                         PlayerHistory& history) {
+std::unique_ptr<behavior::BehaviorNode> CreateCombatTree(const CombatSettings& settings, CombatSenses senses) {
   using namespace behavior;
 
   BehaviorBuilder builder;
@@ -470,9 +509,9 @@ std::unique_ptr<behavior::BehaviorNode> CreateCombatTree(const CombatSettings& s
             .Sequence() // Find nearest target and either path to them or seek them directly.
                 .Sequence()
                     .Child<PlayerPositionQueryNode>("self_position")
-                    .Child<NearestMemoryTargetNode>("nearest_target")
+                    .Child<LockedTargetNode>(&senses.target_lock, "nearest_target")
                     .Child<PlayerPositionQueryNode>("nearest_target", "nearest_target_position")
-                    .Child<EnergyEstimateQueryNode>(&estimate, "nearest_target", "nearest_target_energy", "nearest_target_energy_sd")
+                    .Child<EnergyEstimateQueryNode>(&senses.estimate, "nearest_target", "nearest_target_energy", "nearest_target_energy_sd")
                     .End()
                 .Sequence(CompositeDecorator::Success) // If we have a portal but no location, lay one down.
                     .Child<ShipItemCountThresholdNode>(ShipItemType::Portal, 1)
@@ -542,7 +581,7 @@ std::unique_ptr<behavior::BehaviorNode> CreateCombatTree(const CombatSettings& s
                             .End()
                         .End()
                     .Sequence() // Aim at target and shoot while moving.
-                        .Composite(CreateAim(settings, history))
+                        .Composite(CreateAim(settings, senses.history))
                         .Composite(CreateShotSpread(settings))
                         .Composite(CreateAimError(settings))
                         .Parallel()

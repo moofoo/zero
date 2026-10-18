@@ -148,6 +148,21 @@ void CombatLogger::WriteEstimate(const char* target, float energy, float sd, flo
   fflush(file);
 }
 
+void CombatLogger::WriteTarget(const char* target, const char* reason) {
+  if (!file) return;
+
+  fprintf(file, "{\"e\":\"target\",\"tick\":%u,\"target\":", ServerTick());
+  if (target) {
+    WriteJsonString(file, target);
+  } else {
+    fprintf(file, "null");
+  }
+  fprintf(file, ",\"reason\":");
+  WriteJsonString(file, reason);
+  fprintf(file, "}\n");
+  fflush(file);
+}
+
 void CombatLogger::HandleEvent(const WeaponFireEvent& event) {
   if (!file || !bot.game) return;
   Game& game = *bot.game;

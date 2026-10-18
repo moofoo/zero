@@ -90,6 +90,7 @@
     <ClCompile Include="zero\zones\chaos\ChaosCombat.cpp" />
     <ClCompile Include="zero\zones\chaos\EnergyEstimate.cpp" />
     <ClCompile Include="zero\zones\chaos\PlayerHistory.cpp" />
+    <ClCompile Include="zero\zones\chaos\TargetLock.cpp" />
     <ClCompile Include="zero\zones\devastation\BaseManager.cpp" />
     <ClCompile Include="zero\zones\devastation\base\TestBehavior.cpp" />
     <ClCompile Include="zero\zones\devastation\center\CenterBehavior.cpp" />
@@ -295,6 +296,7 @@
     <ClInclude Include="zero\zones\chaos\ChaosCombat.h" />
     <ClInclude Include="zero\zones\chaos\EnergyEstimate.h" />
     <ClInclude Include="zero\zones\chaos\PlayerHistory.h" />
+    <ClInclude Include="zero\zones\chaos\TargetLock.h" />
     <ClInclude Include="zero\zones\svs\TerrierBehavior.h" />
     <ClInclude Include="zero\zones\svs\WarbirdBehavior.h" />
     <ClInclude Include="zero\zones\svs\WarzoneBehavior.h" />

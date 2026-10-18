@@ -11,6 +11,7 @@
 #include <zero/zones/chaos/ChaosCombat.h>
 #include <zero/zones/chaos/EnergyEstimate.h>
 #include <zero/zones/chaos/PlayerHistory.h>
+#include <zero/zones/chaos/TargetLock.h>
 
 #include <memory>
 #include <optional>
@@ -53,6 +54,10 @@ constexpr int kDefaultViewWidth = 1920;
 constexpr int kDefaultViewHeight = 1080;
 // Milliseconds in a game tick.
 constexpr float kMsPerTick = 10.0f;
+// Target stickiness: a bot lets go of the enemy it's fighting beyond this distance (tiles), or after this long with
+// no damage between them (seconds).
+constexpr float kDefaultTargetLeashDistance = 120.0f;
+constexpr float kDefaultTargetLockSeconds = 10.0f;
 
 // A float from the config, if the key is there.
 static std::optional<float> ReadOptionalFloat(Config& config, const std::string& group, const char* key) {
@@ -170,6 +175,9 @@ struct ChaosBehavior : public behavior::Behavior {
     float attention = lookup.GetFloat("Attention").value_or(kDefaultAttention);
     estimate = std::make_unique<EnergyEstimate>(*ctx.bot, attention, view_extent);
     history = std::make_unique<PlayerHistory>(*ctx.bot);
+    float target_leash = lookup.GetFloat("TargetLeashDistance").value_or(kDefaultTargetLeashDistance);
+    float target_lock_seconds = lookup.GetFloat("TargetLockSeconds").value_or(kDefaultTargetLockSeconds);
+    target_lock = std::make_unique<TargetLock>(*ctx.bot, target_leash, (u32)(target_lock_seconds * 100.0f));
     Log(LogLevel::Info, "View %dx%d, attention %.2f", view_width, view_height, attention);
 
     auto leash_distance = lookup.GetFloat("LeashDistance");
@@ -208,7 +216,7 @@ struct ChaosBehavior : public behavior::Behavior {
               .Child<TimerSetNode>("next_freq_change_tick", 300)
               .Child<PlayerChangeFrequencyNode>("request_freq")
               .End()
-          .Composite(CreateCombatTree(settings, *estimate, *history))
+          .Composite(CreateCombatTree(settings, {*estimate, *history, *target_lock}))
           .End();
     // clang-format on
 
@@ -218,6 +226,7 @@ struct ChaosBehavior : public behavior::Behavior {
   CombatSettings settings;
   std::unique_ptr<EnergyEstimate> estimate;
   std::unique_ptr<PlayerHistory> history;
+  std::unique_ptr<TargetLock> target_lock;
 };
 
 struct ChaosController : ZoneController {

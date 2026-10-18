@@ -10,6 +10,7 @@ namespace chaos {
 
 struct EnergyEstimate;
 struct PlayerHistory;
+struct TargetLock;
 
 // How a Chaos bot fights. Every ship flies the same combat tree; these settings decide its style. Chaos reads them
 // from the bot's aggression preset ([Aggression.<name>], chosen with --aggression), then its ship's section
@@ -55,10 +56,16 @@ struct CombatSettings {
 };
 
 // The tree every Chaos bot flies: enter its ship, then fight the nearest enemy, or else chase greens, or else
-// patrol the waypoints. Enemy energy comes only from the estimate, and with a reaction time the target's movement
-// from the history; both must outlive the tree.
-std::unique_ptr<behavior::BehaviorNode> CreateCombatTree(const CombatSettings& settings, EnergyEstimate& estimate,
-                                                         PlayerHistory& history);
+// patrol the waypoints.
+// What the bot knows and remembers, which must outlive the tree: enemy energy only from the estimate, with a reaction
+// time the target's movement from the history, and whom it's fighting from the target lock.
+struct CombatSenses {
+  EnergyEstimate& estimate;
+  PlayerHistory& history;
+  TargetLock& target_lock;
+};
+
+std::unique_ptr<behavior::BehaviorNode> CreateCombatTree(const CombatSettings& settings, CombatSenses senses);
 
 }  // namespace chaos
 }  // namespace zero

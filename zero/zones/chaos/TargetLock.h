@@ -1,0 +1,67 @@
+#pragma once
+
+#include <zero/Types.h>
+#include <zero/game/GameEvent.h>
+
+#include <deque>
+#include <string_view>
+#include <unordered_map>
+#include <vector>
+
+namespace zero {
+
+struct Player;
+struct ZeroBot;
+
+namespace chaos {
+
+// Which enemy a Chaos bot fights. Like a player, once damage passes between the bot and an enemy (either way), the
+// bot locks onto that enemy and keeps after it even if another comes closer, including after being repelled away.
+// It lets go when the enemy:
+// - is gone (dead, respawning, spectating, in a safe zone, unreachable)
+// - is further away than the leash distance
+// - has traded no damage with it for the lock time
+// - or when another enemy hits it hard (30% of its max energy within 3 seconds), which takes over the lock
+// - or when it had to repel mostly the locked enemy's weapons: then it picks another target and ignores that enemy
+//   for a few seconds.
+// Without a lock, the target is the nearest enemy.
+struct TargetLock : EventHandler<WeaponSelfDamageEvent>, EventHandler<WeaponHitEvent>, EventHandler<WeaponFireEvent> {
+  TargetLock(ZeroBot& bot, float leash_distance, u32 lock_ticks);
+
+  // This tick's target among the enemies the bot could fight, or null when there are none.
+  Player* Choose(const std::vector<Player*>& candidates);
+
+  void HandleEvent(const WeaponSelfDamageEvent& event) override;
+  void HandleEvent(const WeaponHitEvent& event) override;
+  void HandleEvent(const WeaponFireEvent& event) override;
+
+ private:
+  struct Hit {
+    u32 tick;
+    int damage;
+  };
+
+  ZeroBot& bot;
+  float leash_distance;
+  u32 lock_ticks;
+
+  static constexpr u16 kNone = 0xFFFF;
+  u16 locked = kNone;
+  u16 current = kNone;
+  // Why the target changes next, for the log; "nearest" unless something else happened.
+  const char* reason = "nearest";
+
+  // When damage last passed between the bot and each player, either way.
+  std::unordered_map<u16, u32> last_contact;
+  // Damage each player did to the bot recently.
+  std::unordered_map<u16, std::deque<Hit>> damage_taken;
+  // Players the bot won't lock onto or target until a tick, after it had to repel them.
+  std::unordered_map<u16, u32> ignore_until;
+
+  void Release(const char* why);
+  bool Ignored(u16 id, u32 now) const;
+  int RecentDamage(u16 id, u32 now);
+};
+
+}  // namespace chaos
+}  // namespace zero

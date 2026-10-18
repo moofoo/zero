@@ -29,6 +29,9 @@ struct CombatLogger : EventHandler<WeaponFireEvent>,
   // Call as often as the estimate is read; it's written at most twice a second.
   void WriteEstimate(const char* target, float energy, float sd, float heuristic);
 
+  // The bot's target changed (null: no target), and why.
+  void WriteTarget(const char* target, const char* reason);
+
   void HandleEvent(const WeaponFireEvent& event) override;
   void HandleEvent(const WeaponSelfDamageEvent& event) override;
   void HandleEvent(const WeaponHitEvent& event) override;

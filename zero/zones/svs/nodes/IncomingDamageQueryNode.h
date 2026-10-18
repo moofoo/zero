@@ -54,7 +54,7 @@ struct IncomingDamageQueryNode : public behavior::BehaviorNode {
 
     // The weapons the bot can see are those on its own screen, even when checking damage heading at another player.
     Player* self = ctx.bot->game->player_manager.GetSelf();
-    behavior::WeaponView view(ctx, self ? self->position : player->position);
+    behavior::WeaponView view(ctx, self ? *self : *player);
 
     auto& weapon_man = ctx.bot->game->weapon_manager;
     for (size_t i = 0; i < weapon_man.weapon_count; ++i) {

@@ -105,7 +105,7 @@ struct DodgeIncomingDamage : public behavior::BehaviorNode {
     float average_damage = 0.0f;
     size_t incoming_count = 0;
 
-    WeaponView view(ctx, self->position);
+    WeaponView view(ctx, *self);
 
     auto& weapon_man = ctx.bot->game->weapon_manager;
     for (size_t i = 0; i < weapon_man.weapon_count; ++i) {
@@ -564,7 +564,7 @@ struct PositionThreatQueryNode : public BehaviorNode {
 
     links.clear();
 
-    WeaponView view(ctx, self->position);
+    WeaponView view(ctx, *self);
 
     for (size_t i = 0; i < weapon_manager.weapon_count; ++i) {
       Weapon& weapon = weapon_manager.weapons[i];

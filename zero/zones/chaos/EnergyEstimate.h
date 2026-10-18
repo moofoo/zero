@@ -25,7 +25,8 @@ namespace chaos {
 //   average maximum, with the deviation growing by the spread of recharge rates.
 // - Over time, while off screen: they could be fighting anyone, so the estimate relaxes towards a typical energy
 //   (60% of the average maximum) with the widest deviation, over a few seconds.
-// - Shots and hits: only those on the bot's screen, and each noticed with probability `attention`. A noticed shot
+// - Shots and hits: only those on the bot's screen, each noticed with probability `attention` at the screen's centre,
+//   falling to half that at its edge. A noticed shot
 //   costs its weapon's fire cost (with a little noise, as a player judges it); a noticed hit costs a coarse amount
 //   (a bullet; a bomb direct, near or glancing) and widens the deviation. Knowing they miss some, the bot counts
 //   each noticed event for 1/attention of itself, with the extra deviation that guess carries, so low attention
@@ -80,10 +81,13 @@ struct EnergyEstimate : EventHandler<WeaponFireEvent>,
   Belief& Advance(Player& player);
   // Whether a position is on the bot's screen.
   bool InView(Vector2f position);
-  // Whether the bot sees and notices something happening at this position.
-  bool Notices(Vector2f position);
-  // Takes a noticed amount of energy off a player's belief.
-  void Spend(Player& player, float amount, float amount_sd);
+  // The chance the bot notices something happening at this position: 0 off screen.
+  float NoticeChance(Vector2f position);
+  // Whether it does, this time; `chance` is set to the chance it had.
+  bool Notices(Vector2f position, float& chance);
+  // Takes a noticed amount of energy off a player's belief. The bot noticed it with this chance, so counts it for
+  // what it probably missed too.
+  void Spend(Player& player, float amount, float amount_sd, float chance);
 };
 
 }  // namespace chaos

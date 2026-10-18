@@ -126,6 +126,47 @@ struct ShotVelocityQueryNode : public BehaviorNode {
   WeaponType weapon_type;
 };
 
+// Where to aim a weapon at a target with this position and velocity: a lead on its path, or the target itself when
+// there's no good lead.
+inline Vector2f CalculateAimshot(Game& game, Player& self, WeaponType weapon_type, Vector2f target_position,
+                                 Vector2f target_velocity) {
+  float weapon_speed = GetWeaponSpeed(game, self, weapon_type);
+  Vector2f weapon_velocity = self.velocity + self.GetHeading() * weapon_speed;
+
+  Vector2f direction = Normalize(target_position - self.position);
+  float away_amount = target_velocity.Dot(direction);
+
+  // If the enemy is moving away too fast, ignore the away movement for this calculation.
+  if (away_amount > weapon_speed) {
+    // Remove the "away" velocity from the target so it's only moving side to side.
+    target_velocity = target_velocity - direction * away_amount;
+  }
+
+  std::optional<Vector2f> calculated_shot =
+      CalculateShot(self.position, target_position, self.velocity, target_velocity, weapon_velocity.Length());
+
+  // Default to target's position if the calculated shot fails.
+  Vector2f aimshot = target_position;
+
+  if (calculated_shot.has_value()) {
+    aimshot = *calculated_shot;
+
+    constexpr float kFarDistance = 50.0f;
+
+    // Set the aimshot directly to the player position if it is too far away.
+    if (aimshot.DistanceSq(target_position) > kFarDistance * kFarDistance) {
+      aimshot = target_position;
+    }
+
+    // If the aimshot is behind us but the target isn't, just shoot at the target.
+    if ((aimshot - self.position).Dot(target_position - self.position) < 0.0f) {
+      aimshot = target_position;
+    }
+  }
+
+  return aimshot;
+}
+
 struct AimNode : public BehaviorNode {
   AimNode(WeaponType weapon_type, const char* target_player_key, const char* position_key)
       : weapon_type(weapon_type), target_player_key(target_player_key), position_key(position_key) {}
@@ -140,41 +181,7 @@ struct AimNode : public BehaviorNode {
     Player* target = opt_target.value();
     if (!target) return ExecuteResult::Failure;
 
-    float weapon_speed = GetWeaponSpeed(*ctx.bot->game, *self, weapon_type);
-    Vector2f weapon_velocity = self->velocity + self->GetHeading() * weapon_speed;
-
-    Vector2f direction = Normalize(target->position - self->position);
-    float away_amount = target->velocity.Dot(direction);
-
-    Vector2f target_velocity = target->velocity;
-    // If the enemy is moving away too fast, ignore the away movement for this calculation.
-    if (away_amount > weapon_speed) {
-      // Remove the "away" velocity from the target so it's only moving side to side.
-      target_velocity = target->velocity - direction * away_amount;
-    }
-
-    std::optional<Vector2f> calculated_shot =
-        CalculateShot(self->position, target->position, self->velocity, target_velocity, weapon_velocity.Length());
-
-    // Default to target's position if the calculated shot fails.
-    Vector2f aimshot = target->position;
-
-    if (calculated_shot.has_value()) {
-      aimshot = *calculated_shot;
-
-      constexpr float kFarDistance = 50.0f;
-
-      // Set the aimshot directly to the player position if it is too far away.
-      if (aimshot.DistanceSq(target->position) > kFarDistance * kFarDistance) {
-        aimshot = target->position;
-      }
-
-      // If the aimshot is behind us but the target isn't, just shoot at the target.
-      if ((aimshot - self->position).Dot(target->position - self->position) < 0.0f) {
-        aimshot = target->position;
-      }
-    }
-
+    Vector2f aimshot = CalculateAimshot(*ctx.bot->game, *self, weapon_type, target->position, target->velocity);
     ctx.blackboard.Set(position_key, aimshot);
 
     return ExecuteResult::Success;

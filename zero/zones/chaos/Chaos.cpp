@@ -10,6 +10,7 @@
 #include <zero/zones/ZoneController.h>
 #include <zero/zones/chaos/ChaosCombat.h>
 #include <zero/zones/chaos/EnergyEstimate.h>
+#include <zero/zones/chaos/PlayerHistory.h>
 
 #include <memory>
 #include <optional>
@@ -116,6 +117,15 @@ struct ChaosBehavior : public behavior::Behavior {
                          ship >= 0 && ship < (int)ZERO_ARRAY_SIZE(kShipNames) ? std::string("Ship.") + kShipNames[ship] : std::string()};
     if (!preset.empty()) Log(LogLevel::Info, "Aggression preset: %s", preset.c_str());
 
+    // Skill: how well the bot plays, from its [Skill.<name>] section only. Without one, aim and reactions are perfect.
+    std::string skill(ctx.bot->args->GetValue({"skill"}));
+    std::string skill_group = skill.empty() ? std::string() : "Skill." + skill;
+    auto skill_float = [&](const char* key) -> std::optional<float> {
+      if (skill_group.empty()) return {};
+      return ReadOptionalFloat(config, skill_group, key);
+    };
+    if (!skill.empty()) Log(LogLevel::Info, "Skill: %s", skill.c_str());
+
     settings = CombatSettings();
     settings.bomb_energy = lookup.GetFloat("BombEnergy");
     settings.bullet_energy = lookup.GetFloat("BulletEnergy");
@@ -130,6 +140,11 @@ struct ChaosBehavior : public behavior::Behavior {
     settings.shot_spread_range = lookup.GetFloat("ShotSpreadRange");
     auto engage = lookup.Get("Engage");
     settings.engage_close = engage && std::string_view(*engage) == "close";
+    // Reaction time in milliseconds, as ticks.
+    settings.reaction_ticks = (int)(skill_float("ReactionMs").value_or(0.0f) / 10.0f);
+    settings.aim_error = skill_float("AimError").value_or(0.0f);
+    settings.hit_box_scale = skill_float("HitBoxScale").value_or(1.0f);
+    settings.min_shot_speed = skill_float("MinShotSpeed").value_or(0.0f);
     if (engage && !settings.engage_close && std::string_view(*engage) != "range") {
       Log(LogLevel::Warning, "Engage should be range or close, not %s: using range", *engage);
     }
@@ -142,8 +157,14 @@ struct ChaosBehavior : public behavior::Behavior {
     Vector2f view_extent(view_width / 16.0f / 2.0f, view_height / 16.0f / 2.0f);
     ctx.blackboard.Set("view_extent", view_extent);
 
-    float attention = lookup.GetFloat("Attention").value_or(kDefaultAttention);
+    // Weapons count only once they've existed for the reaction time, and if noticed.
+    ctx.blackboard.Set("weapon_reaction_ticks", settings.reaction_ticks);
+    ctx.blackboard.Set("weapon_notice", skill_float("NoticeWeapon").value_or(1.0f));
+
+    // The skill level's attention wins over the preset's or ship's.
+    float attention = skill_float("Attention").value_or(lookup.GetFloat("Attention").value_or(kDefaultAttention));
     estimate = std::make_unique<EnergyEstimate>(*ctx.bot, attention, view_extent);
+    history = std::make_unique<PlayerHistory>(*ctx.bot);
     Log(LogLevel::Info, "View %dx%d, attention %.2f", view_width, view_height, attention);
 
     auto leash_distance = lookup.GetFloat("LeashDistance");
@@ -187,7 +208,7 @@ struct ChaosBehavior : public behavior::Behavior {
               .Child<TimerSetNode>("next_freq_change_tick", 300)
               .Child<PlayerChangeFrequencyNode>("request_freq")
               .End()
-          .Composite(CreateCombatTree(settings, *estimate))
+          .Composite(CreateCombatTree(settings, *estimate, *history))
           .End();
     // clang-format on
 
@@ -196,6 +217,7 @@ struct ChaosBehavior : public behavior::Behavior {
 
   CombatSettings settings;
   std::unique_ptr<EnergyEstimate> estimate;
+  std::unique_ptr<PlayerHistory> history;
 };
 
 struct ChaosController : ZoneController {

@@ -9,6 +9,7 @@ namespace zero {
 namespace chaos {
 
 struct EnergyEstimate;
+struct PlayerHistory;
 
 // How a Chaos bot fights. Every ship flies the same combat tree; these settings decide its style. Chaos reads them
 // from the bot's aggression preset ([Aggression.<name>], chosen with --aggression), then its ship's section
@@ -39,11 +40,24 @@ struct CombatSettings {
   std::optional<float> shot_spread_range;
   // Close in on the target, rather than hovering at the leash distance.
   bool engage_close = false;
+
+  // Skill (a [Skill.<name>] section, chosen with --skill). The defaults are today's bots: perfect aim, instant
+  // reactions.
+  // Aim at the target as seen this many ticks ago (weapons get the same delay through the view).
+  int reaction_ticks = 0;
+  // Aim drifts off target by about this many degrees.
+  float aim_error = 0.0f;
+  // Scale of the box a shot's path must cross to be fired; larger takes more low-percentage shots.
+  float hit_box_scale = 1.0f;
+  // Hold shots slower than this along the line to the target (tiles/s), except while backing off.
+  float min_shot_speed = 0.0f;
 };
 
 // The tree every Chaos bot flies: enter its ship, then fight the nearest enemy, or else chase greens, or else
-// patrol the waypoints. Enemy energy comes only from the estimate, which must outlive the tree.
-std::unique_ptr<behavior::BehaviorNode> CreateCombatTree(const CombatSettings& settings, EnergyEstimate& estimate);
+// patrol the waypoints. Enemy energy comes only from the estimate, and with a reaction time the target's movement
+// from the history; both must outlive the tree.
+std::unique_ptr<behavior::BehaviorNode> CreateCombatTree(const CombatSettings& settings, EnergyEstimate& estimate,
+                                                         PlayerHistory& history);
 
 }  // namespace chaos
 }  // namespace zero

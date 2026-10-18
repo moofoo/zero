@@ -118,19 +118,28 @@ bool EnergyEstimate::InView(Vector2f position) {
   return fabsf(delta.x) <= view_extent.x && fabsf(delta.y) <= view_extent.y;
 }
 
-bool EnergyEstimate::Notices(Vector2f position) {
-  if (!InView(position)) return false;
+float EnergyEstimate::NoticeChance(Vector2f position) {
+  Player* self = bot.game->player_manager.GetSelf();
+  if (!self || self->ship >= 8 || !InView(position)) return 0.0f;
 
-  return std::uniform_real_distribution<float>(0.0f, 1.0f)(random) < attention;
+  // Half as likely at the screen's edge as at its centre.
+  Vector2f delta = position - self->position;
+  float edge = fmaxf(fabsf(delta.x) / view_extent.x, fabsf(delta.y) / view_extent.y);
+  return attention * (1.0f - 0.5f * edge);
 }
 
-void EnergyEstimate::Spend(Player& player, float amount, float amount_sd) {
+bool EnergyEstimate::Notices(Vector2f position, float& chance) {
+  chance = NoticeChance(position);
+  return chance > 0.0f && std::uniform_real_distribution<float>(0.0f, 1.0f)(random) < chance;
+}
+
+void EnergyEstimate::Spend(Player& player, float amount, float amount_sd, float chance) {
   Belief& belief = Advance(player);
 
-  // For each event noticed, about 1/attention happened (the count of those missed is geometric).
-  if (attention > 0.0f && attention < 1.0f) {
-    float missed_sd = amount * sqrtf(1.0f - attention) / attention;
-    amount /= attention;
+  // For each event noticed, about 1/chance happened (the count of those missed is geometric).
+  if (chance > 0.0f && chance < 1.0f) {
+    float missed_sd = amount * sqrtf(1.0f - chance) / chance;
+    amount /= chance;
     amount_sd = sqrtf(amount_sd * amount_sd + missed_sd * missed_sd);
   }
 
@@ -142,13 +151,14 @@ void EnergyEstimate::Spend(Player& player, float amount, float amount_sd) {
 void EnergyEstimate::HandleEvent(const WeaponFireEvent& event) {
   Player& player = event.player;
   if (player.ship >= 8 || player.id == bot.game->player_manager.player_id) return;
-  if (!Notices(player.position)) return;
+  float chance;
+  if (!Notices(player.position, chance)) return;
 
   float cost = (float)GetWeaponFireCost(bot.game->connection.settings.ShipSettings[player.ship], event.data);
   if (cost <= 0.0f) return;
 
   float judged = cost * std::normal_distribution<float>(1.0f, kShotCostNoise)(random);
-  Spend(player, judged > 0.0f ? judged : 0.0f, cost * kShotCostNoise);
+  Spend(player, judged > 0.0f ? judged : 0.0f, cost * kShotCostNoise, chance);
 }
 
 void EnergyEstimate::HandleEvent(const WeaponHitEvent& event) {
@@ -170,7 +180,8 @@ void EnergyEstimate::HandleEvent(const WeaponHitEvent& event) {
       last_blast_shooter = weapon.player_id;
       last_blast_position = weapon.position;
 
-      if (!Notices(weapon.position)) return;
+      float chance;
+      if (!Notices(weapon.position, chance)) return;
 
       float damage = settings.BombDamageLevel / 1000.0f;
       float radius = (float)(settings.BombExplodePixels + settings.BombExplodePixels * weapon.data.level) / 16.0f;
@@ -186,7 +197,7 @@ void EnergyEstimate::HandleEvent(const WeaponHitEvent& event) {
         // Direct, near or glancing: the middle of each third of the blast's falloff.
         int bucket = (int)(blast_fraction * 3.0f);
         if (bucket > 2) bucket = 2;
-        Spend(player, damage * (1.0f - (bucket + 0.5f) / 3.0f), UniformSd(damage / 3.0f));
+        Spend(player, damage * (1.0f - (bucket + 0.5f) / 3.0f), UniformSd(damage / 3.0f), chance);
       }
     } break;
     case WeaponType::Bullet:
@@ -194,7 +205,8 @@ void EnergyEstimate::HandleEvent(const WeaponHitEvent& event) {
     case WeaponType::Burst: {
       Player* target = event.target;
       if (!target || target->ship >= 8 || target->id == player_manager.player_id) return;
-      if (!Notices(target->position)) return;
+      float chance;
+      if (!Notices(target->position, chance)) return;
 
       float damage;
       if (weapon.data.type == WeaponType::Burst) {
@@ -205,9 +217,9 @@ void EnergyEstimate::HandleEvent(const WeaponHitEvent& event) {
       }
 
       if (settings.ExactDamage) {
-        Spend(*target, damage, 0.0f);
+        Spend(*target, damage, 0.0f, chance);
       } else {
-        Spend(*target, damage * kRandomDamageMean, damage * kRandomDamageSd);
+        Spend(*target, damage * kRandomDamageMean, damage * kRandomDamageSd, chance);
       }
     } break;
     default: {

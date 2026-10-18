@@ -1,6 +1,7 @@
 #include "ChaosCombat.h"
 
 #include "EnergyEstimate.h"
+#include "PlayerHistory.h"
 
 #include <zero/behavior/BehaviorBuilder.h>
 #include <zero/behavior/BehaviorTree.h>
@@ -25,6 +26,8 @@
 #include <zero/zones/svs/nodes/MemoryTargetNode.h>
 
 #include <math.h>
+
+#include <random>
 #include <string>
 
 namespace zero {
@@ -128,6 +131,107 @@ struct EnergyEstimateQueryNode : public behavior::BehaviorNode {
   const char* sd_key;
 };
 
+// Aims at the target as the bot saw it `delay` ticks ago: a player's reaction time.
+struct PerceivedAimNode : public behavior::BehaviorNode {
+  PerceivedAimNode(PlayerHistory* history, const char* target_key, const char* position_key, int delay)
+      : history(history), target_key(target_key), position_key(position_key), delay(delay) {}
+
+  behavior::ExecuteResult Execute(behavior::ExecuteContext& ctx) override {
+    Player* self = ctx.bot->game->player_manager.GetSelf();
+    auto opt_target = ctx.blackboard.Value<Player*>(target_key);
+    if (!self || !opt_target || !*opt_target) return behavior::ExecuteResult::Failure;
+
+    PlayerHistory::Sample seen = history->Get(**opt_target, (u32)delay);
+    Vector2f aimshot = behavior::CalculateAimshot(*ctx.bot->game, *self, WeaponType::Bullet, seen.position,
+                                                  seen.velocity);
+    ctx.blackboard.Set(position_key, aimshot);
+
+    return behavior::ExecuteResult::Success;
+  }
+
+  PlayerHistory* history;
+  const char* target_key;
+  const char* position_key;
+  int delay;
+};
+
+// Turns the aim point around the bot by an angle that drifts smoothly (mean-reverting, like a hand), about
+// `degrees` off on average.
+struct AimErrorNode : public behavior::BehaviorNode {
+  AimErrorNode(const char* position_key, float degrees)
+      : position_key(position_key), sd(degrees * 3.14159265f / 180.0f), random(std::random_device{}()) {}
+
+  behavior::ExecuteResult Execute(behavior::ExecuteContext& ctx) override {
+    Player* self = ctx.bot->game->player_manager.GetSelf();
+    auto opt_position = ctx.blackboard.Value<Vector2f>(position_key);
+    if (!self || !opt_position) return behavior::ExecuteResult::Failure;
+
+    // An Ornstein-Uhlenbeck step over the ticks since the last one.
+    u32 now = GetCurrentTick();
+    s32 ticks = last_tick ? TICK_DIFF(now, last_tick) : kDriftTicks;
+    last_tick = now;
+    if (ticks > 0) {
+      float keep = expf(-ticks / kDriftTicks);
+      angle = angle * keep + sd * sqrtf(1.0f - keep * keep) * std::normal_distribution<float>(0.0f, 1.0f)(random);
+    }
+
+    Vector2f offset = *opt_position - self->position;
+    float c = cosf(angle), s = sinf(angle);
+    ctx.blackboard.Set(position_key, self->position + Vector2f(offset.x * c - offset.y * s, offset.x * s + offset.y * c));
+
+    return behavior::ExecuteResult::Success;
+  }
+
+  // How long the drift takes to wander, in ticks: about half a second.
+  static constexpr float kDriftTicks = 50.0f;
+
+  const char* position_key;
+  float sd;
+  float angle = 0.0f;
+  u32 last_tick = 0;
+  std::mt19937 random;
+};
+
+// Grows or shrinks a box about its centre.
+struct ScaleBoundsNode : public behavior::BehaviorNode {
+  ScaleBoundsNode(const char* bounds_key, float scale) : bounds_key(bounds_key), scale(scale) {}
+
+  behavior::ExecuteResult Execute(behavior::ExecuteContext& ctx) override {
+    auto opt_bounds = ctx.blackboard.Value<Rectangle>(bounds_key);
+    if (!opt_bounds) return behavior::ExecuteResult::Failure;
+
+    Vector2f center = (opt_bounds->min + opt_bounds->max) * 0.5f;
+    Vector2f half = (opt_bounds->max - opt_bounds->min) * (0.5f * scale);
+    ctx.blackboard.Set(bounds_key, Rectangle(center - half, center + half));
+
+    return behavior::ExecuteResult::Success;
+  }
+
+  const char* bounds_key;
+  float scale;
+};
+
+// Succeeds when a shot's velocity carries it towards the aim point at least this fast (tiles/s): slower shots are
+// easy to dodge.
+struct MinShotSpeedNode : public behavior::BehaviorNode {
+  MinShotSpeedNode(const char* velocity_key, const char* position_key, float min_speed)
+      : velocity_key(velocity_key), position_key(position_key), min_speed(min_speed) {}
+
+  behavior::ExecuteResult Execute(behavior::ExecuteContext& ctx) override {
+    Player* self = ctx.bot->game->player_manager.GetSelf();
+    auto opt_velocity = ctx.blackboard.Value<Vector2f>(velocity_key);
+    auto opt_position = ctx.blackboard.Value<Vector2f>(position_key);
+    if (!self || !opt_velocity || !opt_position) return behavior::ExecuteResult::Failure;
+
+    float speed = opt_velocity->Dot(Normalize(*opt_position - self->position));
+    return speed >= min_speed ? behavior::ExecuteResult::Success : behavior::ExecuteResult::Failure;
+  }
+
+  const char* velocity_key;
+  const char* position_key;
+  float min_speed;
+};
+
 // Dodge when incoming damage is at least the threshold fraction of max energy, unless a low-energy enemy we'd rush
 // is close by (then stay on them).
 static std::unique_ptr<behavior::BehaviorNode> CreateDodge(const CombatSettings& settings) {
@@ -185,6 +289,7 @@ static std::unique_ptr<behavior::BehaviorNode> CreateRetreat(const CombatSetting
         .InvertChild<PlayerEnergyPercentThresholdNode>(*settings.retreat_energy)
         .Child<FaceNode>("aimshot")
         .Child<SeekNode>("aimshot", "leash_distance", SeekNode::DistanceResolveType::Dynamic)
+        .Child<ScalarNode>(1.0f, "backing_off")
         .End();
   // clang-format on
 
@@ -267,6 +372,48 @@ static std::unique_ptr<behavior::BehaviorNode> CreateShotSpread(const CombatSett
   return std::make_unique<SuccessNode>(builder.Build());
 }
 
+// Aim at the target: as it is now, or with a reaction time as the bot saw it a moment ago.
+static std::unique_ptr<behavior::BehaviorNode> CreateAim(const CombatSettings& settings, PlayerHistory& history) {
+  using namespace behavior;
+  if (settings.reaction_ticks <= 0) return std::make_unique<AimNode>(WeaponType::Bullet, "nearest_target", "aimshot");
+
+  return std::make_unique<PerceivedAimNode>(&history, "nearest_target", "aimshot", settings.reaction_ticks);
+}
+
+// Aim drift, when the skill has any. Always succeeds.
+static std::unique_ptr<behavior::BehaviorNode> CreateAimError(const CombatSettings& settings) {
+  if (settings.aim_error <= 0.0f) return std::make_unique<PassNode>();
+
+  return std::make_unique<AimErrorNode>("aimshot", settings.aim_error);
+}
+
+// Loosens or tightens the box a shot must cross, when the skill scales it. Always succeeds.
+static std::unique_ptr<behavior::BehaviorNode> CreateHitBoxScale(const CombatSettings& settings) {
+  if (settings.hit_box_scale == 1.0f) return std::make_unique<PassNode>();
+
+  return std::make_unique<ScaleBoundsNode>("target_bounds", settings.hit_box_scale);
+}
+
+// Holds shots too slow to land, when the skill asks, except while backing off: slow shots dropped in a pursuer's
+// path are cover, not a wasted attack.
+static std::unique_ptr<behavior::BehaviorNode> CreateShotSpeedCheck(const CombatSettings& settings,
+                                                                    const char* velocity_key) {
+  using namespace behavior;
+  if (settings.min_shot_speed <= 0.0f) return std::make_unique<PassNode>();
+
+  BehaviorBuilder builder;
+
+  // clang-format off
+  builder
+    .Selector()
+        .Child<BlackboardSetQueryNode>("backing_off")
+        .Child<MinShotSpeedNode>(velocity_key, "aimshot", settings.min_shot_speed)
+        .End();
+  // clang-format on
+
+  return builder.Build();
+}
+
 // Bomb only into enough of our own bullet damage already heading at the target. Succeeds when that's the case, or
 // when the settings don't ask for it.
 static std::unique_ptr<behavior::BehaviorNode> CreateBombOverlapCheck(const CombatSettings& settings) {
@@ -286,7 +433,8 @@ static std::unique_ptr<behavior::BehaviorNode> CreateBombOverlapCheck(const Comb
   return builder.Build();
 }
 
-std::unique_ptr<behavior::BehaviorNode> CreateCombatTree(const CombatSettings& settings, EnergyEstimate& estimate) {
+std::unique_ptr<behavior::BehaviorNode> CreateCombatTree(const CombatSettings& settings, EnergyEstimate& estimate,
+                                                         PlayerHistory& history) {
   using namespace behavior;
 
   BehaviorBuilder builder;
@@ -378,10 +526,12 @@ std::unique_ptr<behavior::BehaviorNode> CreateCombatTree(const CombatSettings& s
                         .Child<RenderPathNode>(Vector3f(0.0f, 1.0f, 0.5f))
                         .End()
                     .Sequence() // Aim at target and shoot while moving.
-                        .Child<AimNode>(WeaponType::Bullet, "nearest_target", "aimshot")
+                        .Composite(CreateAim(settings, history))
                         .Composite(CreateShotSpread(settings))
+                        .Composite(CreateAimError(settings))
                         .Parallel()
                             .Child<BlackboardEraseNode>("rushing")
+                            .Child<BlackboardEraseNode>("backing_off")
                             .Selector()
                                 .Composite(CreateRush(settings))
                                 .Composite(CreateRetreat(settings))
@@ -401,8 +551,10 @@ std::unique_ptr<behavior::BehaviorNode> CreateCombatTree(const CombatSettings& s
                                 .Composite(CreateBombOverlapCheck(settings))
                                 .Child<DistanceThresholdNode>("nearest_target_position", bomb_min_range)
                                 .Child<ShotVelocityQueryNode>(WeaponType::Bomb, "bomb_fire_velocity")
+                                .Composite(CreateShotSpeedCheck(settings, "bomb_fire_velocity"))
                                 .Child<RayNode>("self_position", "bomb_fire_velocity", "bomb_fire_ray")
                                 .Child<DynamicPlayerBoundingBoxQueryNode>("nearest_target", "target_bounds", 3.0f)
+                                .Composite(CreateHitBoxScale(settings))
                                 .Child<MoveRectangleNode>("target_bounds", "aimshot", "target_bounds")
                                 .Child<RenderRectNode>("world_camera", "target_bounds", Vector3f(1.0f, 0.0f, 0.0f))
                                 .Child<RenderRayNode>("world_camera", "bomb_fire_ray", 50.0f, Vector3f(1.0f, 1.0f, 0.0f))
@@ -418,8 +570,10 @@ std::unique_ptr<behavior::BehaviorNode> CreateCombatTree(const CombatSettings& s
                                 .InvertChild<InputQueryNode>(InputAction::Bomb) // Don't try to shoot a bullet when shooting a bomb.
                                 .InvertChild<TileQueryNode>(kTileIdSafe)
                                 .Child<ShotVelocityQueryNode>(WeaponType::Bullet, "bullet_fire_velocity")
+                                .Composite(CreateShotSpeedCheck(settings, "bullet_fire_velocity"))
                                 .Child<RayNode>("self_position", "bullet_fire_velocity", "bullet_fire_ray")
                                 .Child<DynamicPlayerBoundingBoxQueryNode>("nearest_target", "target_bounds", 4.0f)
+                                .Composite(CreateHitBoxScale(settings))
                                 .Child<MoveRectangleNode>("target_bounds", "aimshot", "target_bounds")
                                 .Child<RayRectangleInterceptNode>("bullet_fire_ray", "target_bounds")
                                 .Child<InputActionNode>(InputAction::Bullet)

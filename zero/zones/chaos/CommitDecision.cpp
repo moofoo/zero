@@ -32,6 +32,8 @@ constexpr float kThirdPartyDistance = 50.0f;
 constexpr float kOneSided = 0.8f;
 // A new mode must clear its threshold by this much to replace the current one.
 constexpr float kHysteresis = 0.05f;
+// A commit lasts at least this long (ticks), unless the fight turns clearly against the bot.
+constexpr u32 kMinCommitTicks = 150;
 
 const char* to_string(CombatMode mode) {
   switch (mode) {
@@ -162,16 +164,23 @@ float CommitDecision::WinChance(Player& self, Player& target) {
 }
 
 CombatMode CommitDecision::Choose(float chance, Player& self, Player& target) {
-  float commit = settings.commit_confidence;
-  float disengage = settings.disengage_confidence;
+  float commit = settings.commit_confidence + settings.patience;
+  float disengage = settings.disengage_confidence + settings.patience;
   float middle = (commit + disengage) / 2.0f;
+  float max_energy = (float)bot.game->ship_controller.ship.energy;
+  bool can_commit = self.energy >= settings.commit_energy * max_energy;
+  u32 now = GetCurrentTick();
+
+  // A commit holds for its minimum time unless the bot would now disengage.
+  if (mode == CombatMode::Commit && TICK_DIFF(now, commit_tick) < (s32)kMinCommitTicks && chance >= disengage) {
+    return CombatMode::Commit;
+  }
 
   // Recharging lasts until energy is back, unless the fight turns clearly in the bot's favour. Then the bot fights
   // again, in proportion to how it judges the fight (never straight back to disengaging).
   if (mode == CombatMode::Recharge) {
-    float max_energy = (float)bot.game->ship_controller.ship.energy;
     if (self.energy < settings.recharge_to * max_energy && chance < commit + kHysteresis) return CombatMode::Recharge;
-    if (chance >= commit + kHysteresis) return CombatMode::Commit;
+    if (chance >= commit + kHysteresis && can_commit) return CombatMode::Commit;
     return chance >= middle ? CombatMode::Pressure : CombatMode::Hold;
   }
 
@@ -183,7 +192,7 @@ CombatMode CommitDecision::Choose(float chance, Player& self, Player& target) {
 
   float commit_bar = mode == CombatMode::Commit ? commit - kHysteresis : commit + kHysteresis;
   float disengage_bar = mode == CombatMode::Disengage ? disengage + kHysteresis : disengage - kHysteresis;
-  if (chance >= commit_bar) return CombatMode::Commit;
+  if (chance >= commit_bar && can_commit) return CombatMode::Commit;
   if (chance < disengage_bar) return CombatMode::Disengage;
 
   // Between the two: pressure in the upper half, hold in the lower, with the same margin to switch.
@@ -205,7 +214,9 @@ CombatMode CommitDecision::Decide(Player& self, Player& target) {
   if (chance > 1.0f) chance = 1.0f;
 
   win_chance = chance;
-  mode = Choose(chance, self, target);
+  CombatMode chosen = Choose(chance, self, target);
+  if (chosen == CombatMode::Commit && mode != CombatMode::Commit) commit_tick = now;
+  mode = chosen;
   return mode;
 }
 

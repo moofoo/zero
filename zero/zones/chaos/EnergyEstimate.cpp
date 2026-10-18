@@ -32,9 +32,9 @@ constexpr float kRandomDamageSd = 0.236f;
 constexpr float kShotCostNoise = 0.1f;
 // A belief isn't advanced over more than this many ticks at once (a minute): longer than any recharge.
 constexpr s32 kMaxAdvanceTicks = 6000;
-// Off screen, the estimate relaxes towards this fraction of the average maximum energy, a typical energy in a fight
-// (bots go into exchanges at about 60% on average), with this time constant in ticks.
-constexpr float kUnseenTypicalEnergy = 0.6f;
+// Off screen, the estimate relaxes towards this fraction of the average maximum energy, a typical energy in a fight,
+// with this time constant in ticks. At 60% the estimate ran about 7% of max energy low (2026-10-18 games), so 67%.
+constexpr float kUnseenTypicalEnergy = 0.67f;
 constexpr float kUnseenTicks = 500.0f;
 // Every belief is advanced this often (ticks), so on and off screen are told apart in steps this short.
 constexpr u32 kAdvanceInterval = 10;

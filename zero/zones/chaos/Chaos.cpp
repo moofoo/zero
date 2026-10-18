@@ -189,7 +189,9 @@ struct ChaosBehavior : public behavior::Behavior {
         lookup.GetFloat("CommitConfidence").value_or(decision_settings.commit_confidence);
     decision_settings.disengage_confidence =
         lookup.GetFloat("DisengageConfidence").value_or(decision_settings.disengage_confidence);
+    decision_settings.commit_energy = lookup.GetFloat("CommitEnergy").value_or(decision_settings.commit_energy);
     decision_settings.judgement_noise = skill_float("JudgementNoise").value_or(decision_settings.judgement_noise);
+    decision_settings.patience = skill_float("Patience").value_or(decision_settings.patience);
     auto decision_ms = skill_float("DecisionMs");
     if (decision_ms) decision_settings.decision_ticks = (u32)(*decision_ms / kMsPerTick);
     auto leash = lookup.GetFloat("LeashDistance");

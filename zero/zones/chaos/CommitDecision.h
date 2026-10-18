@@ -39,6 +39,10 @@ struct DecisionSettings {
   // Commit when the chance of winning the exchange is at least this; disengage below the other (aggression).
   float commit_confidence = 0.6f;
   float disengage_confidence = 0.35f;
+  // Never commit with less than this fraction of max energy (aggression).
+  float commit_energy = 0.5f;
+  // Added to both confidences: a patient bot needs better odds to commit and backs off sooner (skill).
+  float patience = 0.0f;
   // How far off the bot's judgement of that chance is, and how often it decides, in ticks (skill).
   float judgement_noise = 0.0f;
   u32 decision_ticks = 10;
@@ -69,6 +73,8 @@ struct CommitDecision {
 
   CombatMode mode = CombatMode::Pressure;
   u32 next_decision_tick = 0;
+  // When the bot last committed: a commit lasts a minimum time.
+  u32 commit_tick = 0;
 
   // The chance the target runs out of energy before the bot does, if both fight on at fighting range.
   float WinChance(Player& self, Player& target);

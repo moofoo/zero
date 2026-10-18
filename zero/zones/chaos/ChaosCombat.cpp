@@ -1,5 +1,6 @@
 #include "ChaosCombat.h"
 
+#include "CommitDecision.h"
 #include "EnergyEstimate.h"
 #include "PlayerHistory.h"
 #include "TargetLock.h"
@@ -131,6 +132,46 @@ struct EnergyEstimateQueryNode : public behavior::BehaviorNode {
   const char* player_key;
   const char* energy_key;
   const char* sd_key;
+};
+
+// Runs the commit decision against the target, writes the mode to the blackboard as an int, and logs each change.
+struct CommitDecisionNode : public behavior::BehaviorNode {
+  CommitDecisionNode(CombatDecision* decision, const char* target_key) : decision(decision), target_key(target_key) {}
+
+  behavior::ExecuteResult Execute(behavior::ExecuteContext& ctx) override {
+    Player* self = ctx.bot->game->player_manager.GetSelf();
+    auto opt_target = ctx.blackboard.Value<Player*>(target_key);
+    if (!self || !opt_target || !*opt_target) return behavior::ExecuteResult::Failure;
+
+    CombatMode mode = decision->Decide(*self, **opt_target);
+    if (mode != logged || !logged_once) {
+      if (ctx.bot->combat_logger) ctx.bot->combat_logger->WriteMode(to_string(mode), decision->win_chance);
+      logged = mode;
+      logged_once = true;
+    }
+    ctx.blackboard.Set("combat_mode", (int)mode);
+    return behavior::ExecuteResult::Success;
+  }
+
+  CombatDecision* decision;
+  const char* target_key;
+  CombatMode logged = CombatMode::Pressure;
+  bool logged_once = false;
+};
+
+// Succeeds while the commit decision's mode is one of these.
+struct CombatModeIsNode : public behavior::BehaviorNode {
+  CombatModeIsNode(CombatMode mode, CombatMode or_mode) : mode(mode), or_mode(or_mode) {}
+  explicit CombatModeIsNode(CombatMode mode) : mode(mode), or_mode(mode) {}
+
+  behavior::ExecuteResult Execute(behavior::ExecuteContext& ctx) override {
+    int current = ctx.blackboard.ValueOr<int>("combat_mode", -1);
+    bool match = current == (int)mode || current == (int)or_mode;
+    return match ? behavior::ExecuteResult::Success : behavior::ExecuteResult::Failure;
+  }
+
+  CombatMode mode;
+  CombatMode or_mode;
 };
 
 // Chooses the bot's target through its target lock, from the enemies it could fight: in a ship, not respawning, not
@@ -348,6 +389,52 @@ static std::unique_ptr<behavior::BehaviorNode> CreateRetreat(const CombatSetting
   return builder.Build();
 }
 
+static std::unique_ptr<behavior::BehaviorNode> CreateEngage(const CombatSettings& settings);
+
+// Moving by the commit decision's mode: commit closes in and finishes (bullets ignore the energy floor, as in a rush),
+// disengage and recharge back off to the retreat distance, hold keeps the leash distance in range style, and pressure
+// engages in the bot's own style.
+static std::unique_ptr<behavior::BehaviorNode> CreateModeMovement(const CombatSettings& settings) {
+  using namespace behavior;
+
+  CombatSettings range = settings;
+  range.engage_close = false;
+
+  std::unique_ptr<BehaviorNode> back_off;
+  if (settings.retreat_distance) {
+    back_off = std::make_unique<SeekNode>("aimshot", *settings.retreat_distance, SeekNode::DistanceResolveType::Dynamic);
+  } else {
+    back_off = std::make_unique<SeekNode>("aimshot", "leash_distance", SeekNode::DistanceResolveType::Dynamic);
+  }
+
+  BehaviorBuilder builder;
+
+  // clang-format off
+  builder
+    .Selector()
+        .Sequence()
+            .Child<CombatModeIsNode>(CombatMode::Commit)
+            .Child<FaceNode>("aimshot")
+            .Child<SeekNode>("aimshot", 0.0f, SeekNode::DistanceResolveType::Static)
+            .Child<ScalarNode>(1.0f, "rushing")
+            .End()
+        .Sequence()
+            .Child<CombatModeIsNode>(CombatMode::Disengage, CombatMode::Recharge)
+            .Child<FaceNode>("aimshot")
+            .Composite(std::move(back_off))
+            .Child<ScalarNode>(1.0f, "backing_off")
+            .End()
+        .Sequence()
+            .Child<CombatModeIsNode>(CombatMode::Hold)
+            .Composite(CreateEngage(range))
+            .End()
+        .Composite(CreateEngage(settings))
+        .End();
+  // clang-format on
+
+  return builder.Build();
+}
+
 // Moving when not rushing or backing off: close in on the target, or hover around a territory position at the
 // leash distance, facing the target only while not under threat.
 static std::unique_ptr<behavior::BehaviorNode> CreateEngage(const CombatSettings& settings) {
@@ -404,6 +491,32 @@ static std::unique_ptr<behavior::BehaviorNode> CreateEngage(const CombatSettings
   // clang-format on
 
   return builder.Build();
+}
+
+// Moving in a fight: by the commit decision when it's on, else rush, back off or engage by their triggers.
+static std::unique_ptr<behavior::BehaviorNode> CreateMovement(const CombatSettings& settings) {
+  using namespace behavior;
+  if (settings.commit_decision) return CreateModeMovement(settings);
+
+  BehaviorBuilder builder;
+
+  // clang-format off
+  builder
+    .Selector()
+        .Composite(CreateRush(settings))
+        .Composite(CreateRetreat(settings))
+        .Composite(CreateEngage(settings))
+        .End();
+  // clang-format on
+
+  return builder.Build();
+}
+
+// The commit decision, when it's on. Always succeeds.
+static std::unique_ptr<behavior::BehaviorNode> CreateDecision(const CombatSettings& settings, CombatDecision& decision) {
+  if (!settings.commit_decision) return std::make_unique<PassNode>();
+
+  return std::make_unique<CommitDecisionNode>(&decision, "nearest_target");
 }
 
 // Spread shots around targets beyond the range. Always succeeds.
@@ -512,6 +625,7 @@ std::unique_ptr<behavior::BehaviorNode> CreateCombatTree(const CombatSettings& s
                     .Child<LockedTargetNode>(&senses.target_lock, "nearest_target")
                     .Child<PlayerPositionQueryNode>("nearest_target", "nearest_target_position")
                     .Child<EnergyEstimateQueryNode>(&senses.estimate, "nearest_target", "nearest_target_energy", "nearest_target_energy_sd")
+                    .Composite(CreateDecision(settings, senses.decision))
                     .End()
                 .Sequence(CompositeDecorator::Success) // If we have a portal but no location, lay one down.
                     .Child<ShipItemCountThresholdNode>(ShipItemType::Portal, 1)
@@ -589,9 +703,7 @@ std::unique_ptr<behavior::BehaviorNode> CreateCombatTree(const CombatSettings& s
                             .Child<BlackboardEraseNode>("backing_off")
                             .Selector() // Moving: dodge, rush, back off, or engage.
                                 .Composite(CreateDodge(settings, true))
-                                .Composite(CreateRush(settings))
-                                .Composite(CreateRetreat(settings))
-                                .Composite(CreateEngage(settings))
+                                .Composite(CreateMovement(settings))
                                 .End()
                             .Sequence(CompositeDecorator::Success) // Use burst when near a wall.
                                 .Child<ShipWeaponCapabilityQueryNode>(WeaponType::Burst)

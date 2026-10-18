@@ -9,6 +9,7 @@
 #include <zero/game/Logger.h>
 #include <zero/zones/ZoneController.h>
 #include <zero/zones/chaos/ChaosCombat.h>
+#include <zero/zones/chaos/CommitDecision.h>
 #include <zero/zones/chaos/EnergyEstimate.h>
 #include <zero/zones/chaos/PlayerHistory.h>
 #include <zero/zones/chaos/TargetLock.h>
@@ -157,6 +158,7 @@ struct ChaosBehavior : public behavior::Behavior {
     settings.aim_error = skill_float("AimError").value_or(0.0f);
     settings.hit_box_scale = skill_float("HitBoxScale").value_or(1.0f);
     settings.min_shot_speed = skill_float("MinShotSpeed").value_or(0.0f);
+    settings.commit_decision = lookup.GetFloat("CommitDecision").value_or(0.0f) > 0.5f;
     if (engage && !settings.engage_close && std::string_view(*engage) != "range") {
       Log(LogLevel::Warning, "Engage should be range or close, not %s: using range", *engage);
     }
@@ -178,6 +180,23 @@ struct ChaosBehavior : public behavior::Behavior {
     history = std::make_unique<PlayerHistory>(*ctx.bot);
     float target_leash = lookup.GetFloat("TargetLeashDistance").value_or(kDefaultTargetLeashDistance);
     float target_lock_seconds = lookup.GetFloat("TargetLockSeconds").value_or(kDefaultTargetLockSeconds);
+    // The commit decision: risk appetite from the style keys, judgement from the skill keys.
+    DecisionSettings decision_settings;
+    decision_settings.commit_confidence =
+        lookup.GetFloat("CommitConfidence").value_or(decision_settings.commit_confidence);
+    decision_settings.disengage_confidence =
+        lookup.GetFloat("DisengageConfidence").value_or(decision_settings.disengage_confidence);
+    decision_settings.judgement_noise = lookup.GetFloat("JudgementNoise").value_or(0.0f);
+    decision_settings.decision_ticks = (u32)(lookup.GetFloat("DecisionMs").value_or(100.0f) / kMsPerTick);
+    decision_settings.retreat_distance = settings.retreat_distance.value_or(
+        lookup.GetFloat("LeashDistance").value_or(35.0f));
+    decision = std::make_unique<CombatDecision>(*ctx.bot, *estimate, decision_settings);
+    if (settings.commit_decision) {
+      Log(LogLevel::Info, "Commit decision: commit at %.2f, disengage below %.2f, noise %.2f",
+          decision_settings.commit_confidence, decision_settings.disengage_confidence,
+          decision_settings.judgement_noise);
+    }
+
     target_lock = std::make_unique<TargetLock>(*ctx.bot, target_leash, (u32)(target_lock_seconds * kTicksPerSecond),
                                                *estimate, view_extent, settings.rush_enemy_energy);
     Log(LogLevel::Info, "View %dx%d, attention %.2f", view_width, view_height, attention);
@@ -218,7 +237,7 @@ struct ChaosBehavior : public behavior::Behavior {
               .Child<TimerSetNode>("next_freq_change_tick", 300)
               .Child<PlayerChangeFrequencyNode>("request_freq")
               .End()
-          .Composite(CreateCombatTree(settings, {*estimate, *history, *target_lock}))
+          .Composite(CreateCombatTree(settings, {*estimate, *history, *target_lock, *decision}))
           .End();
     // clang-format on
 
@@ -229,6 +248,7 @@ struct ChaosBehavior : public behavior::Behavior {
   std::unique_ptr<EnergyEstimate> estimate;
   std::unique_ptr<PlayerHistory> history;
   std::unique_ptr<TargetLock> target_lock;
+  std::unique_ptr<CombatDecision> decision;
 };
 
 struct ChaosController : ZoneController {

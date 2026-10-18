@@ -163,6 +163,15 @@ void CombatLogger::WriteTarget(const char* target, const char* reason) {
   fflush(file);
 }
 
+void CombatLogger::WriteMode(const char* mode, float win_chance) {
+  if (!file) return;
+
+  fprintf(file, "{\"e\":\"mode\",\"tick\":%u,\"mode\":", ServerTick());
+  WriteJsonString(file, mode);
+  fprintf(file, ",\"win_chance\":%.2f}\n", win_chance);
+  fflush(file);
+}
+
 void CombatLogger::HandleEvent(const WeaponFireEvent& event) {
   if (!file || !bot.game) return;
   Game& game = *bot.game;

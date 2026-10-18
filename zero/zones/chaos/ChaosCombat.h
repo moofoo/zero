@@ -8,6 +8,7 @@
 namespace zero {
 namespace chaos {
 
+struct CombatDecision;
 struct EnergyEstimate;
 struct PlayerHistory;
 struct TargetLock;
@@ -53,6 +54,10 @@ struct CombatSettings {
   float hit_box_scale = 1.0f;
   // Hold shots slower than this along the line to the target (tiles/s), except while backing off.
   float min_shot_speed = 0.0f;
+
+  // The commit decision (ticket 05) chooses how to move in a fight, in place of the RushEnemyEnergy and RetreatEnergy
+  // triggers.
+  bool commit_decision = false;
 };
 
 // The tree every Chaos bot flies: enter its ship, then fight the nearest enemy, or else chase greens, or else
@@ -63,6 +68,7 @@ struct CombatSenses {
   EnergyEstimate& estimate;
   PlayerHistory& history;
   TargetLock& target_lock;
+  CombatDecision& decision;
 };
 
 std::unique_ptr<behavior::BehaviorNode> CreateCombatTree(const CombatSettings& settings, CombatSenses senses);

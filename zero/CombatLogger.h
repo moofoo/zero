@@ -32,6 +32,9 @@ struct CombatLogger : EventHandler<WeaponFireEvent>,
   // The bot's target changed (null: no target), and why.
   void WriteTarget(const char* target, const char* reason);
 
+  // The commit decision's mode changed, and the win chance it judged.
+  void WriteMode(const char* mode, float win_chance);
+
   void HandleEvent(const WeaponFireEvent& event) override;
   void HandleEvent(const WeaponSelfDamageEvent& event) override;
   void HandleEvent(const WeaponHitEvent& event) override;

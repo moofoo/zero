@@ -15,7 +15,7 @@ constexpr u32 kHeavyDamageTicks = 300;
 constexpr u32 kContactTicks = 100;
 // After having to repel its target's weapons, the bot ignores that enemy for this long.
 constexpr u32 kIgnoreTicks = 500;
-// The locked enemy's weapons must be at least this share of the danger for a repel to break the lock.
+// The locked enemy's weapons must be more than this share of the danger for a repel to break the lock.
 constexpr float kRepelShare = 0.5f;
 
 TargetLock::TargetLock(ZeroBot& bot, float leash_distance, u32 lock_ticks)
@@ -38,9 +38,18 @@ int TargetLock::RecentDamage(u16 id, u32 now) {
   return total;
 }
 
+void TargetLock::Note(const char* why) {
+  if (!reason.empty()) reason += ", ";
+  reason += why;
+}
+
 void TargetLock::Release(const char* why) {
   locked = kNone;
-  reason = why;
+  Note(why);
+}
+
+bool TargetLock::WithinLeash(const Player& player, const Player& self) const {
+  return player.position.Distance(self.position) <= leash_distance;
 }
 
 Player* TargetLock::Choose(const std::vector<Player*>& candidates) {
@@ -55,24 +64,28 @@ Player* TargetLock::Choose(const std::vector<Player*>& candidates) {
     return nullptr;
   };
 
-  // Another enemy hitting hard, and harder than the locked one, takes over the lock.
+  // Another enemy hitting hard, and harder than the locked one, takes over the lock (ship.energy is max energy).
   float heavy = kHeavyDamage * bot.game->ship_controller.ship.energy;
   int locked_damage = locked != kNone ? RecentDamage(locked, now) : 0;
+  u16 taker = kNone;
   for (Player* player : candidates) {
     int damage = RecentDamage(player->id, now);
     if (player->id == locked || damage < heavy || damage <= locked_damage) continue;
-    if (player->position.Distance(self->position) > leash_distance) continue;
+    if (Ignored(player->id, now) || !WithinLeash(*player, *self)) continue;
 
-    locked = player->id;
+    taker = player->id;
     locked_damage = damage;
-    reason = "third party";
+  }
+  if (taker != kNone) {
+    locked = taker;
+    Note("third party");
   }
 
   if (locked != kNone) {
     Player* target = find(locked);
     if (!target) {
       Release("gone");
-    } else if (target->position.Distance(self->position) > leash_distance) {
+    } else if (!WithinLeash(*target, *self)) {
       Release("too far");
     } else {
       auto contact = last_contact.find(locked);
@@ -86,15 +99,14 @@ Player* TargetLock::Choose(const std::vector<Player*>& candidates) {
     for (Player* player : candidates) {
       auto contact = last_contact.find(player->id);
       if (contact == last_contact.end() || Ignored(player->id, now)) continue;
-      if (TICK_DIFF(now, contact->second) > (s32)kContactTicks) continue;
-      if (player->position.Distance(self->position) > leash_distance) continue;
+      if (TICK_DIFF(now, contact->second) > (s32)kContactTicks || !WithinLeash(*player, *self)) continue;
 
       if (locked == kNone || TICK_GT(contact->second, latest)) {
         locked = player->id;
         latest = contact->second;
-        reason = "locked";
       }
     }
+    if (locked != kNone) Note("locked");
   }
 
   Player* target = locked != kNone ? find(locked) : nullptr;
@@ -113,13 +125,15 @@ Player* TargetLock::Choose(const std::vector<Player*>& candidates) {
     }
   }
 
+  // Log a new target, or a change of lock on the same one, with everything that led to it.
   u16 id = target ? target->id : kNone;
-  bool lock_changed = reason != nullptr && std::string_view(reason) != "nearest";
-  if (id != current || lock_changed) {
-    if (bot.combat_logger) bot.combat_logger->WriteTarget(target ? target->name : nullptr, reason);
+  if (id != current || !reason.empty()) {
+    if (bot.combat_logger) {
+      bot.combat_logger->WriteTarget(target ? target->name : nullptr, reason.empty() ? "nearest" : reason.c_str());
+    }
     current = id;
   }
-  reason = "nearest";
+  reason.clear();
 
   return target;
 }
@@ -161,7 +175,7 @@ void TargetLock::HandleEvent(const WeaponFireEvent& event) {
     if (weapon.player_id == locked) from_target += damage;
   }
 
-  if (total > 0.0f && from_target >= total * kRepelShare) {
+  if (total > 0.0f && from_target > total * kRepelShare) {
     ignore_until[locked] = GetCurrentTick() + kIgnoreTicks;
     Release("repel");
   }

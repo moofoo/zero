@@ -54,6 +54,7 @@ constexpr int kDefaultViewWidth = 1920;
 constexpr int kDefaultViewHeight = 1080;
 // Milliseconds in a game tick.
 constexpr float kMsPerTick = 10.0f;
+constexpr float kTicksPerSecond = 1000.0f / kMsPerTick;
 // Target stickiness: a bot lets go of the enemy it's fighting beyond this distance (tiles), or after this long with
 // no damage between them (seconds).
 constexpr float kDefaultTargetLeashDistance = 120.0f;
@@ -177,7 +178,7 @@ struct ChaosBehavior : public behavior::Behavior {
     history = std::make_unique<PlayerHistory>(*ctx.bot);
     float target_leash = lookup.GetFloat("TargetLeashDistance").value_or(kDefaultTargetLeashDistance);
     float target_lock_seconds = lookup.GetFloat("TargetLockSeconds").value_or(kDefaultTargetLockSeconds);
-    target_lock = std::make_unique<TargetLock>(*ctx.bot, target_leash, (u32)(target_lock_seconds * 100.0f));
+    target_lock = std::make_unique<TargetLock>(*ctx.bot, target_leash, (u32)(target_lock_seconds * kTicksPerSecond));
     Log(LogLevel::Info, "View %dx%d, attention %.2f", view_width, view_height, attention);
 
     auto leash_distance = lookup.GetFloat("LeashDistance");

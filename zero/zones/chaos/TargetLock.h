@@ -4,7 +4,7 @@
 #include <zero/game/GameEvent.h>
 
 #include <deque>
-#include <string_view>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -26,6 +26,8 @@ namespace chaos {
 //   for a few seconds.
 // Without a lock, the target is the nearest enemy.
 struct TargetLock : EventHandler<WeaponSelfDamageEvent>, EventHandler<WeaponHitEvent>, EventHandler<WeaponFireEvent> {
+  static constexpr u16 kNone = 0xFFFF;
+
   TargetLock(ZeroBot& bot, float leash_distance, u32 lock_ticks);
 
   // This tick's target among the enemies the bot could fight, or null when there are none.
@@ -45,11 +47,11 @@ struct TargetLock : EventHandler<WeaponSelfDamageEvent>, EventHandler<WeaponHitE
   float leash_distance;
   u32 lock_ticks;
 
-  static constexpr u16 kNone = 0xFFFF;
+  // The locked enemy, and this tick's target (often the same, but without a lock the nearest enemy).
   u16 locked = kNone;
   u16 current = kNone;
-  // Why the target changes next, for the log; "nearest" unless something else happened.
-  const char* reason = "nearest";
+  // What happened to the lock this tick, for the log ("too far, locked"); empty if nothing.
+  std::string reason;
 
   // When damage last passed between the bot and each player, either way.
   std::unordered_map<u16, u32> last_contact;
@@ -58,8 +60,15 @@ struct TargetLock : EventHandler<WeaponSelfDamageEvent>, EventHandler<WeaponHitE
   // Players the bot won't lock onto or target until a tick, after it had to repel them.
   std::unordered_map<u16, u32> ignore_until;
 
+  // Adds to this tick's reason for the log.
+  void Note(const char* why);
+  // Lets go of the locked enemy, for this reason.
   void Release(const char* why);
+  // Whether the bot is ignoring this player after having to repel them.
   bool Ignored(u16 id, u32 now) const;
+  // Whether a player is close enough to lock onto or stay locked on.
+  bool WithinLeash(const Player& player, const Player& self) const;
+  // Damage this player did to the bot in the last few seconds.
   int RecentDamage(u16 id, u32 now);
 };
 

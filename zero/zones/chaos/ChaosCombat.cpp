@@ -234,8 +234,9 @@ struct MinShotSpeedNode : public behavior::BehaviorNode {
 };
 
 // Dodge when incoming damage is at least the threshold fraction of max energy, unless a low-energy enemy we'd rush
-// is close by (then stay on them).
-static std::unique_ptr<behavior::BehaviorNode> CreateDodge(const CombatSettings& settings) {
+// is close by (then stay on them). Dodging only steers: while fighting, the bot keeps facing its aim point, and aiming
+// and firing carry on, as a player dodges and shoots at once.
+static std::unique_ptr<behavior::BehaviorNode> CreateDodge(const CombatSettings& settings, bool keep_facing) {
   using namespace behavior;
   if (!settings.dodge_threshold) return std::make_unique<FailureNode>();
 
@@ -251,6 +252,8 @@ static std::unique_ptr<behavior::BehaviorNode> CreateDodge(const CombatSettings&
             .InvertChild<DistanceThresholdNode>("nearest_target_position", "self_position", kNearbyEnemyThreshold)
             .End()
         .Child<DodgeIncomingDamage>(*settings.dodge_threshold, 35.0f)
+        .Composite(keep_facing ? std::unique_ptr<BehaviorNode>(std::make_unique<FaceNode>("aimshot"))
+                               : std::unique_ptr<BehaviorNode>(std::make_unique<PassNode>()))
         .End();
   // clang-format on
 
@@ -504,35 +507,39 @@ std::unique_ptr<behavior::BehaviorNode> CreateCombatTree(const CombatSettings& s
                         .Child<InputActionNode>(InputAction::Antiwarp)
                         .End()
                     .End()
-                .Selector()
-                    .Sequence() // Use defensive items, then dodge if the settings dodge.
-                        .Sequence(CompositeDecorator::Success) // Always check incoming damage so we can use it in repel and portal sequences.
-                            .Child<RepelDistanceQueryNode>("repel_distance")
-                            .Child<IncomingDamageQueryNode>("repel_distance", "incoming_damage")
-                            .Child<PlayerCurrentEnergyQueryNode>("self_energy")
-                            .Child<ScaleNode>("self_energy", repel_trigger, "repel_energy")
-                            .End()
-                        .Sequence(CompositeDecorator::Success) // If we are in danger but can't repel, use our portal.
-                            .InvertChild<ShipItemCountThresholdNode>(ShipItemType::Repel)
-                            .Child<ShipPortalPositionQueryNode>() // Check if we have a portal down.
-                            .Child<ScalarThresholdNode<float>>("incoming_damage", "repel_energy")
-                            .Child<TimerExpiredNode>("defense_timer")
-                            .Child<InputActionNode>(InputAction::Warp)
-                            .Child<TimerSetNode>("defense_timer", 100)
-                            .End()
-                        .Sequence(CompositeDecorator::Success) // Use repel when in danger.
-                            .Child<ShipWeaponCapabilityQueryNode>(WeaponType::Repel)
-                            .Child<TimerExpiredNode>("defense_timer")
-                            .Child<ScalarThresholdNode<float>>("incoming_damage", "repel_energy")
-                            .Child<InputActionNode>(InputAction::Repel)
-                            .Child<TimerSetNode>("defense_timer", 100)
-                            .End()
-                        .Composite(CreateDodge(settings))
+                .Sequence(CompositeDecorator::Success) // Use defensive items.
+                    .Sequence(CompositeDecorator::Success) // Always check incoming damage so we can use it in repel and portal sequences.
+                        .Child<RepelDistanceQueryNode>("repel_distance")
+                        .Child<IncomingDamageQueryNode>("repel_distance", "incoming_damage")
+                        .Child<PlayerCurrentEnergyQueryNode>("self_energy")
+                        .Child<ScaleNode>("self_energy", repel_trigger, "repel_energy")
                         .End()
-                    .Sequence() // Path to target if they aren't immediately visible.
+                    .Sequence(CompositeDecorator::Success) // If we are in danger but can't repel, use our portal.
+                        .InvertChild<ShipItemCountThresholdNode>(ShipItemType::Repel)
+                        .Child<ShipPortalPositionQueryNode>() // Check if we have a portal down.
+                        .Child<ScalarThresholdNode<float>>("incoming_damage", "repel_energy")
+                        .Child<TimerExpiredNode>("defense_timer")
+                        .Child<InputActionNode>(InputAction::Warp)
+                        .Child<TimerSetNode>("defense_timer", 100)
+                        .End()
+                    .Sequence(CompositeDecorator::Success) // Use repel when in danger.
+                        .Child<ShipWeaponCapabilityQueryNode>(WeaponType::Repel)
+                        .Child<TimerExpiredNode>("defense_timer")
+                        .Child<ScalarThresholdNode<float>>("incoming_damage", "repel_energy")
+                        .Child<InputActionNode>(InputAction::Repel)
+                        .Child<TimerSetNode>("defense_timer", 100)
+                        .End()
+                    .End()
+                .Selector()
+                    .Sequence() // Path to target if they aren't immediately visible, dodging on the way.
                         .InvertChild<VisibilityQueryNode>("nearest_target_position")
-                        .Child<GoToNode>("nearest_target_position")
-                        .Child<RenderPathNode>(Vector3f(0.0f, 1.0f, 0.5f))
+                        .Selector()
+                            .Composite(CreateDodge(settings, false))
+                            .Sequence()
+                                .Child<GoToNode>("nearest_target_position")
+                                .Child<RenderPathNode>(Vector3f(0.0f, 1.0f, 0.5f))
+                                .End()
+                            .End()
                         .End()
                     .Sequence() // Aim at target and shoot while moving.
                         .Composite(CreateAim(settings, history))
@@ -541,7 +548,8 @@ std::unique_ptr<behavior::BehaviorNode> CreateCombatTree(const CombatSettings& s
                         .Parallel()
                             .Child<BlackboardEraseNode>("rushing")
                             .Child<BlackboardEraseNode>("backing_off")
-                            .Selector()
+                            .Selector() // Moving: dodge, rush, back off, or engage.
+                                .Composite(CreateDodge(settings, true))
                                 .Composite(CreateRush(settings))
                                 .Composite(CreateRetreat(settings))
                                 .Composite(CreateEngage(settings))

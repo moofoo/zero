@@ -1,9 +1,11 @@
 #pragma once
 
+#include <zero/Math.h>
 #include <zero/Types.h>
 #include <zero/game/GameEvent.h>
 
 #include <deque>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -15,6 +17,8 @@ struct ZeroBot;
 
 namespace chaos {
 
+struct EnergyEstimate;
+
 // Which enemy a Chaos bot fights. Like a player, once damage passes between the bot and an enemy (either way), the
 // bot locks onto that enemy and keeps after it even if another comes closer, including after being repelled away.
 // It lets go when the enemy:
@@ -23,12 +27,17 @@ namespace chaos {
 // - has traded no damage with it for the lock time
 // - or when another enemy hits it hard (30% of its max energy within 3 seconds), which takes over the lock
 // - or when it had to repel mostly the locked enemy's weapons: then it picks another target and ignores that enemy
-//   for a few seconds.
+//   for a few seconds
+// - or, for a bot that rushes weak enemies, when an enemy on its screen is estimated below its rush threshold (and
+//   its target isn't): it switches to the weakest such enemy.
 // Without a lock, the target is the nearest enemy.
 struct TargetLock : EventHandler<WeaponSelfDamageEvent>, EventHandler<WeaponHitEvent>, EventHandler<WeaponFireEvent> {
   static constexpr u16 kNone = 0xFFFF;
 
-  TargetLock(ZeroBot& bot, float leash_distance, u32 lock_ticks);
+  // The estimate and view are what the bot knows of enemy energy and what's on its screen; rush_enemy_energy is unset
+  // for a bot that doesn't rush.
+  TargetLock(ZeroBot& bot, float leash_distance, u32 lock_ticks, EnergyEstimate& estimate, Vector2f view_extent,
+             std::optional<float> rush_enemy_energy);
 
   // This tick's target among the enemies the bot could fight, or null when there are none.
   Player* Choose(const std::vector<Player*>& candidates);
@@ -46,6 +55,9 @@ struct TargetLock : EventHandler<WeaponSelfDamageEvent>, EventHandler<WeaponHitE
   ZeroBot& bot;
   float leash_distance;
   u32 lock_ticks;
+  EnergyEstimate& estimate;
+  Vector2f view_extent;
+  std::optional<float> rush_enemy_energy;
 
   // The locked enemy, and this tick's target (often the same, but without a lock the nearest enemy).
   u16 locked = kNone;
@@ -68,6 +80,8 @@ struct TargetLock : EventHandler<WeaponSelfDamageEvent>, EventHandler<WeaponHitE
   bool Ignored(u16 id, u32 now) const;
   // Whether a player is close enough to lock onto or stay locked on.
   bool WithinLeash(const Player& player, const Player& self) const;
+  // Whether a player is on the bot's screen.
+  bool OnScreen(const Player& player, const Player& self) const;
   // Damage this player did to the bot in the last few seconds.
   int RecentDamage(u16 id, u32 now);
 };

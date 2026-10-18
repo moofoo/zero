@@ -178,7 +178,8 @@ struct ChaosBehavior : public behavior::Behavior {
     history = std::make_unique<PlayerHistory>(*ctx.bot);
     float target_leash = lookup.GetFloat("TargetLeashDistance").value_or(kDefaultTargetLeashDistance);
     float target_lock_seconds = lookup.GetFloat("TargetLockSeconds").value_or(kDefaultTargetLockSeconds);
-    target_lock = std::make_unique<TargetLock>(*ctx.bot, target_leash, (u32)(target_lock_seconds * kTicksPerSecond));
+    target_lock = std::make_unique<TargetLock>(*ctx.bot, target_leash, (u32)(target_lock_seconds * kTicksPerSecond),
+                                               *estimate, view_extent, settings.rush_enemy_energy);
     Log(LogLevel::Info, "View %dx%d, attention %.2f", view_width, view_height, attention);
 
     auto leash_distance = lookup.GetFloat("LeashDistance");

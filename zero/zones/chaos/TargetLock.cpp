@@ -1,5 +1,9 @@
 #include "TargetLock.h"
 
+#include "EnergyEstimate.h"
+
+#include <math.h>
+
 #include <zero/CombatLogger.h>
 #include <zero/ZeroBot.h>
 #include <zero/game/Clock.h>
@@ -18,8 +22,14 @@ constexpr u32 kIgnoreTicks = 500;
 // The locked enemy's weapons must be more than this share of the danger for a repel to break the lock.
 constexpr float kRepelShare = 0.5f;
 
-TargetLock::TargetLock(ZeroBot& bot, float leash_distance, u32 lock_ticks)
-    : bot(bot), leash_distance(leash_distance), lock_ticks(lock_ticks) {}
+TargetLock::TargetLock(ZeroBot& bot, float leash_distance, u32 lock_ticks, EnergyEstimate& estimate,
+                       Vector2f view_extent, std::optional<float> rush_enemy_energy)
+    : bot(bot),
+      leash_distance(leash_distance),
+      lock_ticks(lock_ticks),
+      estimate(estimate),
+      view_extent(view_extent),
+      rush_enemy_energy(rush_enemy_energy) {}
 
 bool TargetLock::Ignored(u16 id, u32 now) const {
   auto it = ignore_until.find(id);
@@ -48,6 +58,11 @@ void TargetLock::Release(const char* why) {
   Note(why);
 }
 
+bool TargetLock::OnScreen(const Player& player, const Player& self) const {
+  Vector2f delta = player.position - self.position;
+  return fabsf(delta.x) <= view_extent.x && fabsf(delta.y) <= view_extent.y;
+}
+
 bool TargetLock::WithinLeash(const Player& player, const Player& self) const {
   return player.position.Distance(self.position) <= leash_distance;
 }
@@ -64,11 +79,42 @@ Player* TargetLock::Choose(const std::vector<Player*>& candidates) {
     return nullptr;
   };
 
-  // Another enemy hitting hard, and harder than the locked one, takes over the lock (ship.energy is max energy).
+  // Whether the locked enemy is one the bot rushes, by its estimate.
+  auto locked_weak = [&]() {
+    Player* target = locked != kNone ? find(locked) : nullptr;
+    return rush_enemy_energy && target && estimate.Get(*target).energy < *rush_enemy_energy;
+  };
+
+  // A bot that rushes weak enemies switches to the weakest one on its screen below its threshold, by its estimate,
+  // unless its target is weak already.
+  if (rush_enemy_energy) {
+    if (!locked_weak()) {
+      Player* weakest = nullptr;
+      float weakest_energy = *rush_enemy_energy;
+      for (Player* player : candidates) {
+        if (Ignored(player->id, now) || !OnScreen(*player, *self) || !WithinLeash(*player, *self)) continue;
+        float energy = estimate.Get(*player).energy;
+        if (energy < weakest_energy) {
+          weakest = player;
+          weakest_energy = energy;
+        }
+      }
+      if (weakest && weakest->id != locked) {
+        locked = weakest->id;
+        // Going after them starts the fight, so the quiet timer runs from now.
+        last_contact[locked] = now;
+        Note("weak enemy");
+      }
+    }
+  }
+
+  // Another enemy hitting hard, and harder than the locked one, takes over the lock (ship.energy is max energy), unless
+  // the bot is going after a weak enemy.
   float heavy = kHeavyDamage * bot.game->ship_controller.ship.energy;
   int locked_damage = locked != kNone ? RecentDamage(locked, now) : 0;
   u16 taker = kNone;
   for (Player* player : candidates) {
+    if (locked_weak()) break;
     int damage = RecentDamage(player->id, now);
     if (player->id == locked || damage < heavy || damage <= locked_damage) continue;
     if (Ignored(player->id, now) || !WithinLeash(*player, *self)) continue;

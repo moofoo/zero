@@ -2100,6 +2100,8 @@ void ShipController::OnWeaponHit(Weapon& weapon) {
 
   bool died = false;
 
+  float energy_before = self->energy;
+
   if (self->energy < damage) {
     bool is_bomb = (type == WeaponType::Bomb || type == WeaponType::ProximityBomb || type == WeaponType::Thor);
 
@@ -2133,7 +2135,7 @@ void ShipController::OnWeaponHit(Weapon& weapon) {
     self->energy -= damage;
   }
 
-  Event::Dispatch(WeaponSelfDamageEvent(weapon, *shooter, damage, died));
+  Event::Dispatch(WeaponSelfDamageEvent(weapon, *shooter, damage, died, energy_before));
 }
 
 }  // namespace zero

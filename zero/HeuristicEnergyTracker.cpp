@@ -107,30 +107,7 @@ void HeuristicEnergyTracker::HandleEvent(const WeaponFireEvent& event) {
   if (event.player.ship >= 8) return;
   if (estimate_type == EnergyHeuristicType::None) return;
 
-  u32 cost = 0;
-
-  auto& settings = player_manager.connection.settings.ShipSettings[event.player.ship];
-
-  switch (event.data.type) {
-    case WeaponType::Bullet:
-    case WeaponType::BouncingBullet: {
-      if (event.data.alternate) {
-        cost = settings.MultiFireEnergy * (event.data.level + 1);
-      } else {
-        cost = settings.BulletFireEnergy * (event.data.level + 1);
-      }
-    } break;
-    case WeaponType::Bomb:
-    case WeaponType::ProximityBomb: {
-      if (event.data.alternate) {
-        cost = settings.LandmineFireEnergy + settings.LandmineFireEnergyUpgrade * event.data.level;
-      } else {
-        cost = settings.BombFireEnergy + settings.BombFireEnergyUpgrade * event.data.level;
-      }
-    } break;
-    default: {
-    } break;
-  }
+  u32 cost = GetWeaponFireCost(player_manager.connection.settings.ShipSettings[event.player.ship], event.data);
 
   player_energy[event.player.id].energy -= (float)cost;
 }

@@ -171,14 +171,16 @@ struct PrizeEvent : public Event {
 
 struct ShipResetEvent : public Event {};
 
+// Fired whenever the bot takes damage, from anyone (including itself).
 struct WeaponSelfDamageEvent : public Event {
   Weapon& weapon;
   Player& shooter;
   int damage;
   bool death;
+  float energy_before;
 
-  WeaponSelfDamageEvent(Weapon& weapon, Player& shooter, int damage, bool death)
-      : weapon(weapon), shooter(shooter), damage(damage), death(death) {}
+  WeaponSelfDamageEvent(Weapon& weapon, Player& shooter, int damage, bool death, float energy_before)
+      : weapon(weapon), shooter(shooter), damage(damage), death(death), energy_before(energy_before) {}
 };
 
 struct BallTimeoutEvent : public Event {

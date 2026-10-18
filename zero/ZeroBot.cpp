@@ -91,6 +91,11 @@ bool ZeroBot::JoinZone(ServerInfo& server) {
   commands = memory_arena_construct_type(&perm_arena, CommandSystem, *this, this->game->dispatcher);
   commands->LoadSecurityLevels();
 
+  std::string_view events_path = args->GetValue({"events"});
+  if (!events_path.empty()) {
+    combat_logger = std::make_unique<CombatLogger>(*this, std::string(events_path).c_str());
+  }
+
   if (g_Settings.debug_window) {
     if (debug_renderer.Initialize(SURFACE_WIDTH, SURFACE_HEIGHT)) {
       game->render_enabled = true;
@@ -165,6 +170,8 @@ void ZeroBot::UpdateRelaxed(size_t update_count) {
       break;
     }
 
+    if (combat_logger) combat_logger->Update();
+
     if (i == update_count - 1) {
       game->Render(kTickTime);
     } else {
@@ -199,6 +206,8 @@ void ZeroBot::Update(size_t update_count) {
       game->Cleanup();
       break;
     }
+
+    if (combat_logger) combat_logger->Update();
 
     if (i == update_count - 1) {
       game->Render(kTickTime);

@@ -1,0 +1,45 @@
+#pragma once
+
+#include <stdio.h>
+#include <zero/Types.h>
+#include <zero/game/GameEvent.h>
+
+namespace zero {
+
+struct ZeroBot;
+
+// Writes this bot's combat events, one JSON object per line, for measuring how bots fight (chaos-offline's
+// `chaos.py stats`). Every event carries the server tick, so logs from separate bots line up. It only records
+// the bot's own point of view: its shots, the damage it takes, its kills and deaths, and how it handled enemy
+// bombs near it. Enabled with --events <path>.
+struct CombatLogger : EventHandler<WeaponFireEvent>,
+                      EventHandler<WeaponSelfDamageEvent>,
+                      EventHandler<WeaponHitEvent>,
+                      EventHandler<PlayerDeathEvent>,
+                      EventHandler<PlayerFreqAndShipChangeEvent> {
+  CombatLogger(ZeroBot& bot, const char* path);
+  ~CombatLogger();
+
+  bool IsOpen() const { return file != nullptr; }
+
+  // Call once per game tick. Writes the bot's position, velocity and energy twice a second.
+  void Update();
+
+  void HandleEvent(const WeaponFireEvent& event) override;
+  void HandleEvent(const WeaponSelfDamageEvent& event) override;
+  void HandleEvent(const WeaponHitEvent& event) override;
+  void HandleEvent(const PlayerDeathEvent& event) override;
+  void HandleEvent(const PlayerFreqAndShipChangeEvent& event) override;
+
+ private:
+  ZeroBot& bot;
+  FILE* file = nullptr;
+  u32 next_state_tick = 0;
+  // The last bomb that damaged the bot, so its explosion isn't also counted as a near miss.
+  Weapon* last_damaging_bomb = nullptr;
+
+  u32 ServerTick();
+  void WriteSpawn(int ship, int freq);
+};
+
+}  // namespace zero

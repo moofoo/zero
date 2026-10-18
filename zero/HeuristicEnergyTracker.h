@@ -8,6 +8,24 @@
 
 namespace zero {
 
+// Energy a ship spends firing a weapon, from the arena's ship settings.
+inline u32 GetWeaponFireCost(const ShipSettings& settings, WeaponData data) {
+  switch (data.type) {
+    case WeaponType::Bullet:
+    case WeaponType::BouncingBullet: {
+      return (data.alternate ? settings.MultiFireEnergy : settings.BulletFireEnergy) * (data.level + 1);
+    }
+    case WeaponType::Bomb:
+    case WeaponType::ProximityBomb: {
+      if (data.alternate) return settings.LandmineFireEnergy + settings.LandmineFireEnergyUpgrade * data.level;
+      return settings.BombFireEnergy + settings.BombFireEnergyUpgrade * data.level;
+    }
+    default: {
+      return 0;
+    }
+  }
+}
+
 struct Player;
 struct PlayerManager;
 

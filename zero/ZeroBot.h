@@ -1,5 +1,7 @@
 #pragma once
 
+#include <zero/CombatLogger.h>
+
 #include <zero/Args.h>
 #include <zero/Config.h>
 #include <zero/DebugRenderer.h>
@@ -75,6 +77,8 @@ struct ZeroBot {
 
   behavior::ExecuteContext execute_ctx;
   CommandSystem* commands = nullptr;
+  // Writes this bot's combat events when --events <path> is given.
+  std::unique_ptr<CombatLogger> combat_logger;
 
   char name[32] = {0};
   char password[256] = {0};

@@ -1,6 +1,5 @@
 #include "CombatLogger.h"
 
-#include <math.h>
 #include <zero/HeuristicEnergyTracker.h>
 #include <zero/ZeroBot.h>
 #include <zero/game/Game.h>
@@ -69,6 +68,25 @@ static float GetWeaponSpeedTiles(Game& game, Player& player, WeaponData data) {
   }
 }
 
+// What firing actually cost the bot, as ShipController charges it: free with super, scaled while carrying a flag.
+static u32 GetSelfFireCost(Game& game, Player& self, WeaponData data) {
+  if (game.ship_controller.ship.super_time > 0.0f) return 0;
+  u32 cost = GetWeaponFireCost(game.connection.settings.ShipSettings[self.ship], data);
+  bool bullet_or_bomb = data.type == WeaponType::Bullet || data.type == WeaponType::BouncingBullet ||
+                        data.type == WeaponType::Bomb || data.type == WeaponType::ProximityBomb;
+  if (bullet_or_bomb && (self.flags > 0 || (self.ball_carrier && game.connection.settings.UseFlagger))) {
+    cost = (u32)(cost * (game.connection.settings.FlaggerFireCostPercent / 1000.0f));
+  }
+  return cost;
+}
+
+// An enemy bomb near the bot, and what became of it: "hit", "repelled" or "dodged".
+static void WriteBombEvent(FILE* file, u32 tick, const char* shooter, const char* outcome, float closest) {
+  fprintf(file, "{\"e\":\"bomb\",\"tick\":%u,\"shooter\":", tick);
+  WriteJsonString(file, shooter);
+  fprintf(file, ",\"outcome\":\"%s\",\"closest\":%.2f}\n", outcome, closest);
+}
+
 static float GetBlastRadiusTiles(Game& game, WeaponData data) {
   float pixels = (float)game.connection.settings.BombExplodePixels * (data.level + 1);
   return pixels / 16.0f;
@@ -124,7 +142,7 @@ void CombatLogger::HandleEvent(const WeaponFireEvent& event) {
   if (!self || &event.player != self || self->ship >= 8) return;
 
   u32 tick = ServerTick();
-  u32 cost = GetWeaponFireCost(game.connection.settings.ShipSettings[self->ship], event.data);
+  u32 cost = GetSelfFireCost(game, *self, event.data);
   Vector2f shot_velocity = self->velocity + self->GetHeading() * GetWeaponSpeedTiles(game, *self, event.data);
 
   // The nearest enemy is what the shot is most likely aimed at.
@@ -140,12 +158,10 @@ void CombatLogger::HandleEvent(const WeaponFireEvent& event) {
     }
   }
 
+  bool multifire =
+      event.data.alternate && (event.data.type == WeaponType::Bullet || event.data.type == WeaponType::BouncingBullet);
   fprintf(file, "{\"e\":\"fire\",\"tick\":%u,\"weapon\":\"%s\",\"level\":%d,\"multifire\":%s,\"cost\":%u,", tick,
-          GetWeaponName(event.data), event.data.level + 1,
-          (event.data.alternate && event.data.type != WeaponType::Bomb && event.data.type != WeaponType::ProximityBomb)
-              ? "true"
-              : "false",
-          cost);
+          GetWeaponName(event.data), event.data.level + 1, multifire ? "true" : "false", cost);
   fprintf(file, "\"energy\":%d,\"shot_speed\":%.2f,\"target\":", (int)self->energy, shot_velocity.Length());
   if (target) {
     WriteJsonString(file, target->name);
@@ -164,9 +180,7 @@ void CombatLogger::HandleEvent(const WeaponFireEvent& event) {
       float distance = weapon.GetPosition().Distance(self->position);
       if (distance > reach) continue;
       Player* shooter = game.player_manager.GetPlayerById(weapon.player_id);
-      fprintf(file, "{\"e\":\"bomb\",\"tick\":%u,\"shooter\":", tick);
-      WriteJsonString(file, shooter ? shooter->name : "?");
-      fprintf(file, ",\"outcome\":\"repelled\",\"closest\":%.2f}\n", distance);
+      WriteBombEvent(file, tick, shooter ? shooter->name : "?", "repelled", distance);
     }
   }
   fflush(file);
@@ -194,10 +208,9 @@ void CombatLogger::HandleEvent(const WeaponSelfDamageEvent& event) {
   }
 
   if (bomb && &event.shooter != self) {
-    last_damaging_bomb = &event.weapon;
-    fprintf(file, "{\"e\":\"bomb\",\"tick\":%u,\"shooter\":", tick);
-    WriteJsonString(file, event.shooter.name);
-    fprintf(file, ",\"outcome\":\"hit\",\"closest\":%.2f}\n", blast);
+    last_damaging_shooter = event.shooter.id;
+    last_damage_tick = GetCurrentTick();
+    WriteBombEvent(file, tick, event.shooter.name, "hit", blast);
   }
   fflush(file);
 }
@@ -211,15 +224,14 @@ void CombatLogger::HandleEvent(const WeaponHitEvent& event) {
   // An enemy bomb going off near the bot without hurting it: a near miss.
   Weapon& weapon = event.weapon;
   if (!IsBomb(weapon.data) || weapon.data.alternate || weapon.frequency == self->frequency) return;
-  if (event.target == self || &weapon == last_damaging_bomb) return;
+  if (event.target == self) return;
+  if (weapon.player_id == last_damaging_shooter && TICK_DIFF(GetCurrentTick(), last_damage_tick) <= 1) return;
 
   float distance = weapon.GetPosition().Distance(self->position);
   if (distance > GetBlastRadiusTiles(game, weapon.data) * kNearMissRadii) return;
 
   Player* shooter = game.player_manager.GetPlayerById(weapon.player_id);
-  fprintf(file, "{\"e\":\"bomb\",\"tick\":%u,\"shooter\":", ServerTick());
-  WriteJsonString(file, shooter ? shooter->name : "?");
-  fprintf(file, ",\"outcome\":\"dodged\",\"closest\":%.2f}\n", distance);
+  WriteBombEvent(file, ServerTick(), shooter ? shooter->name : "?", "dodged", distance);
   fflush(file);
 }
 
@@ -238,7 +250,7 @@ void CombatLogger::HandleEvent(const PlayerDeathEvent& event) {
     WriteJsonString(file, event.player.name);
     fprintf(file, "}\n");
   }
-  last_damaging_bomb = nullptr;
+  last_damaging_shooter = 0xFFFF;
   fflush(file);
 }
 

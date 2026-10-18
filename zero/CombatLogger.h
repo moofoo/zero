@@ -35,8 +35,10 @@ struct CombatLogger : EventHandler<WeaponFireEvent>,
   ZeroBot& bot;
   FILE* file = nullptr;
   u32 next_state_tick = 0;
-  // The last bomb that damaged the bot, so its explosion isn't also counted as a near miss.
-  Weapon* last_damaging_bomb = nullptr;
+  // The last bomb that damaged the bot (by shooter and tick), so its explosion isn't also counted as a near miss.
+  // Not a Weapon pointer: the weapon array is compacted, so another bomb can later sit at the same address.
+  u16 last_damaging_shooter = 0xFFFF;
+  u32 last_damage_tick = 0;
 
   u32 ServerTick();
   void WriteSpawn(int ship, int freq);

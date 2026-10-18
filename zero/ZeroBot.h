@@ -1,8 +1,7 @@
 #pragma once
 
-#include <zero/CombatLogger.h>
-
 #include <zero/Args.h>
+#include <zero/CombatLogger.h>
 #include <zero/Config.h>
 #include <zero/DebugRenderer.h>
 #include <zero/Event.h>

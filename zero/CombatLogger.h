@@ -39,6 +39,9 @@ struct CombatLogger : EventHandler<WeaponFireEvent>,
   // The bot chose to take incoming damage rather than dodge or repel: the damage it expected, and its win chance after.
   void WriteAccept(float damage, float win_chance);
 
+  // The bot took an opportunity (a tactic) against a player: e.g. "window" or "slow".
+  void WriteTactic(const char* name, const char* target);
+
   void HandleEvent(const WeaponFireEvent& event) override;
   void HandleEvent(const WeaponSelfDamageEvent& event) override;
   void HandleEvent(const WeaponHitEvent& event) override;

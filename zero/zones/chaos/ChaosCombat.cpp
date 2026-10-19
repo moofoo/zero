@@ -2,6 +2,7 @@
 
 #include "CommitDecision.h"
 #include "EnergyEstimate.h"
+#include "Opportunities.h"
 #include "PlayerHistory.h"
 #include "TargetLock.h"
 
@@ -392,6 +393,55 @@ struct SkilledAimNode : public behavior::BehaviorNode {
   float lead;
 };
 
+// Aims where the target will be after bouncing off a wall, when its path meets one before the shot can reach it: the
+// guide's rebound. The target's flight is simulated with the game's own movement and bounces; the aim is left alone
+// when there's no bounce first. For bots that lead their shots fully. Logs a "rebound" tactic at most once a second.
+struct ReboundAimNode : public behavior::BehaviorNode {
+  ReboundAimNode(const char* target_key, const char* position_key) : target_key(target_key), position_key(position_key) {}
+
+  static constexpr float kStep = 0.02f;       // seconds
+  static constexpr float kMaxSeconds = 3.0f;  // no further ahead than this
+  static constexpr float kFarDistance = 50.0f;
+  static constexpr u32 kLogTicks = 100;
+
+  behavior::ExecuteResult Execute(behavior::ExecuteContext& ctx) override {
+    Game& game = *ctx.bot->game;
+    Player* self = game.player_manager.GetSelf();
+    auto opt_target = ctx.blackboard.Value<Player*>(target_key);
+    if (!self || self->ship >= 8 || !opt_target || !*opt_target) return behavior::ExecuteResult::Success;
+    Player& target = **opt_target;
+    float weapon_speed = behavior::GetWeaponSpeed(game, *self, WeaponType::Bullet);
+    if (weapon_speed <= 0.0f) return behavior::ExecuteResult::Success;
+
+    // A copy of the target flown forward until a shot fired now could meet it.
+    Player ghost = target;
+    ghost.lerp_time = 0.0f;
+    bool bounced = false;
+    for (float t = kStep; t <= kMaxSeconds; t += kStep) {
+      Vector2f before = ghost.velocity;
+      game.player_manager.SimulatePlayer(ghost, kStep, true);
+      if (ghost.velocity.x * before.x < 0.0f || ghost.velocity.y * before.y < 0.0f) bounced = true;
+
+      Vector2f offset = ghost.position - self->position - self->velocity * t;
+      if (offset.Length() > weapon_speed * t) continue;
+      if (!bounced || ghost.position.Distance(target.position) > kFarDistance) break;
+
+      ctx.blackboard.Set(position_key, self->position + offset);
+      u32 now = GetCurrentTick();
+      if (ctx.bot->combat_logger && !TICK_GT(next_log_tick, now)) {
+        ctx.bot->combat_logger->WriteTactic("rebound", target.name);
+        next_log_tick = now + kLogTicks;
+      }
+      break;
+    }
+    return behavior::ExecuteResult::Success;
+  }
+
+  const char* target_key;
+  const char* position_key;
+  u32 next_log_tick = 0;
+};
+
 // Now and then sends a dodge the wrong way: with this chance, decided afresh each second, the dodge's push is reversed.
 struct DodgeErrorNode : public behavior::BehaviorNode {
   explicit DodgeErrorNode(float chance) : chance(chance), random(std::random_device{}()) {}
@@ -567,10 +617,15 @@ struct MineCoverNode : public behavior::BehaviorNode {
 // worth the energy it costs. Energy is cheap with plenty to spare and dear near the reserve the bot's mode needs, and
 // below the reserve no shot is worth it. A shot slower than the weapon's own speed towards the target is less likely
 // to land. A bot that judges shots poorly overestimates their chance, up to double, and a bomb's worth is scaled by the
-// bot's appetite for bombing.
+// bot's appetite for bombing. A slow target the bot has spotted is likelier to be hit.
 struct ShotValueNode : public behavior::BehaviorNode {
-  ShotValueNode(WeaponType weapon, const char* velocity_key, float judgement, float bomb_appetite)
-      : weapon(weapon), velocity_key(velocity_key), judgement(judgement), bomb_appetite(bomb_appetite) {}
+  ShotValueNode(WeaponType weapon, const char* velocity_key, float judgement, float bomb_appetite,
+                Opportunities* opportunities)
+      : weapon(weapon),
+        velocity_key(velocity_key),
+        judgement(judgement),
+        bomb_appetite(bomb_appetite),
+        opportunities(opportunities) {}
 
   // The share of max energy each mode keeps in reserve: commit, pressure, hold, disengage, recharge. Backing off keeps
   // enough for a few cover shots; recharging keeps the most.
@@ -585,6 +640,7 @@ struct ShotValueNode : public behavior::BehaviorNode {
     Player* self = game.player_manager.GetSelf();
     auto opt_velocity = ctx.blackboard.Value<Vector2f>(velocity_key);
     auto opt_target = ctx.blackboard.Value<Vector2f>("nearest_target_position");
+    auto opt_player = ctx.blackboard.Value<Player*>("nearest_target");
     if (!self || self->ship >= 8 || !opt_velocity || !opt_target) return behavior::ExecuteResult::Failure;
 
     auto& arena = game.connection.settings;
@@ -599,17 +655,18 @@ struct ShotValueNode : public behavior::BehaviorNode {
     float speed = opt_velocity->Dot(Normalize(to_target));
     if (speed <= 0.0f || weapon_speed <= 0.0f) return behavior::ExecuteResult::Failure;
     float speed_factor = speed / weapon_speed < 1.0f ? speed / weapon_speed : 1.0f;
+    float slow_factor = opt_player && *opt_player ? opportunities->SlowFactor(**opt_player, bomb, distance) : 1.0f;
 
     // The shot's expected damage, as the bot judges it, and its energy cost.
     float value;
     float cost;
     if (bomb) {
       float level = ship.bombs > 0 ? ship.bombs - 1.0f : 0.0f;
-      value = BombExpectedDamage(arena.BombDamageLevel / 1000.0f) * speed_factor * bomb_appetite;
+      value = BombExpectedDamage(arena.BombDamageLevel / 1000.0f) * speed_factor * slow_factor * bomb_appetite;
       cost = ship_settings.BombFireEnergy + ship_settings.BombFireEnergyUpgrade * level;
     } else {
       float guns = ship.guns > 0 ? (float)ship.guns : 1.0f;
-      float chance = BulletHitChance(distance) * speed_factor;
+      float chance = BulletHitChance(distance) * speed_factor * slow_factor;
       value = (chance < 1.0f ? chance : 1.0f) * BulletDamage(arena, guns);
       cost = ship_settings.BulletFireEnergy * guns;
     }
@@ -630,6 +687,7 @@ struct ShotValueNode : public behavior::BehaviorNode {
   const char* velocity_key;
   float judgement;
   float bomb_appetite;
+  Opportunities* opportunities;
 };
 
 // Dodge when incoming damage is at least the threshold fraction of max energy, unless the bot has decided to accept
@@ -778,15 +836,30 @@ static std::unique_ptr<behavior::BehaviorNode> CreateShotSpread(const CombatSett
   return std::make_unique<SuccessNode>(builder.Build());
 }
 
-// Aim at the target: as it is now, or with a reaction time as the bot saw it a moment ago.
+// Aim at the target: as it is now, or with a reaction time as the bot saw it a moment ago; with full lead, past a
+// wall it's about to bounce off.
 static std::unique_ptr<behavior::BehaviorNode> CreateAim(const CombatSettings& settings, PlayerHistory& history) {
   using namespace behavior;
+  std::unique_ptr<BehaviorNode> aim;
   if (settings.reaction_ticks <= 0 && settings.lead_skill == 1.0f) {
-    return std::make_unique<AimNode>(WeaponType::Bullet, "nearest_target", "aimshot");
+    aim = std::make_unique<AimNode>(WeaponType::Bullet, "nearest_target", "aimshot");
+  } else {
+    aim = std::make_unique<SkilledAimNode>(&history, "nearest_target", "aimshot", (u32)settings.reaction_ticks,
+                                           settings.lead_skill);
   }
+  if (settings.lead_skill < 1.0f) return aim;
 
-  return std::make_unique<SkilledAimNode>(&history, "nearest_target", "aimshot", (u32)settings.reaction_ticks,
-                                          settings.lead_skill);
+  BehaviorBuilder builder;
+
+  // clang-format off
+  builder
+    .Sequence()
+        .Composite(std::move(aim))
+        .Child<ReboundAimNode>("nearest_target", "aimshot")
+        .End();
+  // clang-format on
+
+  return builder.Build();
 }
 
 // Aim drift, when the skill has any. Always succeeds.
@@ -799,10 +872,11 @@ static std::unique_ptr<behavior::BehaviorNode> CreateAimError(const CombatSettin
 // Whether a shot is worth taking, by expected value (which also keeps the energy a backing off or recharging bot
 // needs); while pursued, a cover shot is always worth it when the bot uses cover fire.
 static std::unique_ptr<behavior::BehaviorNode> CreateShotChoice(const CombatSettings& settings, WeaponType weapon,
-                                                                const char* velocity_key) {
+                                                                const char* velocity_key, Opportunities& opportunities) {
   using namespace behavior;
   auto value = [&]() {
-    return std::make_unique<ShotValueNode>(weapon, velocity_key, settings.shot_judgement, settings.bomb_appetite);
+    return std::make_unique<ShotValueNode>(weapon, velocity_key, settings.shot_judgement, settings.bomb_appetite,
+                                           &opportunities);
   };
   if (!settings.cover_fire) return value();
 
@@ -1021,7 +1095,7 @@ std::unique_ptr<behavior::BehaviorNode> CreateCombatTree(const CombatSettings& s
                                 .Composite(CreateBombOverlapCheck(settings))
                                 .Child<DistanceThresholdNode>("nearest_target_position", bomb_min_range)
                                 .Child<ShotVelocityQueryNode>(WeaponType::Bomb, "bomb_fire_velocity")
-                                .Composite(CreateShotChoice(settings, WeaponType::Bomb, "bomb_fire_velocity"))
+                                .Composite(CreateShotChoice(settings, WeaponType::Bomb, "bomb_fire_velocity", senses.opportunities))
                                 .Child<RayNode>("self_position", "bomb_fire_velocity", "bomb_fire_ray")
                                 .Child<DynamicPlayerBoundingBoxQueryNode>("nearest_target", "target_bounds", 3.0f)
                                 .Child<MoveRectangleNode>("target_bounds", "aimshot", "target_bounds")
@@ -1035,7 +1109,7 @@ std::unique_ptr<behavior::BehaviorNode> CreateCombatTree(const CombatSettings& s
                                 .InvertChild<InputQueryNode>(InputAction::Bomb) // Don't try to shoot a bullet when shooting a bomb.
                                 .InvertChild<TileQueryNode>(kTileIdSafe)
                                 .Child<ShotVelocityQueryNode>(WeaponType::Bullet, "bullet_fire_velocity")
-                                .Composite(CreateShotChoice(settings, WeaponType::Bullet, "bullet_fire_velocity"))
+                                .Composite(CreateShotChoice(settings, WeaponType::Bullet, "bullet_fire_velocity", senses.opportunities))
                                 .Child<RayNode>("self_position", "bullet_fire_velocity", "bullet_fire_ray")
                                 .Child<DynamicPlayerBoundingBoxQueryNode>("nearest_target", "target_bounds", 4.0f)
                                 .Child<MoveRectangleNode>("target_bounds", "aimshot", "target_bounds")

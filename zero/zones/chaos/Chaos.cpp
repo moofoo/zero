@@ -11,6 +11,7 @@
 #include <zero/zones/chaos/ChaosCombat.h>
 #include <zero/zones/chaos/CommitDecision.h>
 #include <zero/zones/chaos/EnergyEstimate.h>
+#include <zero/zones/chaos/Opportunities.h>
 #include <zero/zones/chaos/PlayerHistory.h>
 #include <zero/zones/chaos/TargetLock.h>
 
@@ -235,7 +236,11 @@ struct ChaosBehavior : public behavior::Behavior {
     decision_settings.commit_energy = lookup.GetFloat("CommitEnergy").value_or(decision_settings.commit_energy);
     auto leash = lookup.GetFloat("LeashDistance");
     decision_settings.retreat_distance = settings.retreat_distance.value_or(leash.value_or(kDefaultLeashDistance));
-    decision = std::make_unique<CommitDecision>(*ctx.bot, *estimate, decision_settings);
+    // Spotting opponents' mistakes: as likely as the bot's Judgement (without one, always), noticing their bombs as it
+    // notices any weapon.
+    opportunities = std::make_unique<Opportunities>(*ctx.bot, judgement ? std::clamp(*judgement, 0.0f, 1.0f) : 1.0f,
+                                                    awareness.value_or(1.0f), view_extent);
+    decision = std::make_unique<CommitDecision>(*ctx.bot, *estimate, *opportunities, decision_settings);
     Log(LogLevel::Info, "Commit decision: commit at %.2f, disengage below %.2f", decision_settings.commit_confidence,
         decision_settings.disengage_confidence);
 
@@ -279,7 +284,7 @@ struct ChaosBehavior : public behavior::Behavior {
               .Child<TimerSetNode>("next_freq_change_tick", 300)
               .Child<PlayerChangeFrequencyNode>("request_freq")
               .End()
-          .Composite(CreateCombatTree(settings, {*estimate, *history, *target_lock, *decision}))
+          .Composite(CreateCombatTree(settings, {*estimate, *history, *target_lock, *decision, *opportunities}))
           .End();
     // clang-format on
 
@@ -290,6 +295,7 @@ struct ChaosBehavior : public behavior::Behavior {
   std::unique_ptr<EnergyEstimate> estimate;
   std::unique_ptr<PlayerHistory> history;
   std::unique_ptr<TargetLock> target_lock;
+  std::unique_ptr<Opportunities> opportunities;
   std::unique_ptr<CommitDecision> decision;
 };
 

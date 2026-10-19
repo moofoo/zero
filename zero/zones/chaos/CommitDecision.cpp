@@ -1,6 +1,7 @@
 #include "CommitDecision.h"
 
 #include "EnergyEstimate.h"
+#include "Opportunities.h"
 
 #include <math.h>
 #include <zero/ZeroBot.h>
@@ -82,8 +83,9 @@ static float NormalCdf(float x) {
   return 0.5f * erfcf(-x / sqrtf(2.0f));
 }
 
-CommitDecision::CommitDecision(ZeroBot& bot, EnergyEstimate& estimate, DecisionSettings settings)
-    : bot(bot), estimate(estimate), settings(settings), random(std::random_device{}()) {}
+CommitDecision::CommitDecision(ZeroBot& bot, EnergyEstimate& estimate, Opportunities& opportunities,
+                               DecisionSettings settings)
+    : bot(bot), estimate(estimate), opportunities(opportunities), settings(settings), random(std::random_device{}()) {}
 
 float CommitDecision::DamageRate(Player& shooter, Player& victim, bool shooter_is_self) {
   if (shooter.ship >= 8) return 0.0f;
@@ -96,14 +98,19 @@ float CommitDecision::DamageRate(Player& shooter, Player& victim, bool shooter_i
   float bombs = shooter_is_self ? (float)own.bombs : GuessedLevel(ship.InitialBombs, ship.MaxBombs);
 
   float distance = shooter.position.Distance(victim.position);
-  float hit_chance = BulletHitChance(distance < kFightDistance ? distance : kFightDistance);
+  float fight_distance = distance < kFightDistance ? distance : kFightDistance;
+  float hit_chance = BulletHitChance(fight_distance);
+  float bullet_factor = shooter_is_self ? opportunities.SlowFactor(victim, false, fight_distance) : 1.0f;
+  float bomb_factor = shooter_is_self ? opportunities.SlowFactor(victim, true, fight_distance) : 1.0f;
 
   float rate = 0.0f;
   if (guns > 0.0f) {
-    rate += FireRate(ship.BulletFireDelay) * kEngagedFireFraction * hit_chance * BulletDamage(arena, guns);
+    float chance = hit_chance * bullet_factor < 1.0f ? hit_chance * bullet_factor : 1.0f;
+    rate += FireRate(ship.BulletFireDelay) * kEngagedFireFraction * chance * BulletDamage(arena, guns);
   }
   if (bombs > 0.0f) {
-    rate += FireRate(ship.BombFireDelay) * kEngagedFireFraction * BombExpectedDamage(arena.BombDamageLevel / 1000.0f);
+    rate += FireRate(ship.BombFireDelay) * kEngagedFireFraction *
+            BombExpectedDamage(arena.BombDamageLevel / 1000.0f) * bomb_factor;
   }
 
   // Facing away, they have to turn first.
@@ -145,6 +152,9 @@ float CommitDecision::WinChance(Player& self, Player& target, float self_energy)
                                   GuessedLevel(target_ship.InitialBombs, target_ship.MaxBombs));
   float target_recharge = GuessedLevel(target_ship.InitialRecharge, target_ship.MaximumRecharge) / 10.0f;
   float outgoing = DamageRate(self, target, true);
+
+  // A fire window: the target can't fire for a moment, which is worth the damage it would have dealt.
+  self_energy += DamageRate(target, self, false) * opportunities.WindowSeconds(target);
 
   float self_loss = incoming + self_spend - self_recharge;
   float target_loss = outgoing + target_spend - target_recharge;

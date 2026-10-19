@@ -180,6 +180,17 @@ void CombatLogger::WriteAccept(float damage, float win_chance) {
   fflush(file);
 }
 
+void CombatLogger::WriteTactic(const char* name, const char* target) {
+  if (!file) return;
+
+  fprintf(file, "{\"e\":\"tactic\",\"tick\":%u,\"name\":", ServerTick());
+  WriteJsonString(file, name);
+  fprintf(file, ",\"target\":");
+  WriteJsonString(file, target);
+  fprintf(file, "}\n");
+  fflush(file);
+}
+
 void CombatLogger::HandleEvent(const WeaponFireEvent& event) {
   if (!file || !bot.game) return;
   Game& game = *bot.game;

@@ -14,6 +14,7 @@ struct ZeroBot;
 namespace chaos {
 
 struct EnergyEstimate;
+struct Opportunities;
 
 // What a bot is doing in a fight, chosen by the commit decision:
 // - Commit: close in and finish them.
@@ -55,9 +56,11 @@ struct DecisionSettings {
 // out of energy first if the bot fought the target at fighting range. The estimate uses only what a player in the
 // bot's seat would know: its own state, the target's estimated energy and its uncertainty (EnergyEstimate), where the
 // target and other enemies are and which way they face, and the arena's ship settings. Hit chances come from measured
-// games. A mode must clear its threshold by a margin to replace the current one.
+// games. The opponent's mistakes the bot has spotted count too (Opportunities): a fire window is energy in the bot's
+// favour, the damage the target can't deal during it, and a slow target takes more of the bot's damage. A mode must
+// clear its threshold by a margin to replace the current one.
 struct CommitDecision {
-  CommitDecision(ZeroBot& bot, EnergyEstimate& estimate, DecisionSettings settings);
+  CommitDecision(ZeroBot& bot, EnergyEstimate& estimate, Opportunities& opportunities, DecisionSettings settings);
 
   // The mode for this tick, re-deciding when due.
   CombatMode Decide(Player& self, Player& target);
@@ -74,6 +77,7 @@ struct CommitDecision {
  private:
   ZeroBot& bot;
   EnergyEstimate& estimate;
+  Opportunities& opportunities;
   DecisionSettings settings;
   std::mt19937 random;
 
@@ -85,7 +89,8 @@ struct CommitDecision {
   // The chance the target runs out of energy before the bot does, if both fight on at fighting range, with the bot
   // at this energy.
   float WinChance(Player& self, Player& target, float self_energy);
-  // Expected damage per second one player does to another at up to fighting range, from what the bot can see.
+  // Expected damage per second one player does to another at up to fighting range, from what the bot can see. The
+  // bot's own damage counts a slow target it has spotted.
   float DamageRate(Player& shooter, Player& victim, bool shooter_is_self);
   // Energy per second a ship spends firing while engaged.
   float FiringCost(const ShipSettings& ship, float guns, float bombs);

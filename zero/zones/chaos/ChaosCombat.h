@@ -10,6 +10,7 @@ namespace chaos {
 
 struct CommitDecision;
 struct EnergyEstimate;
+struct Opportunities;
 struct PlayerHistory;
 struct TargetLock;
 
@@ -80,12 +81,14 @@ struct CombatSettings {
 // The tree every Chaos bot flies: enter its ship, then fight the nearest enemy, or else chase greens, or else
 // patrol the waypoints.
 // What the bot knows and remembers, which must outlive the tree: enemy energy only from the estimate, with a reaction
-// time the target's movement from the history, and whom it's fighting from the target lock.
+// time the target's movement from the history, whom it's fighting from the target lock, and its opponents' mistakes
+// it has spotted.
 struct CombatSenses {
   EnergyEstimate& estimate;
   PlayerHistory& history;
   TargetLock& target_lock;
   CommitDecision& decision;
+  Opportunities& opportunities;
 };
 
 std::unique_ptr<behavior::BehaviorNode> CreateCombatTree(const CombatSettings& settings, CombatSenses senses);

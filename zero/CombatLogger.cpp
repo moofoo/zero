@@ -1,5 +1,6 @@
 #include "CombatLogger.h"
 
+#include <zero/BotController.h>
 #include <zero/HeuristicEnergyTracker.h>
 #include <zero/ZeroBot.h>
 #include <zero/game/Game.h>
@@ -127,11 +128,22 @@ void CombatLogger::Update() {
   if (TICK_GT(next_state_tick, tick)) return;
   next_state_tick = tick + state_ticks;
 
+  // How it's flying: its heading, its thrust this tick (1 forward, -1 back, 0 none), and the steering force its
+  // behavior asked for (the change in velocity it wants, tiles/s).
+  Vector2f heading = self->GetHeading();
+  int thrust = 0;
+  Vector2f force;
+  if (bot.bot_controller) {
+    const InputState& input = bot.bot_controller->last_input;
+    thrust = input.IsDown(InputAction::Forward) ? 1 : input.IsDown(InputAction::Backward) ? -1 : 0;
+    force = bot.bot_controller->steering.force;
+  }
+
   fprintf(file,
           "{\"e\":\"state\",\"tick\":%u,\"x\":%.2f,\"y\":%.2f,\"vx\":%.2f,\"vy\":%.2f,\"energy\":%d,"
-          "\"max_energy\":%u}\n",
+          "\"max_energy\":%u,\"hx\":%.3f,\"hy\":%.3f,\"thrust\":%d,\"fx\":%.2f,\"fy\":%.2f}\n",
           tick, self->position.x, self->position.y, self->velocity.x, self->velocity.y, (int)self->energy,
-          bot.game->ship_controller.ship.energy);
+          bot.game->ship_controller.ship.energy, heading.x, heading.y, thrust, force.x, force.y);
   fflush(file);
 }
 

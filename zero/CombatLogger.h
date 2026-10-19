@@ -35,6 +35,9 @@ struct CombatLogger : EventHandler<WeaponFireEvent>,
   // The commit decision's mode changed, and the win chance it judged.
   void WriteMode(const char* mode, float win_chance);
 
+  // The bot chose to take incoming damage rather than dodge or repel: the damage it expected, and its win chance after.
+  void WriteAccept(float damage, float win_chance);
+
   void HandleEvent(const WeaponFireEvent& event) override;
   void HandleEvent(const WeaponSelfDamageEvent& event) override;
   void HandleEvent(const WeaponHitEvent& event) override;

@@ -62,6 +62,12 @@ struct CommitDecision {
   // The mode for this tick, re-deciding when due.
   CombatMode Decide(Player& self, Player& target);
 
+  // The chance of winning if the bot first takes this much damage (for accepting a hit).
+  float WinChanceAfter(Player& self, Player& target, float damage);
+
+  // The mode from the last decision.
+  CombatMode Mode() const { return mode; }
+
   // The chance of winning behind the last decision, as judged (with the bot's judgement noise).
   float win_chance = 0.5f;
 
@@ -76,8 +82,9 @@ struct CommitDecision {
   // When the bot last committed: a commit lasts a minimum time.
   u32 commit_tick = 0;
 
-  // The chance the target runs out of energy before the bot does, if both fight on at fighting range.
-  float WinChance(Player& self, Player& target);
+  // The chance the target runs out of energy before the bot does, if both fight on at fighting range, with the bot
+  // at this energy.
+  float WinChance(Player& self, Player& target, float self_energy);
   // Expected damage per second one player does to another at up to fighting range, from what the bot can see.
   float DamageRate(Player& shooter, Player& victim, bool shooter_is_self);
   // Energy per second a ship spends firing while engaged.

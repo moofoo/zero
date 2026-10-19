@@ -170,6 +170,9 @@ struct ChaosBehavior : public behavior::Behavior {
     settings.cover_fire = lookup.GetFloat("CoverFire").value_or(1.0f) > 0.5f;
     settings.mine_cover = lookup.GetFloat("MineCover").value_or(1.0f) > 0.5f;
     settings.mine_cover_range = lookup.GetFloat("MineCoverRange").value_or(settings.mine_cover_range);
+    settings.accept_confidence = lookup.GetFloat("AcceptConfidence").value_or(settings.accept_confidence);
+    settings.damage_judgement = skill_float("DamageJudgement").value_or(0.0f);
+    settings.judgement_noise = skill_float("JudgementNoise").value_or(0.0f);
     if (engage && !settings.engage_close && std::string_view(*engage) != "range") {
       Log(LogLevel::Warning, "Engage should be range or close, not %s: using range", *engage);
     }

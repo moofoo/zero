@@ -174,6 +174,63 @@ struct CombatModeIsNode : public behavior::BehaviorNode {
   CombatMode or_mode;
 };
 
+// Accepting a hit: while committing or pressuring, when incoming damage would make the bot dodge or repel, it judges
+// the damage (with DamageJudgement's error) and its win chance after taking it (with JudgementNoise). If it would still
+// win (AcceptConfidence) and not drop below kLastEnergy, it sets "accepting": no dodge, repel or portal. Logs each new
+// accept. Always succeeds.
+struct AcceptNode : public behavior::BehaviorNode {
+  AcceptNode(CommitDecision* decision, float accept_confidence, float dodge_threshold, float damage_judgement,
+             float judgement_noise)
+      : decision(decision),
+        accept_confidence(accept_confidence),
+        dodge_threshold(dodge_threshold),
+        damage_judgement(damage_judgement),
+        judgement_noise(judgement_noise),
+        random(std::random_device{}()) {}
+
+  // Never accept a hit expected to leave less than this share of max energy.
+  static constexpr float kLastEnergy = 0.1f;
+
+  behavior::ExecuteResult Execute(behavior::ExecuteContext& ctx) override {
+    bool was_accepting = ctx.blackboard.ValueOr<bool>("accepting", false);
+    ctx.blackboard.Erase("accepting");
+
+    Player* self = ctx.bot->game->player_manager.GetSelf();
+    auto opt_target = ctx.blackboard.Value<Player*>("nearest_target");
+    CombatMode mode = decision->Mode();
+    if (!self || !opt_target || !*opt_target) return behavior::ExecuteResult::Success;
+    if (mode != CombatMode::Commit && mode != CombatMode::Pressure) return behavior::ExecuteResult::Success;
+
+    // Only damage that would otherwise make the bot dodge or repel needs a decision.
+    float incoming = ctx.blackboard.ValueOr<float>("incoming_damage", 0.0f);
+    float repel_energy = ctx.blackboard.ValueOr<float>("repel_energy", self->energy);
+    float max_energy = (float)ctx.bot->game->ship_controller.ship.energy;
+    if (incoming <= 0.0f || (incoming < repel_energy && incoming < dodge_threshold * max_energy)) {
+      return behavior::ExecuteResult::Success;
+    }
+
+    float judged = incoming;
+    if (damage_judgement > 0.0f) judged *= 1.0f + std::normal_distribution<float>(0.0f, damage_judgement)(random);
+    if (judged < 0.0f) judged = 0.0f;
+    if (self->energy - judged < kLastEnergy * max_energy) return behavior::ExecuteResult::Success;
+
+    float chance = decision->WinChanceAfter(*self, **opt_target, judged);
+    if (judgement_noise > 0.0f) chance += std::normal_distribution<float>(0.0f, judgement_noise)(random);
+    if (chance < accept_confidence) return behavior::ExecuteResult::Success;
+
+    ctx.blackboard.Set("accepting", true);
+    if (!was_accepting && ctx.bot->combat_logger) ctx.bot->combat_logger->WriteAccept(judged, chance);
+    return behavior::ExecuteResult::Success;
+  }
+
+  CommitDecision* decision;
+  float accept_confidence;
+  float dodge_threshold;
+  float damage_judgement;
+  float judgement_noise;
+  std::mt19937 random;
+};
+
 // Chooses the bot's target through its target lock, from the enemies it could fight: in a ship, not respawning, not
 // in a safe zone, reachable over the map, and not vanished from where it was last seen (as NearestMemoryTargetNode).
 struct LockedTargetNode : public behavior::BehaviorNode {
@@ -565,8 +622,12 @@ static std::unique_ptr<behavior::BehaviorNode> CreateDodge(const CombatSettings&
   // Stay on them instead: with the commit decision, while committing; without it, when the enemy is below the rush
   // threshold (without one, no enemy is low enough).
   std::unique_ptr<BehaviorNode> pressing;
+  std::unique_ptr<BehaviorNode> near = std::make_unique<behavior::InvertNode>(
+      std::make_unique<DistanceThresholdNode>("nearest_target_position", "self_position", kNearbyEnemyThreshold));
   if (settings.commit_decision) {
-    pressing = std::make_unique<CombatModeIsNode>(CombatMode::Commit);
+    // The accept decision has judged it: take the hit and stay on them, wherever they are.
+    pressing = std::make_unique<BlackboardSetQueryNode>("accepting");
+    near = std::make_unique<PassNode>();
   } else {
     float rush_enemy_energy = settings.rush_enemy_energy.value_or(0.0f);
     pressing = std::make_unique<InvertNode>(
@@ -604,7 +665,7 @@ static std::unique_ptr<behavior::BehaviorNode> CreateDodge(const CombatSettings&
     .Sequence()
         .Sequence(CompositeDecorator::Invert)
             .Composite(std::move(pressing))
-            .InvertChild<DistanceThresholdNode>("nearest_target_position", "self_position", kNearbyEnemyThreshold)
+            .Composite(std::move(near))
             .End()
         .Composite(dodge_builder.Build())
         .Composite(keep_facing ? std::unique_ptr<BehaviorNode>(std::make_unique<FaceNode>("aimshot"))
@@ -900,6 +961,14 @@ static std::unique_ptr<behavior::BehaviorNode> CreateShotChoice(const CombatSett
   return builder.Build();
 }
 
+// Accepting hits, with the commit decision, when the bot's risk appetite allows any. Always succeeds.
+static std::unique_ptr<behavior::BehaviorNode> CreateAccept(const CombatSettings& settings, CommitDecision& decision) {
+  if (!settings.commit_decision || settings.accept_confidence > 1.0f - 1e-3f) return std::make_unique<PassNode>();
+
+  return std::make_unique<AcceptNode>(&decision, settings.accept_confidence, settings.dodge_threshold.value_or(1.0f),
+                                      settings.damage_judgement, settings.judgement_noise);
+}
+
 // Whether the bot is pursued while backing off, for cover shots and mines: with the commit decision only.
 static std::unique_ptr<behavior::BehaviorNode> CreatePursuitCheck(const CombatSettings& settings) {
   if (!settings.commit_decision || (!settings.cover_fire && !settings.mine_cover)) return std::make_unique<PassNode>();
@@ -1004,7 +1073,9 @@ std::unique_ptr<behavior::BehaviorNode> CreateCombatTree(const CombatSettings& s
                         .Child<PlayerCurrentEnergyQueryNode>("self_energy")
                         .Child<ScaleNode>("self_energy", repel_trigger, "repel_energy")
                         .End()
+                    .Composite(CreateAccept(settings, senses.decision))
                     .Sequence(CompositeDecorator::Success) // If we are in danger but can't repel, use our portal.
+                        .InvertChild<BlackboardSetQueryNode>("accepting")
                         .InvertChild<ShipItemCountThresholdNode>(ShipItemType::Repel)
                         .Child<ShipPortalPositionQueryNode>() // Check if we have a portal down.
                         .Child<ScalarThresholdNode<float>>("incoming_damage", "repel_energy")
@@ -1013,6 +1084,7 @@ std::unique_ptr<behavior::BehaviorNode> CreateCombatTree(const CombatSettings& s
                         .Child<TimerSetNode>("defense_timer", 100)
                         .End()
                     .Sequence(CompositeDecorator::Success) // Use repel when in danger.
+                        .InvertChild<BlackboardSetQueryNode>("accepting")
                         .Child<ShipWeaponCapabilityQueryNode>(WeaponType::Repel)
                         .Child<TimerExpiredNode>("defense_timer")
                         .Child<ScalarThresholdNode<float>>("incoming_damage", "repel_energy")

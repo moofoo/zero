@@ -74,6 +74,11 @@ struct CombatSettings {
   bool cover_fire = true;
   bool mine_cover = true;
   float mine_cover_range = 25.0f;
+  // Accepting a hit while committing or pressuring: when the win chance after taking it is at least this (style; 1:
+  // never), judging the damage with this much error and the chance with the decision's judgement noise (skill).
+  float accept_confidence = 0.55f;
+  float damage_judgement = 0.0f;
+  float judgement_noise = 0.0f;
 };
 
 // The tree every Chaos bot flies: enter its ship, then fight the nearest enemy, or else chase greens, or else

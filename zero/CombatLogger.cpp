@@ -172,6 +172,14 @@ void CombatLogger::WriteMode(const char* mode, float win_chance) {
   fflush(file);
 }
 
+void CombatLogger::WriteAccept(float damage, float win_chance) {
+  if (!file) return;
+
+  fprintf(file, "{\"e\":\"accept\",\"tick\":%u,\"damage\":%d,\"win_chance\":%.2f}\n", ServerTick(), (int)damage,
+          win_chance);
+  fflush(file);
+}
+
 void CombatLogger::HandleEvent(const WeaponFireEvent& event) {
   if (!file || !bot.game) return;
   Game& game = *bot.game;

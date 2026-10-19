@@ -122,7 +122,7 @@ float CommitDecision::FiringCost(const ShipSettings& ship, float guns, float bom
   return cost * kEngagedFireFraction;
 }
 
-float CommitDecision::WinChance(Player& self, Player& target) {
+float CommitDecision::WinChance(Player& self, Player& target, float self_energy) {
   auto& arena = bot.game->connection.settings;
   auto& target_ship = arena.ShipSettings[target.ship];
   Ship& own = bot.game->ship_controller.ship;
@@ -156,7 +156,7 @@ float CommitDecision::WinChance(Player& self, Player& target) {
 
   // The bot lasts self_energy / self_loss seconds. The target runs out first if its energy is below what it loses in
   // that time; its energy is only an estimate, with its uncertainty.
-  float self_time = self.energy / self_loss;
+  float self_time = self_energy / self_loss;
   EnergyEstimate::Reading reading = estimate.Get(target);
   float needed = target_loss * self_time;
   if (reading.sd <= 1.0f) return reading.energy < needed ? kOneSided : 1.0f - kOneSided;
@@ -201,12 +201,17 @@ CombatMode CommitDecision::Choose(float chance, Player& self, Player& target) {
   return chance >= middle ? CombatMode::Pressure : CombatMode::Hold;
 }
 
+float CommitDecision::WinChanceAfter(Player& self, Player& target, float damage) {
+  float energy = self.energy - damage;
+  return energy > 0.0f ? WinChance(self, target, energy) : 0.0f;
+}
+
 CombatMode CommitDecision::Decide(Player& self, Player& target) {
   u32 now = GetCurrentTick();
   if (TICK_GT(next_decision_tick, now)) return mode;
   next_decision_tick = now + settings.decision_ticks;
 
-  float chance = WinChance(self, target);
+  float chance = WinChance(self, target, self.energy);
   if (settings.judgement_noise > 0.0f) {
     chance += std::normal_distribution<float>(0.0f, settings.judgement_noise)(random);
   }

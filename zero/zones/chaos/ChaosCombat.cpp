@@ -380,6 +380,114 @@ struct MinShotSpeedNode : public behavior::BehaviorNode {
   float min_speed;
 };
 
+// Whether the bot, backing off (disengage or recharge), is being chased by its target: within this distance (tiles)
+// and closing at this speed or more (tiles/s), as `chaos.py stats` judges a pursuit. Sets "pursued", and while it
+// holds, "pursuer_distance". Always succeeds.
+struct PursuitNode : public behavior::BehaviorNode {
+  static constexpr float kPursuitDistance = 30.0f;
+  static constexpr float kPursuitSpeed = 2.0f;
+
+  behavior::ExecuteResult Execute(behavior::ExecuteContext& ctx) override {
+    ctx.blackboard.Erase("pursued");
+    Player* self = ctx.bot->game->player_manager.GetSelf();
+    auto opt_target = ctx.blackboard.Value<Player*>("nearest_target");
+    int mode = ctx.blackboard.ValueOr<int>("combat_mode", -1);
+    bool backing_off = mode == (int)CombatMode::Disengage || mode == (int)CombatMode::Recharge;
+    if (!self || !opt_target || !*opt_target || !backing_off) return behavior::ExecuteResult::Success;
+
+    Player& pursuer = **opt_target;
+    float distance = pursuer.position.Distance(self->position);
+    Vector2f toward_self = Normalize(self->position - pursuer.position);
+    float closing = (pursuer.velocity - self->velocity).Dot(toward_self);
+    if (distance <= kPursuitDistance && closing >= kPursuitSpeed) {
+      ctx.blackboard.Set("pursued", true);
+      ctx.blackboard.Set("pursuer_distance", distance);
+    }
+    return behavior::ExecuteResult::Success;
+  }
+};
+
+// A cover shot while pursued: fired back at the pursuer however slowly it travels, to make following in a straight
+// line risky, while the pursuer is roughly in front within range and the bot keeps its reserve.
+struct CoverShotNode : public behavior::BehaviorNode {
+  static constexpr float kCoverRange = 25.0f;
+  static constexpr float kFacingCos = 0.7f;  // within about 45 degrees
+  static constexpr float kReserve = 0.3f;
+
+  behavior::ExecuteResult Execute(behavior::ExecuteContext& ctx) override {
+    Player* self = ctx.bot->game->player_manager.GetSelf();
+    auto opt_target = ctx.blackboard.Value<Player*>("nearest_target");
+    if (!self || !opt_target || !*opt_target || !ctx.blackboard.ValueOr<bool>("pursued", false)) {
+      return behavior::ExecuteResult::Failure;
+    }
+
+    Vector2f to_pursuer = (*opt_target)->position - self->position;
+    if (to_pursuer.Length() > kCoverRange) return behavior::ExecuteResult::Failure;
+    if (self->GetHeading().Dot(Normalize(to_pursuer)) < kFacingCos) return behavior::ExecuteResult::Failure;
+    if (self->energy < kReserve * ctx.bot->game->ship_controller.ship.energy) return behavior::ExecuteResult::Failure;
+    return behavior::ExecuteResult::Success;
+  }
+};
+
+// Lays a mine where the bot is while pursued, for the pursuer to fly over: when the pursuer is between kMinRange and
+// `range` tiles away, at most every kIntervalTicks, keeping the reserve after the mine's cost, within the arena's mine
+// cap. With `on_trail`, only when the pursuer is heading at the bot (so it will cross the spot).
+struct MineCoverNode : public behavior::BehaviorNode {
+  MineCoverNode(float range, bool on_trail) : range(range), on_trail(on_trail) {}
+
+  static constexpr float kMinRange = 8.0f;
+  static constexpr u32 kIntervalTicks = 200;
+  static constexpr float kReserve = 0.3f;
+  static constexpr float kTrailCos = 0.87f;  // within about 30 degrees
+
+  behavior::ExecuteResult Execute(behavior::ExecuteContext& ctx) override {
+    Game& game = *ctx.bot->game;
+    Player* self = game.player_manager.GetSelf();
+    auto opt_target = ctx.blackboard.Value<Player*>("nearest_target");
+    if (!self || self->ship >= 8 || !opt_target || !*opt_target) return behavior::ExecuteResult::Failure;
+    if (!ctx.blackboard.ValueOr<bool>("pursued", false)) return behavior::ExecuteResult::Failure;
+
+    u32 now = GetCurrentTick();
+    if (TICK_GT(next_mine_tick, now)) return behavior::ExecuteResult::Failure;
+
+    float distance = ctx.blackboard.ValueOr<float>("pursuer_distance", 0.0f);
+    if (distance < kMinRange || distance > range) return behavior::ExecuteResult::Failure;
+
+    Player& pursuer = **opt_target;
+    if (on_trail && pursuer.velocity.LengthSq() > 0.0f &&
+        Normalize(pursuer.velocity).Dot(Normalize(self->position - pursuer.position)) < kTrailCos) {
+      return behavior::ExecuteResult::Failure;
+    }
+
+    Ship& ship = game.ship_controller.ship;
+    auto& settings = game.connection.settings.ShipSettings[self->ship];
+    if (ship.bombs == 0) return behavior::ExecuteResult::Failure;
+    float cost = settings.LandmineFireEnergy + settings.LandmineFireEnergyUpgrade * (ship.bombs - 1.0f);
+    if (self->energy - cost < kReserve * ship.energy) return behavior::ExecuteResult::Failure;
+
+    // The arena's cap on mines out at once.
+    u32 mines = 0;
+    for (size_t i = 0; i < game.weapon_manager.weapon_count; ++i) {
+      Weapon& weapon = game.weapon_manager.weapons[i];
+      bool mine = (weapon.data.type == WeaponType::Bomb || weapon.data.type == WeaponType::ProximityBomb) &&
+                  weapon.data.alternate;
+      if (mine && weapon.player_id == self->id) ++mines;
+    }
+    if (mines >= settings.MaxMines) return behavior::ExecuteResult::Failure;
+
+    auto& input = ctx.bot->bot_controller->input;
+    if (!input) return behavior::ExecuteResult::Failure;
+    input->SetAction(InputAction::Mine, true);
+    input->OnAction(InputAction::Mine);
+    next_mine_tick = now + kIntervalTicks;
+    return behavior::ExecuteResult::Success;
+  }
+
+  float range;
+  bool on_trail;
+  u32 next_mine_tick = 0;
+};
+
 // Shot choice by expected value, with the commit decision: fire when the shot's chance of hitting times its damage is
 // worth the energy it costs. Energy is cheap with plenty to spare and dear near the reserve the bot's mode needs, and
 // below the reserve no shot is worth it. A shot slower than the weapon's own speed towards the target is less likely
@@ -775,9 +883,37 @@ static std::unique_ptr<behavior::BehaviorNode> CreateEnergyFloor(const CombatSet
 // off or recharging bot needs), else the minimum shot speed check.
 static std::unique_ptr<behavior::BehaviorNode> CreateShotChoice(const CombatSettings& settings, WeaponType weapon,
                                                                 const char* velocity_key) {
+  using namespace behavior;
   if (!settings.commit_decision) return CreateShotSpeedCheck(settings, velocity_key);
+  if (!settings.cover_fire) return std::make_unique<ShotValueNode>(weapon, velocity_key, settings.shot_judgement);
 
-  return std::make_unique<ShotValueNode>(weapon, velocity_key, settings.shot_judgement);
+  BehaviorBuilder builder;
+
+  // clang-format off
+  builder
+    .Selector()
+        .Child<CoverShotNode>()
+        .Child<ShotValueNode>(weapon, velocity_key, settings.shot_judgement)
+        .End();
+  // clang-format on
+
+  return builder.Build();
+}
+
+// Whether the bot is pursued while backing off, for cover shots and mines: with the commit decision only.
+static std::unique_ptr<behavior::BehaviorNode> CreatePursuitCheck(const CombatSettings& settings) {
+  if (!settings.commit_decision || (!settings.cover_fire && !settings.mine_cover)) return std::make_unique<PassNode>();
+
+  return std::make_unique<PursuitNode>();
+}
+
+// Mines in a pursuer's path, when the bot uses them. Always succeeds.
+static std::unique_ptr<behavior::BehaviorNode> CreateMineCover(const CombatSettings& settings) {
+  if (!settings.commit_decision || !settings.mine_cover) return std::make_unique<PassNode>();
+
+  // A bot that anticipates well waits until the pursuer is on its trail.
+  return std::make_unique<behavior::SuccessNode>(
+      std::make_unique<MineCoverNode>(settings.mine_cover_range, settings.anticipation >= 0.5f));
 }
 
 // Bomb only into enough of our own bullet damage already heading at the target. Succeeds when that's the case, or
@@ -899,6 +1035,7 @@ std::unique_ptr<behavior::BehaviorNode> CreateCombatTree(const CombatSettings& s
                         .Composite(CreateAim(settings, senses.history))
                         .Composite(CreateShotSpread(settings))
                         .Composite(CreateAimError(settings))
+                        .Composite(CreatePursuitCheck(settings))
                         .Parallel()
                             .Child<BlackboardEraseNode>("rushing")
                             .Child<BlackboardEraseNode>("backing_off")
@@ -944,6 +1081,7 @@ std::unique_ptr<behavior::BehaviorNode> CreateCombatTree(const CombatSettings& s
                                 .Child<RayRectangleInterceptNode>("bullet_fire_ray", "target_bounds")
                                 .Child<InputActionNode>(InputAction::Bullet)
                                 .End()
+                            .Composite(CreateMineCover(settings))
                             .End()
                         .End()
                     .End()

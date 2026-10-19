@@ -69,6 +69,11 @@ struct CombatSettings {
   // With the commit decision, shots are chosen by expected value; this is how well the bot judges a shot's chance of
   // hitting (1: accurately; lower overestimates it, so the bot sprays) (skill).
   float shot_judgement = 1.0f;
+  // While backing off and pursued: fire cover shots back at the pursuer however slow, and lay mines in its path when
+  // it's within this range (tiles) (style).
+  bool cover_fire = true;
+  bool mine_cover = true;
+  float mine_cover_range = 25.0f;
 };
 
 // The tree every Chaos bot flies: enter its ship, then fight the nearest enemy, or else chase greens, or else

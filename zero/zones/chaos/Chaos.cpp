@@ -160,6 +160,11 @@ struct ChaosBehavior : public behavior::Behavior {
     settings.aim_error = skill_float("AimError").value_or(0.0f);
     settings.hit_box_scale = skill_float("HitBoxScale").value_or(1.0f);
     settings.min_shot_speed = skill_float("MinShotSpeed").value_or(0.0f);
+    settings.lead_skill = skill_float("LeadSkill").value_or(1.0f);
+    settings.anticipation = skill_float("Anticipation").value_or(0.0f);
+    settings.dodge_error = skill_float("DodgeError").value_or(0.0f);
+    auto dodge_style = skill_group.empty() ? std::nullopt : config.GetString(skill_group, "DodgeStyle");
+    settings.dodge_map = dodge_style && std::string_view(*dodge_style) == "map";
     settings.commit_decision = lookup.GetFloat("CommitDecision").value_or(0.0f) > 0.5f;
     settings.shot_judgement = skill_float("ShotJudgement").value_or(1.0f);
     if (engage && !settings.engage_close && std::string_view(*engage) != "range") {

@@ -213,20 +213,45 @@ struct LockedTargetNode : public behavior::BehaviorNode {
 };
 
 // Aims at the target as the bot saw it `delay` ticks ago: a player's reaction time.
-struct PerceivedAimNode : public behavior::BehaviorNode {
-  PerceivedAimNode(PlayerHistory* history, const char* target_key, const char* position_key, u32 delay)
-      : history(history), target_key(target_key), position_key(position_key), delay(delay) {}
+// How the target was moving as the bot saw it: `delay` ticks ago (a reaction time), led by `lead` of its velocity (1:
+// a full intercept, 0: aiming where it was), and curved by `anticipation` of how its velocity was changing (the turn
+// or dodge it was making).
+struct SkilledAimNode : public behavior::BehaviorNode {
+  SkilledAimNode(PlayerHistory* history, const char* target_key, const char* position_key, u32 delay, float lead,
+                 float anticipation)
+      : history(history),
+        target_key(target_key),
+        position_key(position_key),
+        delay(delay),
+        lead(lead),
+        anticipation(anticipation) {}
+
+  // The target's change in velocity is measured over this many ticks.
+  static constexpr u32 kTurnTicks = 30;
 
   behavior::ExecuteResult Execute(behavior::ExecuteContext& ctx) override {
-    Player* self = ctx.bot->game->player_manager.GetSelf();
+    Game& game = *ctx.bot->game;
+    Player* self = game.player_manager.GetSelf();
     auto opt_target = ctx.blackboard.Value<Player*>(target_key);
     if (!self || !opt_target || !*opt_target) return behavior::ExecuteResult::Failure;
 
     PlayerHistory::Sample seen = history->Get(**opt_target, delay);
-    Vector2f aimshot = behavior::CalculateAimshot(*ctx.bot->game, *self, WeaponType::Bullet, seen.position,
-                                                  seen.velocity);
-    ctx.blackboard.Set(position_key, aimshot);
+    Vector2f aimshot = behavior::CalculateAimshot(game, *self, WeaponType::Bullet, seen.position, seen.velocity * lead);
 
+    if (anticipation > 0.0f) {
+      // Follow the turn for as long as the shot takes to arrive.
+      PlayerHistory::Sample before = history->Get(**opt_target, delay + kTurnTicks);
+      float seconds = TICK_DIFF(seen.tick, before.tick) / 100.0f;
+      float weapon_speed = behavior::GetWeaponSpeed(game, *self, WeaponType::Bullet);
+      float shot_speed = (self->velocity + self->GetHeading() * weapon_speed).Length();
+      if (seconds > 0.0f && shot_speed > 0.0f) {
+        Vector2f acceleration = (seen.velocity - before.velocity) * (1.0f / seconds);
+        float flight = aimshot.Distance(self->position) / shot_speed;
+        aimshot += acceleration * (0.5f * flight * flight * anticipation);
+      }
+    }
+
+    ctx.blackboard.Set(position_key, aimshot);
     return behavior::ExecuteResult::Success;
   }
 
@@ -234,6 +259,47 @@ struct PerceivedAimNode : public behavior::BehaviorNode {
   const char* target_key;
   const char* position_key;
   u32 delay;
+  float lead;
+  float anticipation;
+};
+
+// Succeeds when the incoming damage on the blackboard is at least this fraction of the bot's max energy.
+struct DamageFractionNode : public behavior::BehaviorNode {
+  DamageFractionNode(const char* damage_key, float fraction) : damage_key(damage_key), fraction(fraction) {}
+
+  behavior::ExecuteResult Execute(behavior::ExecuteContext& ctx) override {
+    float damage = ctx.blackboard.ValueOr<float>(damage_key, 0.0f);
+    float max_energy = (float)ctx.bot->game->ship_controller.ship.energy;
+    return damage >= fraction * max_energy ? behavior::ExecuteResult::Success : behavior::ExecuteResult::Failure;
+  }
+
+  const char* damage_key;
+  float fraction;
+};
+
+// Now and then sends a dodge the wrong way: with this chance, decided afresh each second, the dodge's push is reversed.
+struct DodgeErrorNode : public behavior::BehaviorNode {
+  explicit DodgeErrorNode(float chance) : chance(chance), random(std::random_device{}()) {}
+
+  static constexpr u32 kRollTicks = 100;
+
+  behavior::ExecuteResult Execute(behavior::ExecuteContext& ctx) override {
+    u32 now = GetCurrentTick();
+    if (!TICK_GT(next_roll_tick, now)) {
+      next_roll_tick = now + kRollTicks;
+      wrong = std::uniform_real_distribution<float>(0.0f, 1.0f)(random) < chance;
+    }
+    if (wrong) {
+      auto& steering = ctx.bot->bot_controller->steering;
+      steering.force = steering.force * -1.0f;
+    }
+    return behavior::ExecuteResult::Success;
+  }
+
+  float chance;
+  bool wrong = false;
+  u32 next_roll_tick = 0;
+  std::mt19937 random;
 };
 
 // Turns the aim point around the bot by an angle that drifts smoothly (mean-reverting, like a hand), about
@@ -398,6 +464,31 @@ static std::unique_ptr<behavior::BehaviorNode> CreateDodge(const CombatSettings&
     pressing = std::make_unique<InvertNode>(
         std::make_unique<ScalarThresholdNode<float>>("nearest_target_energy", rush_enemy_energy));
   }
+
+  // The dodge itself: to the safest nearby spot on the influence map (skilled), or a push sideways from the incoming
+  // weapons, sometimes the wrong way (DodgeError).
+  BehaviorBuilder dodge_builder;
+  if (settings.dodge_map) {
+    // clang-format off
+    dodge_builder
+      .Sequence()
+          .Child<DamageFractionNode>("incoming_damage", *settings.dodge_threshold)
+          .Child<InfluenceMapPopulateWeapons>(true)
+          .Child<InfluenceMapGradientDodge>()
+          .End();
+    // clang-format on
+  } else {
+    // clang-format off
+    dodge_builder
+      .Sequence()
+          .Child<DodgeIncomingDamage>(*settings.dodge_threshold, 35.0f)
+          .Composite(settings.dodge_error > 0.0f
+                         ? std::unique_ptr<BehaviorNode>(std::make_unique<DodgeErrorNode>(settings.dodge_error))
+                         : std::unique_ptr<BehaviorNode>(std::make_unique<PassNode>()))
+          .End();
+    // clang-format on
+  }
+
   BehaviorBuilder builder;
 
   // clang-format off
@@ -407,7 +498,7 @@ static std::unique_ptr<behavior::BehaviorNode> CreateDodge(const CombatSettings&
             .Composite(std::move(pressing))
             .InvertChild<DistanceThresholdNode>("nearest_target_position", "self_position", kNearbyEnemyThreshold)
             .End()
-        .Child<DodgeIncomingDamage>(*settings.dodge_threshold, 35.0f)
+        .Composite(dodge_builder.Build())
         .Composite(keep_facing ? std::unique_ptr<BehaviorNode>(std::make_unique<FaceNode>("aimshot"))
                                : std::unique_ptr<BehaviorNode>(std::make_unique<PassNode>()))
         .End();
@@ -617,9 +708,12 @@ static std::unique_ptr<behavior::BehaviorNode> CreateShotSpread(const CombatSett
 // Aim at the target: as it is now, or with a reaction time as the bot saw it a moment ago.
 static std::unique_ptr<behavior::BehaviorNode> CreateAim(const CombatSettings& settings, PlayerHistory& history) {
   using namespace behavior;
-  if (settings.reaction_ticks <= 0) return std::make_unique<AimNode>(WeaponType::Bullet, "nearest_target", "aimshot");
+  if (settings.reaction_ticks <= 0 && settings.lead_skill == 1.0f && settings.anticipation <= 0.0f) {
+    return std::make_unique<AimNode>(WeaponType::Bullet, "nearest_target", "aimshot");
+  }
 
-  return std::make_unique<PerceivedAimNode>(&history, "nearest_target", "aimshot", (u32)settings.reaction_ticks);
+  return std::make_unique<SkilledAimNode>(&history, "nearest_target", "aimshot", (u32)settings.reaction_ticks,
+                                          settings.lead_skill, settings.anticipation);
 }
 
 // Aim drift, when the skill has any. Always succeeds.

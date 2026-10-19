@@ -339,6 +339,7 @@ struct InfluenceMapPopulateWeapons : public BehaviorNode {
     if (!self) return ExecuteResult::Failure;
 
     u32 tick = GetCurrentTick();
+    WeaponView view(ctx, *self);
 
     for (size_t i = 0; i < weapon_manager.weapon_count; ++i) {
       Weapon* weapon = weapon_manager.weapons + i;
@@ -346,6 +347,7 @@ struct InfluenceMapPopulateWeapons : public BehaviorNode {
       Player* player = player_manager.GetPlayerById(weapon->player_id);
 
       if (!player || player->frequency == self->frequency) continue;
+      if (!view.Contains(*weapon)) continue;
 
       float dmg = (float)GetEstimatedWeaponDamage(*weapon, ctx.bot->game->connection);
       Vector2f direction = Normalize(weapon->velocity);

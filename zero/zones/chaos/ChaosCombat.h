@@ -54,6 +54,14 @@ struct CombatSettings {
   float hit_box_scale = 1.0f;
   // Hold shots slower than this along the line to the target (tiles/s), except while backing off.
   float min_shot_speed = 0.0f;
+  // How much of the target's movement the bot leads its shots by (1: a full intercept), and how much it follows the
+  // turn the target is making (0: a straight line).
+  float lead_skill = 1.0f;
+  float anticipation = 0.0f;
+  // Dodge to the safest nearby spot on the influence map, rather than pushing sideways; and how often a sideways push
+  // goes the wrong way.
+  bool dodge_map = false;
+  float dodge_error = 0.0f;
 
   // The commit decision chooses how to move in a fight, in place of the RushEnemyEnergy and RetreatEnergy
   // triggers.

@@ -156,6 +156,7 @@ static void PrintUsage(std::string_view path) {
       "\t\t\t\tvalues depend on server\n"
       "--freq\t\t\t\tsets the frequency (team) to join, for zones that support it\n"
       "--events\t\t\twrites this bot's combat events (JSON lines) to the given file\n"
+      "--events-interval\t\thow often (ticks) the combat events record position (default 50)\n"
       "--aggression\t\t\tChaos: plays the [Aggression.<name>] preset from the config\n"
       "-l, --loglevel\t\t\toverrides log level\n"
       "\t\t\t\tvalues: j, d, i, w, e\n"

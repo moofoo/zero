@@ -8,7 +8,7 @@
 namespace zero {
 
 // The bot writes its position, velocity and energy this often (server ticks: half a second).
-constexpr u32 kStateInterval = 50;
+constexpr u32 kEstimateInterval = 50;
 // An enemy bomb exploding within this many blast radii of the bot, without hurting it, counts as dodged.
 constexpr float kNearMissRadii = 1.5f;
 
@@ -92,7 +92,7 @@ static float GetBlastRadiusTiles(Game& game, WeaponData data) {
   return pixels / 16.0f;
 }
 
-CombatLogger::CombatLogger(ZeroBot& bot, const char* path) : bot(bot) {
+CombatLogger::CombatLogger(ZeroBot& bot, const char* path, u32 state_ticks) : bot(bot), state_ticks(state_ticks) {
   file = fopen(path, "a");
   if (!file) {
     Log(LogLevel::Error, "Failed to open combat event log %s", path);
@@ -125,7 +125,7 @@ void CombatLogger::Update() {
 
   u32 tick = ServerTick();
   if (TICK_GT(next_state_tick, tick)) return;
-  next_state_tick = tick + kStateInterval;
+  next_state_tick = tick + state_ticks;
 
   fprintf(file,
           "{\"e\":\"state\",\"tick\":%u,\"x\":%.2f,\"y\":%.2f,\"vx\":%.2f,\"vy\":%.2f,\"energy\":%d,"
@@ -140,7 +140,7 @@ void CombatLogger::WriteEstimate(const char* target, float energy, float sd, flo
 
   u32 tick = ServerTick();
   if (TICK_GT(next_estimate_tick, tick)) return;
-  next_estimate_tick = tick + kStateInterval;
+  next_estimate_tick = tick + kEstimateInterval;
 
   fprintf(file, "{\"e\":\"estimate\",\"tick\":%u,\"target\":", tick);
   WriteJsonString(file, target);

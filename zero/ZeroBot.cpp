@@ -93,7 +93,11 @@ bool ZeroBot::JoinZone(ServerInfo& server) {
 
   std::string_view events_path = args->GetValue({"events"});
   if (!events_path.empty()) {
-    combat_logger = std::make_unique<CombatLogger>(*this, std::string(events_path).c_str());
+    // --events-interval: how often the bot's position is written, in ticks (default half a second).
+    std::string_view interval = args->GetValue({"events-interval"});
+    u32 state_ticks = interval.empty() ? 50 : (u32)atoi(std::string(interval).c_str());
+    if (state_ticks == 0) state_ticks = 50;
+    combat_logger = std::make_unique<CombatLogger>(*this, std::string(events_path).c_str(), state_ticks);
   }
 
   if (g_Settings.debug_window) {

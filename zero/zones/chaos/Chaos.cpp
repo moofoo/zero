@@ -171,6 +171,13 @@ struct ChaosBehavior : public behavior::Behavior {
     settings.mine_cover = lookup.GetFloat("MineCover").value_or(1.0f) > 0.5f;
     settings.mine_cover_range = lookup.GetFloat("MineCoverRange").value_or(settings.mine_cover_range);
     settings.accept_confidence = lookup.GetFloat("AcceptConfidence").value_or(settings.accept_confidence);
+    auto navigation = lookup.Get("Navigation");
+    if (navigation) {
+      std::string_view style(*navigation);
+      settings.navigation = style == "correction" ? 1 : style == "pursuit" ? 2 : style == "cornering" ? 3 : 0;
+    }
+    settings.look_ahead = lookup.GetFloat("LookAhead").value_or(settings.look_ahead);
+    settings.corner_speed = lookup.GetFloat("CornerSpeed").value_or(settings.corner_speed);
     settings.damage_judgement = skill_float("DamageJudgement").value_or(0.0f);
     settings.judgement_noise = skill_float("JudgementNoise").value_or(0.0f);
     if (engage && !settings.engage_close && std::string_view(*engage) != "range") {

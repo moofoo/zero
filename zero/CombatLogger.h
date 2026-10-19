@@ -17,7 +17,8 @@ struct CombatLogger : EventHandler<WeaponFireEvent>,
                       EventHandler<WeaponHitEvent>,
                       EventHandler<PlayerDeathEvent>,
                       EventHandler<PlayerFreqAndShipChangeEvent> {
-  CombatLogger(ZeroBot& bot, const char* path);
+  // State (position, velocity, energy) is written every state_ticks.
+  CombatLogger(ZeroBot& bot, const char* path, u32 state_ticks);
   ~CombatLogger();
 
   bool IsOpen() const { return file != nullptr; }
@@ -48,6 +49,7 @@ struct CombatLogger : EventHandler<WeaponFireEvent>,
   ZeroBot& bot;
   FILE* file = nullptr;
   u32 next_state_tick = 0;
+  u32 state_ticks;
   u32 next_estimate_tick = 0;
   // The last bomb that damaged the bot (by shooter and tick), so its explosion isn't also counted as a near miss.
   // Not a Weapon pointer: the weapon array is compacted, so another bomb can later sit at the same address.

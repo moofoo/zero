@@ -231,6 +231,106 @@ struct AcceptNode : public behavior::BehaviorNode {
   std::mt19937 random;
 };
 
+// Follows the patrol route (the "waypoints" blackboard list, looping) under Newtonian movement. Ships thrust only along
+// their heading, so pointing at a waypoint while drifting sideways can't remove the drift; these styles steer instead:
+// - Correction: seek the next waypoint without facing it, so the ship turns to whatever correction its velocity needs.
+// - Pursuit: as correction, towards a point `look_ahead` tiles further along the route, so turns start early and
+//   waypoints are passed through rather than arrived at.
+// - Cornering: as pursuit, braking before each corner to a speed that falls with how sharp it is (`corner_speed` at a
+//   right angle), from the ship's thrust.
+// Keeps "waypoint_index" (the waypoint being headed for) and "waypoint_position", and fails when the way ahead isn't
+// clear, so the caller can path there instead.
+enum class Navigation { Classic, Correction, Pursuit, Cornering };
+
+struct RouteNode : public behavior::BehaviorNode {
+  RouteNode(Navigation style, float look_ahead, float corner_speed)
+      : style(style), look_ahead(look_ahead), corner_speed(corner_speed) {}
+
+  // A waypoint counts as reached within this distance (tiles); classic switches at 15.
+  static constexpr float kReachedDistance = 3.0f;
+
+  behavior::ExecuteResult Execute(behavior::ExecuteContext& ctx) override {
+    Game& game = *ctx.bot->game;
+    Player* self = game.player_manager.GetSelf();
+    auto opt_waypoints = ctx.blackboard.Value<std::vector<Vector2f>>("waypoints");
+    if (!self || self->ship >= 8 || !opt_waypoints || opt_waypoints->empty()) return behavior::ExecuteResult::Failure;
+
+    const std::vector<Vector2f>& route = *opt_waypoints;
+    size_t count = route.size();
+    size_t index = ctx.blackboard.ValueOr<size_t>("waypoint_index", 0) % count;
+
+    // The leg from the previous waypoint to the one being headed for, and how far along it the ship is.
+    Vector2f from = route[(index + count - 1) % count];
+    Vector2f to = route[index];
+    Vector2f leg = to - from;
+    float leg_length = leg.Length();
+    float along = leg_length > 0.0f ? (self->position - from).Dot(leg) / leg_length : 0.0f;
+
+    // Past the end of the leg, or close to its waypoint: on to the next.
+    float reached = style == Navigation::Correction ? 15.0f : kReachedDistance;
+    if (self->position.Distance(to) <= reached || (style != Navigation::Correction && along >= leg_length)) {
+      index = (index + 1) % count;
+      from = to;
+      to = route[index];
+      leg = to - from;
+      leg_length = leg.Length();
+      along = leg_length > 0.0f ? (self->position - from).Dot(leg) / leg_length : 0.0f;
+    }
+    ctx.blackboard.Set("waypoint_index", index);
+    ctx.blackboard.Set<Vector2f>("waypoint_position", to);
+
+    // Where to steer: the waypoint, or a point look_ahead tiles along the route from the ship's place on it.
+    Vector2f target = to;
+    if (style == Navigation::Pursuit || style == Navigation::Cornering) {
+      float remaining = look_ahead;
+      float start = along < 0.0f ? 0.0f : along;
+      size_t i = index;
+      Vector2f a = from;
+      Vector2f b = to;
+      for (size_t step = 0; step < count; ++step) {
+        float length = a.Distance(b);
+        if (start + remaining <= length) {
+          target = a + Normalize(b - a) * (start + remaining);
+          break;
+        }
+        remaining -= length - start;
+        start = 0.0f;
+        i = (i + 1) % count;
+        a = b;
+        b = route[i];
+        target = b;
+      }
+    }
+
+    float radius = game.connection.settings.ShipSettings[self->ship].GetRadius();
+    if (game.GetMap().CastShip(self, radius, target).hit) return behavior::ExecuteResult::Failure;
+
+    float max_speed = Steering::GetMaxSpeed(game);
+    float speed = max_speed;
+    if (style == Navigation::Cornering) {
+      // Brake to the corner's speed in time: v^2 = v_corner^2 + 2 * a * distance.
+      Vector2f next_leg = route[(index + 1) % count] - to;
+      float turn = acosf(fmaxf(-1.0f, fminf(1.0f, Normalize(leg).Dot(Normalize(next_leg)))));
+      float sharpness = sinf(turn / 2.0f);  // 0 straight on, about 0.71 at a right angle, 1 turning back
+      float corner = max_speed - (max_speed - corner_speed) * sharpness / 0.7071f;
+      if (corner < corner_speed * 0.5f) corner = corner_speed * 0.5f;
+      float acceleration = game.ship_controller.ship.thrust * (10.0f / 16.0f);
+      float distance = self->position.Distance(to);
+      float allowed = sqrtf(corner * corner + 2.0f * acceleration * distance);
+      if (allowed < speed) speed = allowed;
+    }
+
+    auto& steering = ctx.bot->bot_controller->steering;
+    Vector2f desired = Normalize(target - self->position) * speed;
+    steering.force += desired - self->velocity;
+    return behavior::ExecuteResult::Success;
+  }
+
+  Navigation style;
+  float look_ahead;
+  float corner_speed;
+};
+
 // Chooses the bot's target through its target lock, from the enemies it could fight: in a ship, not respawning, not
 // in a safe zone, reachable over the map, and not vanished from where it was last seen (as NearestMemoryTargetNode).
 struct LockedTargetNode : public behavior::BehaviorNode {
@@ -969,6 +1069,45 @@ static std::unique_ptr<behavior::BehaviorNode> CreateAccept(const CombatSettings
                                       settings.damage_judgement, settings.judgement_noise);
 }
 
+// Following the patrol route: today's way (face each waypoint, arrive, switch within 15 tiles), or a RouteNode style.
+static std::unique_ptr<behavior::BehaviorNode> CreatePatrol(const CombatSettings& settings) {
+  using namespace behavior;
+  BehaviorBuilder builder;
+
+  if (settings.navigation == (int)Navigation::Classic) {
+    // clang-format off
+    builder
+      .Sequence() // Follow set waypoints.
+          .Child<WaypointNode>("waypoints", "waypoint_index", "waypoint_position", 15.0f)
+          .Selector()
+              .Sequence()
+                  .InvertChild<VisibilityQueryNode>("waypoint_position")
+                  .Child<GoToNode>("waypoint_position")
+                  .Child<RenderPathNode>(Vector3f(0.0f, 0.5f, 1.0f))
+                  .End()
+              .Parallel()
+                  .Child<FaceNode>("waypoint_position")
+                  .Child<ArriveNode>("waypoint_position", 1.25f)
+                  .End()
+              .End()
+          .End();
+    // clang-format on
+    return builder.Build();
+  }
+
+  // clang-format off
+  builder
+    .Selector() // Follow set waypoints, pathing round walls when the way ahead isn't clear.
+        .Child<RouteNode>((Navigation)settings.navigation, settings.look_ahead, settings.corner_speed)
+        .Sequence()
+            .Child<GoToNode>("waypoint_position")
+            .Child<RenderPathNode>(Vector3f(0.0f, 0.5f, 1.0f))
+            .End()
+        .End();
+  // clang-format on
+  return builder.Build();
+}
+
 // Whether the bot is pursued while backing off, for cover shots and mines: with the commit decision only.
 static std::unique_ptr<behavior::BehaviorNode> CreatePursuitCheck(const CombatSettings& settings) {
   if (!settings.commit_decision || (!settings.cover_fire && !settings.mine_cover)) return std::make_unique<PassNode>();
@@ -1163,20 +1302,7 @@ std::unique_ptr<behavior::BehaviorNode> CreateCombatTree(const CombatSettings& s
                 .Child<GoToNode>("nearest_green_position")
                 .Child<RenderPathNode>(Vector3f(0.0f, 1.0f, 0.0f))
                 .End()
-            .Sequence() // Follow set waypoints.
-                .Child<WaypointNode>("waypoints", "waypoint_index", "waypoint_position", 15.0f)
-                .Selector()
-                    .Sequence()
-                        .InvertChild<VisibilityQueryNode>("waypoint_position")
-                        .Child<GoToNode>("waypoint_position")
-                        .Child<RenderPathNode>(Vector3f(0.0f, 0.5f, 1.0f))
-                        .End()
-                    .Parallel()
-                        .Child<FaceNode>("waypoint_position")
-                        .Child<ArriveNode>("waypoint_position", 1.25f)
-                        .End()
-                    .End()
-                .End()
+            .Composite(CreatePatrol(settings))
             .End()
         .End();
   // clang-format on

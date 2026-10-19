@@ -79,6 +79,12 @@ struct CombatSettings {
   float accept_confidence = 0.55f;
   float damage_judgement = 0.0f;
   float judgement_noise = 0.0f;
+
+  // Following the patrol route: 0 classic (face each waypoint), 1 correction, 2 pursuit, 3 cornering (see RouteNode);
+  // how far ahead along the route pursuit steers (tiles), and the speed cornering allows at a right angle (tiles/s).
+  int navigation = 0;
+  float look_ahead = 12.0f;
+  float corner_speed = 8.0f;
 };
 
 // The tree every Chaos bot flies: enter its ship, then fight the nearest enemy, or else chase greens, or else

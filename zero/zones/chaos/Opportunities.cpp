@@ -10,17 +10,22 @@
 namespace zero {
 namespace chaos {
 
+constexpr float kTicksPerSecond = 100.0f;
 // How much likelier a shot is to hit a slow target, measured from Chaos games on 2026-10-19 (hits over shots, slow
 // targets against all others).
 constexpr float kSlowBulletFactor = 1.45f;
 constexpr float kSlowBombNearFactor = 1.2f;
 constexpr float kSlowBombFarFactor = 1.1f;
 constexpr float kSlowBombNearDistance = 20.0f;
-// Battle blasting: what counts as two other enemies fighting, and when it's over.
+// A target not looked at for this long starts a fresh slowdown when next seen slow.
+constexpr u32 kSlowForgetTicks = 50;
+// Battle blasting: two enemies count as fighting when they're within kBattleSpread tiles of each other and each hit the
+// other within kBattleTradeTicks; the nearer must be kBattleNear to kBattleFar tiles from the bot. The fight is over
+// when neither has hit the other for kBattleQuietTicks.
 constexpr float kBattleSpread = 20.0f;
 constexpr float kBattleNear = 30.0f;
 constexpr float kBattleFar = 70.0f;
-constexpr u32 kBattleTicks = 200;
+constexpr u32 kBattleTradeTicks = 200;
 constexpr u32 kBattleQuietTicks = 300;
 
 Opportunities::Opportunities(ZeroBot& bot, float spotting, float notice, Vector2f view_extent)
@@ -39,15 +44,23 @@ bool Opportunities::Roll(float chance) {
   return std::uniform_real_distribution<float>(0.0f, 1.0f)(random) < chance;
 }
 
+bool Opportunities::Recent(std::optional<u32> tick, u32 ticks) {
+  return tick && TICK_DIFF(GetCurrentTick(), *tick) <= (s32)ticks;
+}
+
 float Opportunities::WindowSeconds(const Player& player) {
   auto it = window_end.find(player.id);
   if (it == window_end.end()) return 0.0f;
   s32 left = TICK_DIFF(it->second, GetCurrentTick());
-  return left > 0 ? left / 100.0f : 0.0f;
+  return left > 0 ? left / kTicksPerSecond : 0.0f;
 }
 
 bool Opportunities::SpottedSlow(const Player& player) {
+  u32 now = GetCurrentTick();
   Slowdown& slowdown = slowdowns[player.id];
+  if (TICK_DIFF(now, slowdown.seen_tick) > (s32)kSlowForgetTicks) slowdown.slow = false;
+  slowdown.seen_tick = now;
+
   bool slow = player.velocity.Length() < kSlowSpeed && OnScreen(player);
   if (slow && !slowdown.slow) {
     slowdown.spotted = Roll(spotting);
@@ -63,44 +76,36 @@ float Opportunities::SlowFactor(const Player& player, bool bomb, float distance)
   return distance < kSlowBombNearDistance ? kSlowBombNearFactor : kSlowBombFarFactor;
 }
 
-float Opportunities::SecondsSinceHit() const {
-  if (!hit_yet) return 1e6f;
-  return TICK_DIFF(GetCurrentTick(), last_hit_tick) / 100.0f;
-}
-
 float Opportunities::SecondsSinceFight() const {
-  float dealt = dealt_yet ? TICK_DIFF(GetCurrentTick(), last_dealt_tick) / 100.0f : 1e6f;
-  float hit = SecondsSinceHit();
-  return dealt < hit ? dealt : hit;
+  std::optional<u32> latest = last_hit_tick;
+  if (last_dealt_tick && (!latest || TICK_GT(*last_dealt_tick, *latest))) latest = last_dealt_tick;
+  if (!latest) return 1e6f;
+  return TICK_DIFF(GetCurrentTick(), *latest) / kTicksPerSecond;
 }
 
 std::optional<u32> Opportunities::LastHit(u16 shooter, u16 target) const {
-  auto it = enemy_hits.find(((u32)shooter << 16) | target);
+  auto it = enemy_hits.find(PairKey(shooter, target));
   if (it == enemy_hits.end()) return {};
   return it->second;
 }
 
 bool Opportunities::BattleGoing(u16 a, u16 b) const {
-  u32 now = GetCurrentTick();
-  auto recent = [&](std::optional<u32> tick) { return tick && TICK_DIFF(now, *tick) <= (s32)kBattleQuietTicks; };
-  return recent(LastHit(a, b)) || recent(LastHit(b, a));
+  return Recent(LastHit(a, b), kBattleQuietTicks) || Recent(LastHit(b, a), kBattleQuietTicks);
 }
 
 std::optional<std::pair<u16, u16>> Opportunities::FindBattle(const std::vector<Player*>& candidates,
                                                              const Player& self) {
-  u32 now = GetCurrentTick();
-  auto recent = [&](std::optional<u32> tick) { return tick && TICK_DIFF(now, *tick) <= (s32)kBattleTicks; };
   for (size_t i = 0; i < candidates.size(); ++i) {
     for (size_t j = i + 1; j < candidates.size(); ++j) {
       Player& a = *candidates[i];
       Player& b = *candidates[j];
-      if (!recent(LastHit(a.id, b.id)) || !recent(LastHit(b.id, a.id))) continue;
+      if (!Recent(LastHit(a.id, b.id), kBattleTradeTicks) || !Recent(LastHit(b.id, a.id), kBattleTradeTicks)) continue;
       if (a.position.Distance(b.position) > kBattleSpread) continue;
       float da = a.position.Distance(self.position);
       float db = b.position.Distance(self.position);
       float nearer = da < db ? da : db;
       if (nearer < kBattleNear || nearer > kBattleFar) continue;
-      return std::make_pair(a.id, b.id);
+      return a.id < b.id ? std::make_pair(a.id, b.id) : std::make_pair(b.id, a.id);
     }
   }
   return {};
@@ -111,25 +116,24 @@ void Opportunities::HandleEvent(const WeaponHitEvent& event) {
   if (!self || !event.target) return;
   u16 shooter = event.weapon.player_id;
   if (shooter == self->id) {
-    if (event.target->frequency != self->frequency) {
-      last_dealt_tick = GetCurrentTick();
-      dealt_yet = true;
-    }
+    if (event.target->frequency != self->frequency) last_dealt_tick = GetCurrentTick();
     return;
   }
+  // Another enemy hitting another, noticed on the bot's screen as any weapon is.
   Player* attacker = bot.game->player_manager.GetPlayerById(shooter);
   Player& target = *event.target;
   if (!attacker || target.id == self->id || attacker->frequency == self->frequency ||
       target.frequency == self->frequency || attacker->frequency == target.frequency || !OnScreen(target)) {
     return;
   }
-  enemy_hits[((u32)shooter << 16) | target.id] = GetCurrentTick();
+  if (!Roll(notice)) return;
+  enemy_hits[PairKey(shooter, target.id)] = GetCurrentTick();
 }
 
 void Opportunities::HandleEvent(const WeaponSelfDamageEvent& event) {
-  if (bot.game && event.shooter.id == bot.game->player_manager.player_id) return;
+  Player* self = bot.game ? bot.game->player_manager.GetSelf() : nullptr;
+  if (!self || event.shooter.id == self->id || event.shooter.frequency == self->frequency) return;
   last_hit_tick = GetCurrentTick();
-  hit_yet = true;
 }
 
 void Opportunities::HandleEvent(const WeaponFireEvent& event) {

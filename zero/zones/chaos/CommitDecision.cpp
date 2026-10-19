@@ -100,8 +100,8 @@ float CommitDecision::DamageRate(Player& shooter, Player& victim, bool shooter_i
   float distance = shooter.position.Distance(victim.position);
   float fight_distance = distance < kFightDistance ? distance : kFightDistance;
   float hit_chance = BulletHitChance(fight_distance);
-  float bullet_factor = shooter_is_self ? opportunities.SlowFactor(victim, false, fight_distance) : 1.0f;
-  float bomb_factor = shooter_is_self ? opportunities.SlowFactor(victim, true, fight_distance) : 1.0f;
+  float bullet_factor = shooter_is_self ? opportunities.SlowFactor(victim, false, distance) : 1.0f;
+  float bomb_factor = shooter_is_self ? opportunities.SlowFactor(victim, true, distance) : 1.0f;
 
   float rate = 0.0f;
   if (guns > 0.0f) {

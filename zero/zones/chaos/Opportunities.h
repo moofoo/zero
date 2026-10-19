@@ -21,10 +21,10 @@ namespace chaos {
 // taken with the bot's spotting chance (its Judgement), decided once per opportunity, and logged as a tactic:
 // - A fire window: an enemy the bot sees fire a bomb can't fire anything again for its ship's bomb delay. The bot
 //   notices the bomb as it notices any weapon (its Awareness), and only on its screen.
-// - A slow target: an enemy flying slower than kSlowSpeed is easier to hit (measured from Chaos games: bullets about
-//   1.45 times, bombs about 1.2 times within 20 tiles and 1.1 times beyond). Spotted once per slowdown, on screen.
-// It also keeps what the target lock needs for battle blasting: which other enemies are trading hits on the bot's
-// screen, and when the bot itself last fought.
+// - A slow target: an enemy flying slower than kSlowSpeed is easier to hit, by factors measured from Chaos games.
+//   Spotted once per slowdown, on screen.
+// It also keeps what the target lock needs for battle blasting: which other enemies it has noticed trading hits on
+// its screen, and when the bot itself last fought.
 struct Opportunities : EventHandler<WeaponFireEvent>, EventHandler<WeaponSelfDamageEvent>, EventHandler<WeaponHitEvent> {
   // Below this speed (tiles/s) a target counts as slow.
   static constexpr float kSlowSpeed = 3.0f;
@@ -39,13 +39,14 @@ struct Opportunities : EventHandler<WeaponFireEvent>, EventHandler<WeaponSelfDam
 
   // Takes an opportunity with the bot's spotting chance.
   bool Spot() { return Roll(spotting); }
-  // Seconds since the bot was last hit by an enemy, and since it last hit or was hit by one.
-  float SecondsSinceHit() const;
+  // When an enemy last hit the bot, if one has.
+  std::optional<u32> LastHitTick() const { return last_hit_tick; }
+  // Seconds since the bot last hit or was hit by an enemy (a large number if never).
   float SecondsSinceFight() const;
-  // Two enemies fighting each other: both among the candidates, within kBattleSpread tiles of each other, having traded
-  // hits on the bot's screen within kBattleTicks, the nearer between kBattleNear and kBattleFar tiles from the bot.
+  // Two enemies fighting each other: both among the candidates, close together, having traded hits the bot noticed on
+  // its screen just now, the nearer at battle-blasting range from the bot. The pair comes lower id first.
   std::optional<std::pair<u16, u16>> FindBattle(const std::vector<Player*>& candidates, const Player& self);
-  // Whether two enemies are still trading hits: either has hit the other within kBattleQuietTicks.
+  // Whether two enemies are still trading hits: either has hit the other recently.
   bool BattleGoing(u16 a, u16 b) const;
 
   void HandleEvent(const WeaponFireEvent& event) override;
@@ -56,6 +57,7 @@ struct Opportunities : EventHandler<WeaponFireEvent>, EventHandler<WeaponSelfDam
   struct Slowdown {
     bool slow = false;     // flying slowly when last looked at
     bool spotted = false;  // and the bot took the opportunity
+    u32 seen_tick = 0;     // when it was last looked at
   };
 
   ZeroBot& bot;
@@ -65,21 +67,26 @@ struct Opportunities : EventHandler<WeaponFireEvent>, EventHandler<WeaponSelfDam
   std::mt19937 random;
   std::unordered_map<u16, u32> window_end;
   std::unordered_map<u16, Slowdown> slowdowns;
-  u32 last_hit_tick = 0;
-  bool hit_yet = false;
-  u32 last_dealt_tick = 0;
-  bool dealt_yet = false;
-  // When each enemy last hit each other enemy on the bot's screen, keyed by (shooter << 16 | target).
+  std::optional<u32> last_hit_tick;
+  std::optional<u32> last_dealt_tick;
+  // When each enemy last hit each other enemy (noticed, on the bot's screen), keyed by PairKey(shooter, target).
   std::unordered_map<u32, u32> enemy_hits;
 
-  // When one enemy last hit another, if it has.
+  // When one enemy last hit another, if the bot noticed it.
   std::optional<u32> LastHit(u16 shooter, u16 target) const;
+  // Whether a tick is within this many ticks of now.
+  static bool Recent(std::optional<u32> tick, u32 ticks);
 
   bool OnScreen(const Player& player) const;
   bool Roll(float chance);
   // Whether the bot is punishing this player's slowdown now: rolls once as a slowdown starts.
   bool SpottedSlow(const Player& player);
 };
+
+// A key for an ordered pair of player ids.
+inline u32 PairKey(u16 first, u16 second) {
+  return ((u32)first << 16) | second;
+}
 
 }  // namespace chaos
 }  // namespace zero

@@ -294,8 +294,8 @@ struct ChaosBehavior : public behavior::Behavior {
   CombatSettings settings;
   std::unique_ptr<EnergyEstimate> estimate;
   std::unique_ptr<PlayerHistory> history;
-  std::unique_ptr<TargetLock> target_lock;
   std::unique_ptr<Opportunities> opportunities;
+  std::unique_ptr<TargetLock> target_lock;
   std::unique_ptr<CommitDecision> decision;
 };
 

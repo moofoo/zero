@@ -402,9 +402,10 @@ struct SkilledAimNode : public behavior::BehaviorNode {
 // at it, bombing as the shot choice allows, to weaken it before the fight proper ("fly at him at full speed and let off
 // two or three bombs"). Taken with the bot's spotting chance and logged as an "opening" tactic. It ends at the leash
 // distance, when incoming damage would make the bot dodge, below kEndEnergy, or after kMaxTicks; then the commit
-// decision's modes take over. Succeeds while the opening lasts.
-struct OpeningNode : public behavior::BehaviorNode {
-  OpeningNode(Opportunities* opportunities, float dodge_threshold)
+// decision's modes take over. Checked every tick, before movement, so a dodge or a target change isn't missed; sets
+// "opening" while it lasts. Always succeeds.
+struct OpeningCheckNode : public behavior::BehaviorNode {
+  OpeningCheckNode(Opportunities* opportunities, std::optional<float> dodge_threshold)
       : opportunities(opportunities), dodge_threshold(dodge_threshold) {}
 
   static constexpr float kMinDistance = 40.0f;
@@ -414,9 +415,11 @@ struct OpeningNode : public behavior::BehaviorNode {
   static constexpr u32 kMaxTicks = 600;
 
   behavior::ExecuteResult Execute(behavior::ExecuteContext& ctx) override {
+    ctx.blackboard.Erase("opening");
     Player* self = ctx.bot->game->player_manager.GetSelf();
     auto opt_target = ctx.blackboard.Value<Player*>("nearest_target");
-    if (!self || !opt_target || !*opt_target) return behavior::ExecuteResult::Failure;
+    auto opt_leash = ctx.blackboard.Value<float>("leash_distance");
+    if (!self || !opt_target || !*opt_target || !opt_leash) return behavior::ExecuteResult::Success;
     Player& target = **opt_target;
     float max_energy = (float)ctx.bot->game->ship_controller.ship.energy;
     float distance = self->position.Distance(target.position);
@@ -424,35 +427,39 @@ struct OpeningNode : public behavior::BehaviorNode {
 
     if (target.id != target_id) {
       target_id = target.id;
-      active = distance >= kMinDistance && self->energy >= kStartEnergy * max_energy &&
-               opportunities->SecondsSinceHit() >= kQuietSeconds && opportunities->Spot();
+      auto hit = opportunities->LastHitTick();
+      bool quiet = !hit || TICK_DIFF(now, *hit) >= (s32)(kQuietSeconds * 100.0f);
+      active = distance >= kMinDistance && self->energy >= kStartEnergy * max_energy && quiet && opportunities->Spot();
       end_tick = now + kMaxTicks;
       if (active && ctx.bot->combat_logger) ctx.bot->combat_logger->WriteTactic("opening", target.name);
     }
-    if (!active) return behavior::ExecuteResult::Failure;
+    if (!active) return behavior::ExecuteResult::Success;
 
-    float leash = ctx.blackboard.ValueOr<float>("leash_distance", 35.0f);
     float incoming = ctx.blackboard.ValueOr<float>("incoming_damage", 0.0f);
-    if (distance <= leash || self->energy < kEndEnergy * max_energy || TICK_GT(now, end_tick) ||
-        incoming >= dodge_threshold * max_energy) {
+    bool would_dodge = dodge_threshold && incoming >= *dodge_threshold * max_energy;
+    if (distance <= *opt_leash || self->energy < kEndEnergy * max_energy || TICK_GT(now, end_tick) || would_dodge) {
       active = false;
-      return behavior::ExecuteResult::Failure;
+      return behavior::ExecuteResult::Success;
     }
+    ctx.blackboard.Set("opening", true);
     return behavior::ExecuteResult::Success;
   }
 
   Opportunities* opportunities;
-  float dodge_threshold;
+  std::optional<float> dodge_threshold;
   u16 target_id = 0xFFFF;
   bool active = false;
   u32 end_tick = 0;
 };
 
 // Aims where the target will be after bouncing off a wall, when its path meets one before the shot can reach it: the
-// guide's rebound. The target's flight is simulated with the game's own movement and bounces; the aim is left alone
-// when there's no bounce first. For bots that lead their shots fully. Logs a "rebound" tactic at most once a second.
+// guide's rebound. The target's flight, as the bot saw it `delay` ticks ago, is simulated with the game's own movement
+// and bounces; the aim is left alone when there's no bounce first. For bots that lead their shots fully. Bullets and
+// bombs travel at almost the same speed in Chaos, so the bullet's serves both, as for the aim itself. Logs a "rebound"
+// tactic at most once a second.
 struct ReboundAimNode : public behavior::BehaviorNode {
-  ReboundAimNode(const char* target_key, const char* position_key) : target_key(target_key), position_key(position_key) {}
+  ReboundAimNode(PlayerHistory* history, u32 delay, const char* target_key, const char* position_key)
+      : history(history), delay(delay), target_key(target_key), position_key(position_key) {}
 
   static constexpr float kStep = 0.02f;       // seconds
   static constexpr float kMaxSeconds = 3.0f;  // no further ahead than this
@@ -468,8 +475,11 @@ struct ReboundAimNode : public behavior::BehaviorNode {
     float weapon_speed = behavior::GetWeaponSpeed(game, *self, WeaponType::Bullet);
     if (weapon_speed <= 0.0f) return behavior::ExecuteResult::Success;
 
-    // A copy of the target flown forward until a shot fired now could meet it.
+    // A copy of the target, as last seen, flown forward until a shot fired now could meet it.
+    PlayerHistory::Sample seen = history->Get(target, delay);
     Player ghost = target;
+    ghost.position = seen.position;
+    ghost.velocity = seen.velocity;
     ghost.lerp_time = 0.0f;
     bool bounced = false;
     for (float t = kStep; t <= kMaxSeconds; t += kStep) {
@@ -479,7 +489,7 @@ struct ReboundAimNode : public behavior::BehaviorNode {
 
       Vector2f offset = ghost.position - self->position - self->velocity * t;
       if (offset.Length() > weapon_speed * t) continue;
-      if (!bounced || ghost.position.Distance(target.position) > kFarDistance) break;
+      if (!bounced || ghost.position.Distance(seen.position) > kFarDistance) break;
 
       ctx.blackboard.Set(position_key, self->position + offset);
       u32 now = GetCurrentTick();
@@ -492,6 +502,8 @@ struct ReboundAimNode : public behavior::BehaviorNode {
     return behavior::ExecuteResult::Success;
   }
 
+  PlayerHistory* history;
+  u32 delay;
   const char* target_key;
   const char* position_key;
   u32 next_log_tick = 0;
@@ -795,16 +807,15 @@ static std::unique_ptr<behavior::BehaviorNode> CreateBattleMovement() {
   return builder.Build();
 }
 
-// The long-range opening (OpeningNode): straight at the target at full speed.
-static std::unique_ptr<behavior::BehaviorNode> CreateOpening(const CombatSettings& settings,
-                                                             Opportunities& opportunities) {
+// The long-range opening (OpeningCheckNode): straight at the target at full speed.
+static std::unique_ptr<behavior::BehaviorNode> CreateOpening() {
   using namespace behavior;
   BehaviorBuilder builder;
 
   // clang-format off
   builder
     .Sequence()
-        .Child<OpeningNode>(&opportunities, settings.dodge_threshold.value_or(1.0f))
+        .Child<BlackboardSetQueryNode>("opening")
         .Child<FaceNode>("aimshot")
         .Child<SeekNode>("aimshot", 0.0f, SeekNode::DistanceResolveType::Static)
         .End();
@@ -950,7 +961,7 @@ static std::unique_ptr<behavior::BehaviorNode> CreateAim(const CombatSettings& s
   builder
     .Sequence()
         .Composite(std::move(aim))
-        .Child<ReboundAimNode>("nearest_target", "aimshot")
+        .Child<ReboundAimNode>(&history, (u32)settings.reaction_ticks, "nearest_target", "aimshot")
         .End();
   // clang-format on
 
@@ -1172,11 +1183,12 @@ std::unique_ptr<behavior::BehaviorNode> CreateCombatTree(const CombatSettings& s
                         .Composite(CreateShotSpread(settings))
                         .Composite(CreateAimError(settings))
                         .Composite(CreatePursuitCheck(settings))
+                        .Child<OpeningCheckNode>(&senses.opportunities, settings.dodge_threshold)
                         .Parallel()
                             .Selector() // Moving: dodge, battle blasting, an opening, or move by the mode.
                                 .Composite(CreateDodge(settings, true))
                                 .Composite(CreateBattleMovement())
-                                .Composite(CreateOpening(settings, senses.opportunities))
+                                .Composite(CreateOpening())
                                 .Composite(CreateMovement(settings))
                                 .End()
                             .Sequence(CompositeDecorator::Success) // Use burst when near a wall.

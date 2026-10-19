@@ -101,6 +101,8 @@ struct TargetLock : EventHandler<WeaponSelfDamageEvent>, EventHandler<WeaponHitE
   bool OnScreen(const Player& player, const Player& self) const;
   // Damage this player did to the bot in the last few seconds.
   int RecentDamage(u16 id, u32 now);
+  // Starts, keeps or ends battle blasting, moving the lock when a battle starts.
+  void UpdateBattle(const std::vector<Player*>& candidates, const Player& self, u32 now);
 };
 
 }  // namespace chaos

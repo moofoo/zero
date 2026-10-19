@@ -23,10 +23,10 @@ constexpr u32 kIgnoreTicks = 500;
 // The locked enemy's weapons must be more than this share of the danger for a repel to break the lock.
 constexpr float kRepelShare = 0.5f;
 // Battle blasting: the bot must have been out of any fight this long (seconds) and have this share of its max energy;
-// a battle lasts at most kBattleTicks, and a pair not seen fighting for kBattleGapTicks is a new opportunity.
+// a battle lasts at most kMaxBattleTicks, and a pair not seen fighting for kBattleGapTicks is a new opportunity.
 constexpr float kBattleQuietSeconds = 3.0f;
 constexpr float kBattleEnergy = 0.7f;
-constexpr u32 kBattleTicks = 1000;
+constexpr u32 kMaxBattleTicks = 1000;
 constexpr u32 kBattleGapTicks = 300;
 
 TargetLock::TargetLock(ZeroBot& bot, float leash_distance, u32 lock_ticks, EnergyEstimate& estimate,
@@ -75,6 +75,51 @@ bool TargetLock::WithinLeash(const Player& player, const Player& self) const {
   return player.position.Distance(self.position) <= leash_distance;
 }
 
+void TargetLock::UpdateBattle(const std::vector<Player*>& candidates, const Player& self, u32 now) {
+  auto find = [&](u16 id) -> Player* {
+    for (Player* player : candidates) {
+      if (player->id == id) return player;
+    }
+    return nullptr;
+  };
+
+  if (battling) {
+    auto hit = opportunities.LastHitTick();
+    bool hit_since = hit && !TICK_GT(battle_start, *hit);
+    if (!opportunities.BattleGoing(battle_a, battle_b) || hit_since || TICK_GT(now, battle_end) || !find(locked)) {
+      battling = false;
+      Note("battle over");
+    } else {
+      last_contact[locked] = now;
+    }
+    return;
+  }
+
+  float max_energy = (float)bot.game->ship_controller.ship.energy;
+  if (opportunities.SecondsSinceFight() < kBattleQuietSeconds || self.energy < kBattleEnergy * max_energy) return;
+  auto battle = opportunities.FindBattle(candidates, self);
+  if (!battle) return;
+
+  u32 key = PairKey(battle->first, battle->second);
+  auto seen = battle_seen.find(key);
+  bool fresh = seen == battle_seen.end() || TICK_DIFF(now, seen->second) > (s32)kBattleGapTicks;
+  battle_seen[key] = now;
+  Player* a = find(battle->first);
+  Player* b = find(battle->second);
+  if (!fresh || !a || !b || !opportunities.Spot()) return;
+
+  Player* weaker = estimate.Get(*a).energy <= estimate.Get(*b).energy ? a : b;
+  locked = weaker->id;
+  battling = true;
+  battle_a = a->id;
+  battle_b = b->id;
+  battle_start = now;
+  battle_end = now + kMaxBattleTicks;
+  last_contact[locked] = now;
+  Note("battle");
+  if (bot.combat_logger) bot.combat_logger->WriteTactic("battle", weaker->name);
+}
+
 Player* TargetLock::Choose(const std::vector<Player*>& candidates) {
   Player* self = bot.game->player_manager.GetSelf();
   if (!self) return nullptr;
@@ -93,39 +138,7 @@ Player* TargetLock::Choose(const std::vector<Player*>& candidates) {
     return weak_enemy_energy && target && estimate.Get(*target).energy < *weak_enemy_energy;
   };
 
-  // Battle blasting: bomb two other enemies' fight from range and stay out of it, holding the lock on the weaker.
-  float max_energy = (float)bot.game->ship_controller.ship.energy;
-  if (battling) {
-    bool hit_since = opportunities.SecondsSinceHit() * 100.0f < (float)TICK_DIFF(now, battle_start);
-    if (!opportunities.BattleGoing(battle_a, battle_b) || hit_since || TICK_GT(now, battle_end) || !find(locked)) {
-      battling = false;
-      Note("battle over");
-    } else {
-      last_contact[locked] = now;
-    }
-  } else if (opportunities.SecondsSinceFight() >= kBattleQuietSeconds && self->energy >= kBattleEnergy * max_energy) {
-    auto battle = opportunities.FindBattle(candidates, *self);
-    if (battle) {
-      u32 key = ((u32)battle->first << 16) | battle->second;
-      auto seen = battle_seen.find(key);
-      bool fresh = seen == battle_seen.end() || TICK_DIFF(now, seen->second) > (s32)kBattleGapTicks;
-      battle_seen[key] = now;
-      Player* a = find(battle->first);
-      Player* b = find(battle->second);
-      if (fresh && a && b && opportunities.Spot()) {
-        Player* weaker = estimate.Get(*a).energy <= estimate.Get(*b).energy ? a : b;
-        locked = weaker->id;
-        battling = true;
-        battle_a = a->id;
-        battle_b = b->id;
-        battle_start = now;
-        battle_end = now + kBattleTicks;
-        last_contact[locked] = now;
-        Note("battle");
-        if (bot.combat_logger) bot.combat_logger->WriteTactic("battle", weaker->name);
-      }
-    }
-  }
+  UpdateBattle(candidates, *self, now);
 
   // A bot that goes after weak enemies switches to the weakest one on its screen below its threshold, by its estimate,
   // unless its target is weak already.

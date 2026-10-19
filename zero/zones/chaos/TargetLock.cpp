@@ -1,6 +1,7 @@
 #include "TargetLock.h"
 
 #include "EnergyEstimate.h"
+#include "Opportunities.h"
 
 #include <math.h>
 
@@ -21,15 +22,22 @@ constexpr u32 kContactTicks = 100;
 constexpr u32 kIgnoreTicks = 500;
 // The locked enemy's weapons must be more than this share of the danger for a repel to break the lock.
 constexpr float kRepelShare = 0.5f;
+// Battle blasting: the bot must have been out of any fight this long (seconds) and have this share of its max energy;
+// a battle lasts at most kBattleTicks, and a pair not seen fighting for kBattleGapTicks is a new opportunity.
+constexpr float kBattleQuietSeconds = 3.0f;
+constexpr float kBattleEnergy = 0.7f;
+constexpr u32 kBattleTicks = 1000;
+constexpr u32 kBattleGapTicks = 300;
 
 TargetLock::TargetLock(ZeroBot& bot, float leash_distance, u32 lock_ticks, EnergyEstimate& estimate,
-                       Vector2f view_extent, std::optional<float> weak_enemy_energy)
+                       Vector2f view_extent, std::optional<float> weak_enemy_energy, Opportunities& opportunities)
     : bot(bot),
       leash_distance(leash_distance),
       lock_ticks(lock_ticks),
       estimate(estimate),
       view_extent(view_extent),
-      weak_enemy_energy(weak_enemy_energy) {}
+      weak_enemy_energy(weak_enemy_energy),
+      opportunities(opportunities) {}
 
 bool TargetLock::Ignored(u16 id, u32 now) const {
   auto it = ignore_until.find(id);
@@ -85,9 +93,43 @@ Player* TargetLock::Choose(const std::vector<Player*>& candidates) {
     return weak_enemy_energy && target && estimate.Get(*target).energy < *weak_enemy_energy;
   };
 
+  // Battle blasting: bomb two other enemies' fight from range and stay out of it, holding the lock on the weaker.
+  float max_energy = (float)bot.game->ship_controller.ship.energy;
+  if (battling) {
+    bool hit_since = opportunities.SecondsSinceHit() * 100.0f < (float)TICK_DIFF(now, battle_start);
+    if (!opportunities.BattleGoing(battle_a, battle_b) || hit_since || TICK_GT(now, battle_end) || !find(locked)) {
+      battling = false;
+      Note("battle over");
+    } else {
+      last_contact[locked] = now;
+    }
+  } else if (opportunities.SecondsSinceFight() >= kBattleQuietSeconds && self->energy >= kBattleEnergy * max_energy) {
+    auto battle = opportunities.FindBattle(candidates, *self);
+    if (battle) {
+      u32 key = ((u32)battle->first << 16) | battle->second;
+      auto seen = battle_seen.find(key);
+      bool fresh = seen == battle_seen.end() || TICK_DIFF(now, seen->second) > (s32)kBattleGapTicks;
+      battle_seen[key] = now;
+      Player* a = find(battle->first);
+      Player* b = find(battle->second);
+      if (fresh && a && b && opportunities.Spot()) {
+        Player* weaker = estimate.Get(*a).energy <= estimate.Get(*b).energy ? a : b;
+        locked = weaker->id;
+        battling = true;
+        battle_a = a->id;
+        battle_b = b->id;
+        battle_start = now;
+        battle_end = now + kBattleTicks;
+        last_contact[locked] = now;
+        Note("battle");
+        if (bot.combat_logger) bot.combat_logger->WriteTactic("battle", weaker->name);
+      }
+    }
+  }
+
   // A bot that goes after weak enemies switches to the weakest one on its screen below its threshold, by its estimate,
   // unless its target is weak already.
-  if (weak_enemy_energy) {
+  if (weak_enemy_energy && !battling) {
     if (!locked_weak()) {
       Player* weakest = nullptr;
       float weakest_energy = *weak_enemy_energy;
@@ -114,7 +156,7 @@ Player* TargetLock::Choose(const std::vector<Player*>& candidates) {
   int locked_damage = locked != kNone ? RecentDamage(locked, now) : 0;
   u16 taker = kNone;
   for (Player* player : candidates) {
-    if (locked_weak()) break;
+    if (battling || locked_weak()) break;
     int damage = RecentDamage(player->id, now);
     if (player->id == locked || damage < heavy || damage <= locked_damage) continue;
     if (Ignored(player->id, now) || !WithinLeash(*player, *self)) continue;
@@ -127,7 +169,7 @@ Player* TargetLock::Choose(const std::vector<Player*>& candidates) {
     Note("third party");
   }
 
-  if (locked != kNone) {
+  if (locked != kNone && !battling) {
     Player* target = find(locked);
     if (!target) {
       Release("gone");

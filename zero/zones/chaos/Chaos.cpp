@@ -245,7 +245,7 @@ struct ChaosBehavior : public behavior::Behavior {
         decision_settings.disengage_confidence);
 
     target_lock = std::make_unique<TargetLock>(*ctx.bot, target_leash, (u32)(target_lock_seconds * kTicksPerSecond),
-                                               *estimate, view_extent, settings.weak_enemy_energy);
+                                               *estimate, view_extent, settings.weak_enemy_energy, *opportunities);
     Log(LogLevel::Info, "View %dx%d, awareness of shots and hits %.2f", view_width, view_height, shot_awareness);
 
     auto leash_distance = lookup.GetFloat("LeashDistance");

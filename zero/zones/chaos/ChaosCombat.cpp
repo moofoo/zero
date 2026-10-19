@@ -357,6 +357,11 @@ struct LockedTargetNode : public behavior::BehaviorNode {
     }
 
     Player* target = lock->Choose(candidates);
+    if (lock->Battling()) {
+      ctx.blackboard.Set("battle", true);
+    } else {
+      ctx.blackboard.Erase("battle");
+    }
     if (!target) return behavior::ExecuteResult::Failure;
 
     ctx.blackboard.Set(player_key, target);
@@ -768,6 +773,28 @@ static std::unique_ptr<behavior::BehaviorNode> CreateDodge(const CombatSettings&
 
 static std::unique_ptr<behavior::BehaviorNode> CreateEngage(const CombatSettings& settings);
 
+// How far a bot bombing two other enemies' fight keeps from its target (tiles).
+constexpr float kBattleDistance = 40.0f;
+
+// Battle blasting (TargetLock): while bombing two other enemies' fight, keep well off it, facing it, unless the commit
+// decision closes in to finish one.
+static std::unique_ptr<behavior::BehaviorNode> CreateBattleMovement() {
+  using namespace behavior;
+  BehaviorBuilder builder;
+
+  // clang-format off
+  builder
+    .Sequence()
+        .Child<BlackboardSetQueryNode>("battle")
+        .InvertChild<CombatModeIsNode>(CombatMode::Commit)
+        .Child<FaceNode>("aimshot")
+        .Child<SeekNode>("aimshot", kBattleDistance, SeekNode::DistanceResolveType::Dynamic)
+        .End();
+  // clang-format on
+
+  return builder.Build();
+}
+
 // The long-range opening (OpeningNode): straight at the target at full speed.
 static std::unique_ptr<behavior::BehaviorNode> CreateOpening(const CombatSettings& settings,
                                                              Opportunities& opportunities) {
@@ -1146,8 +1173,9 @@ std::unique_ptr<behavior::BehaviorNode> CreateCombatTree(const CombatSettings& s
                         .Composite(CreateAimError(settings))
                         .Composite(CreatePursuitCheck(settings))
                         .Parallel()
-                            .Selector() // Moving: dodge, an opening, or move by the mode.
+                            .Selector() // Moving: dodge, battle blasting, an opening, or move by the mode.
                                 .Composite(CreateDodge(settings, true))
+                                .Composite(CreateBattleMovement())
                                 .Composite(CreateOpening(settings, senses.opportunities))
                                 .Composite(CreateMovement(settings))
                                 .End()

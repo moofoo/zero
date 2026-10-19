@@ -18,6 +18,7 @@ struct ZeroBot;
 namespace chaos {
 
 struct EnergyEstimate;
+struct Opportunities;
 
 // Which enemy a Chaos bot fights. Like a player, once damage passes between the bot and an enemy (either way), the
 // bot locks onto that enemy and keeps after it even if another comes closer, including after being repelled away.
@@ -31,6 +32,9 @@ struct EnergyEstimate;
 // - or, for a bot that goes after weak enemies, when an enemy on its screen is estimated below its weak-enemy
 //   threshold (and its target isn't): it switches to the weakest such enemy. Whether to chase it is the commit
 //   decision's.
+// - or, battle blasting (ticket 24): when the bot isn't fighting and two other enemies are trading hits on its screen
+//   at range, it may lock onto the weaker of them (by its spotting chance) and bomb their fight from a distance, until
+//   their fight ends, the bot is hit, or a few seconds pass; nothing else moves the lock meanwhile.
 // Without a lock, the target is the nearest enemy.
 struct TargetLock : EventHandler<WeaponSelfDamageEvent>, EventHandler<WeaponHitEvent>, EventHandler<WeaponFireEvent> {
   static constexpr u16 kNone = 0xFFFF;
@@ -38,10 +42,13 @@ struct TargetLock : EventHandler<WeaponSelfDamageEvent>, EventHandler<WeaponHitE
   // The estimate and view are what the bot knows of enemy energy and what's on its screen; weak_enemy_energy is unset
   // for a bot that doesn't go after weak enemies.
   TargetLock(ZeroBot& bot, float leash_distance, u32 lock_ticks, EnergyEstimate& estimate, Vector2f view_extent,
-             std::optional<float> weak_enemy_energy);
+             std::optional<float> weak_enemy_energy, Opportunities& opportunities);
 
   // This tick's target among the enemies the bot could fight, or null when there are none.
   Player* Choose(const std::vector<Player*>& candidates);
+
+  // Whether the bot is bombing two other enemies' fight.
+  bool Battling() const { return battling; }
 
   void HandleEvent(const WeaponSelfDamageEvent& event) override;
   void HandleEvent(const WeaponHitEvent& event) override;
@@ -59,6 +66,7 @@ struct TargetLock : EventHandler<WeaponSelfDamageEvent>, EventHandler<WeaponHitE
   EnergyEstimate& estimate;
   Vector2f view_extent;
   std::optional<float> weak_enemy_energy;
+  Opportunities& opportunities;
 
   // The locked enemy, and this tick's target (often the same, but without a lock the nearest enemy).
   u16 locked = kNone;
@@ -72,6 +80,14 @@ struct TargetLock : EventHandler<WeaponSelfDamageEvent>, EventHandler<WeaponHitE
   std::unordered_map<u16, std::deque<Hit>> damage_taken;
   // Players the bot won't lock onto or target until a tick, after it had to repel them.
   std::unordered_map<u16, u32> ignore_until;
+  // Battle blasting: the two enemies fighting, when it started and must end; and when each pair of enemies was last
+  // seen fighting, so each fight is an opportunity once.
+  bool battling = false;
+  u16 battle_a = kNone;
+  u16 battle_b = kNone;
+  u32 battle_start = 0;
+  u32 battle_end = 0;
+  std::unordered_map<u32, u32> battle_seen;
 
   // Adds to this tick's reason for the log.
   void Note(const char* why);

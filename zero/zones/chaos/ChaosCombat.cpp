@@ -38,8 +38,6 @@ namespace chaos {
 
 using namespace svs;
 
-// How close a low-energy enemy has to be for a bot that rushes to stop dodging and finish them off (tiles).
-constexpr float kNearbyEnemyThreshold = 20.0f;
 // How far around the target to count our own bullets heading at it, for bombing into them (tiles).
 constexpr float kOutgoingDamageRadius = 40.0f;
 // How far around the aim point shots are spread, and over what period.
@@ -175,7 +173,7 @@ struct CombatModeIsNode : public behavior::BehaviorNode {
 };
 
 // Accepting a hit: while committing or pressuring, when incoming damage would make the bot dodge or repel, it judges
-// the damage (with DamageJudgement's error) and its win chance after taking it (with JudgementNoise). If it would still
+// the damage and its win chance after taking it, each with the error its Judgement allows. If it would still
 // win (AcceptConfidence) and not drop below kLastEnergy, it sets "accepting": no dodge, repel or portal. Logs each new
 // accept. Always succeeds.
 struct AcceptNode : public behavior::BehaviorNode {
@@ -369,22 +367,11 @@ struct LockedTargetNode : public behavior::BehaviorNode {
   std::vector<Player*> candidates;
 };
 
-// Aims at the target as the bot saw it `delay` ticks ago: a player's reaction time.
 // How the target was moving as the bot saw it: `delay` ticks ago (a reaction time), led by `lead` of its velocity (1:
-// a full intercept, 0: aiming where it was), and curved by `anticipation` of how its velocity was changing (the turn
-// or dodge it was making).
+// a full intercept, 0: aiming where it was).
 struct SkilledAimNode : public behavior::BehaviorNode {
-  SkilledAimNode(PlayerHistory* history, const char* target_key, const char* position_key, u32 delay, float lead,
-                 float anticipation)
-      : history(history),
-        target_key(target_key),
-        position_key(position_key),
-        delay(delay),
-        lead(lead),
-        anticipation(anticipation) {}
-
-  // The target's change in velocity is measured over this many ticks.
-  static constexpr u32 kTurnTicks = 30;
+  SkilledAimNode(PlayerHistory* history, const char* target_key, const char* position_key, u32 delay, float lead)
+      : history(history), target_key(target_key), position_key(position_key), delay(delay), lead(lead) {}
 
   behavior::ExecuteResult Execute(behavior::ExecuteContext& ctx) override {
     Game& game = *ctx.bot->game;
@@ -394,20 +381,6 @@ struct SkilledAimNode : public behavior::BehaviorNode {
 
     PlayerHistory::Sample seen = history->Get(**opt_target, delay);
     Vector2f aimshot = behavior::CalculateAimshot(game, *self, WeaponType::Bullet, seen.position, seen.velocity * lead);
-
-    if (anticipation > 0.0f) {
-      // Follow the turn for as long as the shot takes to arrive.
-      PlayerHistory::Sample before = history->Get(**opt_target, delay + kTurnTicks);
-      float seconds = TICK_DIFF(seen.tick, before.tick) / 100.0f;
-      float weapon_speed = behavior::GetWeaponSpeed(game, *self, WeaponType::Bullet);
-      float shot_speed = (self->velocity + self->GetHeading() * weapon_speed).Length();
-      if (seconds > 0.0f && shot_speed > 0.0f) {
-        Vector2f acceleration = (seen.velocity - before.velocity) * (1.0f / seconds);
-        float flight = aimshot.Distance(self->position) / shot_speed;
-        aimshot += acceleration * (0.5f * flight * flight * anticipation);
-      }
-    }
-
     ctx.blackboard.Set(position_key, aimshot);
     return behavior::ExecuteResult::Success;
   }
@@ -417,21 +390,6 @@ struct SkilledAimNode : public behavior::BehaviorNode {
   const char* position_key;
   u32 delay;
   float lead;
-  float anticipation;
-};
-
-// Succeeds when the incoming damage on the blackboard is at least this fraction of the bot's max energy.
-struct DamageFractionNode : public behavior::BehaviorNode {
-  DamageFractionNode(const char* damage_key, float fraction) : damage_key(damage_key), fraction(fraction) {}
-
-  behavior::ExecuteResult Execute(behavior::ExecuteContext& ctx) override {
-    float damage = ctx.blackboard.ValueOr<float>(damage_key, 0.0f);
-    float max_energy = (float)ctx.bot->game->ship_controller.ship.energy;
-    return damage >= fraction * max_energy ? behavior::ExecuteResult::Success : behavior::ExecuteResult::Failure;
-  }
-
-  const char* damage_key;
-  float fraction;
 };
 
 // Now and then sends a dodge the wrong way: with this chance, decided afresh each second, the dodge's push is reversed.
@@ -495,46 +453,6 @@ struct AimErrorNode : public behavior::BehaviorNode {
   float angle = 0.0f;
   u32 last_tick = 0;
   std::mt19937 random;
-};
-
-// Grows or shrinks a box about its centre.
-struct ScaleBoundsNode : public behavior::BehaviorNode {
-  ScaleBoundsNode(const char* bounds_key, float scale) : bounds_key(bounds_key), scale(scale) {}
-
-  behavior::ExecuteResult Execute(behavior::ExecuteContext& ctx) override {
-    auto opt_bounds = ctx.blackboard.Value<Rectangle>(bounds_key);
-    if (!opt_bounds) return behavior::ExecuteResult::Failure;
-
-    Vector2f center = (opt_bounds->min + opt_bounds->max) * 0.5f;
-    Vector2f half = (opt_bounds->max - opt_bounds->min) * (0.5f * scale);
-    ctx.blackboard.Set(bounds_key, Rectangle(center - half, center + half));
-
-    return behavior::ExecuteResult::Success;
-  }
-
-  const char* bounds_key;
-  float scale;
-};
-
-// Succeeds when a shot's velocity carries it towards the aim point at least this fast (tiles/s): slower shots are
-// easy to dodge.
-struct MinShotSpeedNode : public behavior::BehaviorNode {
-  MinShotSpeedNode(const char* velocity_key, const char* position_key, float min_speed)
-      : velocity_key(velocity_key), position_key(position_key), min_speed(min_speed) {}
-
-  behavior::ExecuteResult Execute(behavior::ExecuteContext& ctx) override {
-    Player* self = ctx.bot->game->player_manager.GetSelf();
-    auto opt_velocity = ctx.blackboard.Value<Vector2f>(velocity_key);
-    auto opt_position = ctx.blackboard.Value<Vector2f>(position_key);
-    if (!self || !opt_velocity || !opt_position) return behavior::ExecuteResult::Failure;
-
-    float speed = opt_velocity->Dot(Normalize(*opt_position - self->position));
-    return speed >= min_speed ? behavior::ExecuteResult::Success : behavior::ExecuteResult::Failure;
-  }
-
-  const char* velocity_key;
-  const char* position_key;
-  float min_speed;
 };
 
 // Whether the bot, backing off (disengage or recharge), is being chased by its target: within this distance (tiles)
@@ -648,10 +566,11 @@ struct MineCoverNode : public behavior::BehaviorNode {
 // Shot choice by expected value, with the commit decision: fire when the shot's chance of hitting times its damage is
 // worth the energy it costs. Energy is cheap with plenty to spare and dear near the reserve the bot's mode needs, and
 // below the reserve no shot is worth it. A shot slower than the weapon's own speed towards the target is less likely
-// to land. A bot that judges shots poorly overestimates their chance, up to double.
+// to land. A bot that judges shots poorly overestimates their chance, up to double, and a bomb's worth is scaled by the
+// bot's appetite for bombing.
 struct ShotValueNode : public behavior::BehaviorNode {
-  ShotValueNode(WeaponType weapon, const char* velocity_key, float judgement)
-      : weapon(weapon), velocity_key(velocity_key), judgement(judgement) {}
+  ShotValueNode(WeaponType weapon, const char* velocity_key, float judgement, float bomb_appetite)
+      : weapon(weapon), velocity_key(velocity_key), judgement(judgement), bomb_appetite(bomb_appetite) {}
 
   // The share of max energy each mode keeps in reserve: commit, pressure, hold, disengage, recharge. Backing off keeps
   // enough for a few cover shots; recharging keeps the most.
@@ -686,7 +605,7 @@ struct ShotValueNode : public behavior::BehaviorNode {
     float cost;
     if (bomb) {
       float level = ship.bombs > 0 ? ship.bombs - 1.0f : 0.0f;
-      value = BombExpectedDamage(arena.BombDamageLevel / 1000.0f) * speed_factor;
+      value = BombExpectedDamage(arena.BombDamageLevel / 1000.0f) * speed_factor * bomb_appetite;
       cost = ship_settings.BombFireEnergy + ship_settings.BombFireEnergyUpgrade * level;
     } else {
       float guns = ship.guns > 0 ? (float)ship.guns : 1.0f;
@@ -710,64 +629,27 @@ struct ShotValueNode : public behavior::BehaviorNode {
   WeaponType weapon;
   const char* velocity_key;
   float judgement;
+  float bomb_appetite;
 };
 
-// Dodge when incoming damage is at least the threshold fraction of max energy, unless a low-energy enemy we'd rush
-// is close by (then stay on them). Dodging only steers: while fighting, the bot keeps facing its aim point, and aiming
-// and firing carry on, as a player dodges and shoots at once.
+// Dodge when incoming damage is at least the threshold fraction of max energy, unless the bot has decided to accept
+// the hit. The dodge is a push sideways from the incoming weapons, sometimes the wrong way (DodgeError). Dodging only
+// steers: while fighting, the bot keeps facing its aim point, and aiming and firing carry on, as a player dodges and
+// shoots at once.
 static std::unique_ptr<behavior::BehaviorNode> CreateDodge(const CombatSettings& settings, bool keep_facing) {
   using namespace behavior;
   if (!settings.dodge_threshold) return std::make_unique<FailureNode>();
-
-  // Stay on them instead: with the commit decision, while committing; without it, when the enemy is below the rush
-  // threshold (without one, no enemy is low enough).
-  std::unique_ptr<BehaviorNode> pressing;
-  std::unique_ptr<BehaviorNode> near = std::make_unique<behavior::InvertNode>(
-      std::make_unique<DistanceThresholdNode>("nearest_target_position", "self_position", kNearbyEnemyThreshold));
-  if (settings.commit_decision) {
-    // The accept decision has judged it: take the hit and stay on them, wherever they are.
-    pressing = std::make_unique<BlackboardSetQueryNode>("accepting");
-    near = std::make_unique<PassNode>();
-  } else {
-    float rush_enemy_energy = settings.rush_enemy_energy.value_or(0.0f);
-    pressing = std::make_unique<InvertNode>(
-        std::make_unique<ScalarThresholdNode<float>>("nearest_target_energy", rush_enemy_energy));
-  }
-
-  // The dodge itself: to the safest nearby spot on the influence map (skilled), or a push sideways from the incoming
-  // weapons, sometimes the wrong way (DodgeError).
-  BehaviorBuilder dodge_builder;
-  if (settings.dodge_map) {
-    // clang-format off
-    dodge_builder
-      .Sequence()
-          .Child<DamageFractionNode>("incoming_damage", *settings.dodge_threshold)
-          .Child<InfluenceMapPopulateWeapons>(true)
-          .Child<InfluenceMapGradientDodge>()
-          .End();
-    // clang-format on
-  } else {
-    // clang-format off
-    dodge_builder
-      .Sequence()
-          .Child<DodgeIncomingDamage>(*settings.dodge_threshold, 35.0f)
-          .Composite(settings.dodge_error > 0.0f
-                         ? std::unique_ptr<BehaviorNode>(std::make_unique<DodgeErrorNode>(settings.dodge_error))
-                         : std::unique_ptr<BehaviorNode>(std::make_unique<PassNode>()))
-          .End();
-    // clang-format on
-  }
 
   BehaviorBuilder builder;
 
   // clang-format off
   builder
     .Sequence()
-        .Sequence(CompositeDecorator::Invert)
-            .Composite(std::move(pressing))
-            .Composite(std::move(near))
-            .End()
-        .Composite(dodge_builder.Build())
+        .InvertChild<BlackboardSetQueryNode>("accepting")
+        .Child<DodgeIncomingDamage>(*settings.dodge_threshold, 35.0f)
+        .Composite(settings.dodge_error > 0.0f
+                       ? std::unique_ptr<BehaviorNode>(std::make_unique<DodgeErrorNode>(settings.dodge_error))
+                       : std::unique_ptr<BehaviorNode>(std::make_unique<PassNode>()))
         .Composite(keep_facing ? std::unique_ptr<BehaviorNode>(std::make_unique<FaceNode>("aimshot"))
                                : std::unique_ptr<BehaviorNode>(std::make_unique<PassNode>()))
         .End();
@@ -776,60 +658,11 @@ static std::unique_ptr<behavior::BehaviorNode> CreateDodge(const CombatSettings&
   return builder.Build();
 }
 
-// Rush an enemy whose energy is below the threshold. While rushing, bullets ignore the energy floor.
-static std::unique_ptr<behavior::BehaviorNode> CreateRush(const CombatSettings& settings) {
-  using namespace behavior;
-  if (!settings.rush_enemy_energy) return std::make_unique<FailureNode>();
-
-  BehaviorBuilder builder;
-
-  // clang-format off
-  builder
-    .Sequence()
-        .InvertChild<ScalarThresholdNode<float>>("nearest_target_energy", *settings.rush_enemy_energy)
-        .Child<FaceNode>("aimshot")
-        .Child<SeekNode>("aimshot", 0.0f, SeekNode::DistanceResolveType::Static)
-        .Child<ScalarNode>(1.0f, "rushing")
-        .End();
-  // clang-format on
-
-  return builder.Build();
-}
-
-// Back off below the energy fraction: to the retreat distance, further than the bot hovers, or without one to the
-// leash distance.
-static std::unique_ptr<behavior::BehaviorNode> CreateRetreat(const CombatSettings& settings) {
-  using namespace behavior;
-  if (!settings.retreat_energy) return std::make_unique<FailureNode>();
-
-  std::unique_ptr<BehaviorNode> seek;
-  if (settings.retreat_distance) {
-    seek = std::make_unique<SeekNode>("aimshot", *settings.retreat_distance, SeekNode::DistanceResolveType::Dynamic);
-  } else {
-    seek = std::make_unique<SeekNode>("aimshot", "leash_distance", SeekNode::DistanceResolveType::Dynamic);
-  }
-
-  BehaviorBuilder builder;
-
-  // clang-format off
-  builder
-    .Sequence()
-        .InvertChild<PlayerEnergyPercentThresholdNode>(*settings.retreat_energy)
-        .Child<FaceNode>("aimshot")
-        .Composite(std::move(seek))
-        .Child<ScalarNode>(1.0f, "backing_off")
-        .End();
-  // clang-format on
-
-  return builder.Build();
-}
-
 static std::unique_ptr<behavior::BehaviorNode> CreateEngage(const CombatSettings& settings);
 
-// Moving by the commit decision's mode: commit closes in and finishes (bullets ignore the energy floor, as in a rush),
-// disengage and recharge back off to the retreat distance, hold keeps the leash distance in range style, and pressure
-// engages in the bot's own style.
-static std::unique_ptr<behavior::BehaviorNode> CreateModeMovement(const CombatSettings& settings) {
+// Moving in a fight, by the commit decision's mode: commit closes in and finishes, disengage and recharge back off to
+// the retreat distance, hold keeps the leash distance in range style, and pressure engages in the bot's own style.
+static std::unique_ptr<behavior::BehaviorNode> CreateMovement(const CombatSettings& settings) {
   using namespace behavior;
 
   CombatSettings range = settings;
@@ -852,13 +685,11 @@ static std::unique_ptr<behavior::BehaviorNode> CreateModeMovement(const CombatSe
             .Child<CombatModeIsNode>(CombatMode::Commit)
             .Child<FaceNode>("aimshot")
             .Child<SeekNode>("aimshot", 0.0f, SeekNode::DistanceResolveType::Static)
-            .Child<ScalarNode>(1.0f, "rushing")
             .End()
         .Sequence()
             .Child<CombatModeIsNode>(CombatMode::Disengage, CombatMode::Recharge)
             .Child<FaceNode>("aimshot")
             .Composite(std::move(back_off))
-            .Child<ScalarNode>(1.0f, "backing_off")
             .End()
         .Sequence()
             .Child<CombatModeIsNode>(CombatMode::Hold)
@@ -871,8 +702,8 @@ static std::unique_ptr<behavior::BehaviorNode> CreateModeMovement(const CombatSe
   return builder.Build();
 }
 
-// Moving when not rushing or backing off: close in on the target, or hover around a territory position at the
-// leash distance, facing the target only while not under threat.
+// Pressuring or holding: close in on the target, or hover around a territory position at the leash distance, facing
+// the target only while not under threat.
 static std::unique_ptr<behavior::BehaviorNode> CreateEngage(const CombatSettings& settings) {
   using namespace behavior;
 
@@ -929,33 +760,6 @@ static std::unique_ptr<behavior::BehaviorNode> CreateEngage(const CombatSettings
   return builder.Build();
 }
 
-// Moving in a fight: by the commit decision when it's on, else rush, back off or engage by their triggers.
-static std::unique_ptr<behavior::BehaviorNode> CreateMovement(const CombatSettings& settings) {
-  using namespace behavior;
-  if (settings.commit_decision) return CreateModeMovement(settings);
-
-  BehaviorBuilder builder;
-
-  // clang-format off
-  builder
-    .Selector()
-        .Composite(CreateRush(settings))
-        .Composite(CreateRetreat(settings))
-        .Composite(CreateEngage(settings))
-        .End();
-  // clang-format on
-
-  return builder.Build();
-}
-
-// The commit decision, when it's on. Always succeeds.
-static std::unique_ptr<behavior::BehaviorNode> CreateDecision(const CombatSettings& settings,
-                                                              CommitDecision& decision) {
-  if (!settings.commit_decision) return std::make_unique<PassNode>();
-
-  return std::make_unique<CommitDecisionNode>(&decision, "nearest_target");
-}
-
 // Spread shots around targets beyond the range. Always succeeds.
 static std::unique_ptr<behavior::BehaviorNode> CreateShotSpread(const CombatSettings& settings) {
   using namespace behavior;
@@ -977,12 +781,12 @@ static std::unique_ptr<behavior::BehaviorNode> CreateShotSpread(const CombatSett
 // Aim at the target: as it is now, or with a reaction time as the bot saw it a moment ago.
 static std::unique_ptr<behavior::BehaviorNode> CreateAim(const CombatSettings& settings, PlayerHistory& history) {
   using namespace behavior;
-  if (settings.reaction_ticks <= 0 && settings.lead_skill == 1.0f && settings.anticipation <= 0.0f) {
+  if (settings.reaction_ticks <= 0 && settings.lead_skill == 1.0f) {
     return std::make_unique<AimNode>(WeaponType::Bullet, "nearest_target", "aimshot");
   }
 
   return std::make_unique<SkilledAimNode>(&history, "nearest_target", "aimshot", (u32)settings.reaction_ticks,
-                                          settings.lead_skill, settings.anticipation);
+                                          settings.lead_skill);
 }
 
 // Aim drift, when the skill has any. Always succeeds.
@@ -992,61 +796,15 @@ static std::unique_ptr<behavior::BehaviorNode> CreateAimError(const CombatSettin
   return std::make_unique<AimErrorNode>("aimshot", settings.aim_error);
 }
 
-// Loosens or tightens the box a shot must cross, when the skill scales it. Always succeeds.
-static std::unique_ptr<behavior::BehaviorNode> CreateHitBoxScale(const CombatSettings& settings) {
-  if (settings.hit_box_scale == 1.0f) return std::make_unique<PassNode>();
-
-  return std::make_unique<ScaleBoundsNode>("target_bounds", settings.hit_box_scale);
-}
-
-// Holds shots too slow to land, when the skill asks, except while backing off: slow shots dropped in a pursuer's
-// path are cover, not a wasted attack.
-static std::unique_ptr<behavior::BehaviorNode> CreateShotSpeedCheck(const CombatSettings& settings,
-                                                                    const char* velocity_key) {
-  using namespace behavior;
-  if (settings.min_shot_speed <= 0.0f) return std::make_unique<PassNode>();
-
-  BehaviorBuilder builder;
-
-  // clang-format off
-  builder
-    .Selector()
-        .Child<BlackboardSetQueryNode>("backing_off")
-        .Child<MinShotSpeedNode>(velocity_key, "aimshot", settings.min_shot_speed)
-        .End();
-  // clang-format on
-
-  return builder.Build();
-}
-
-// Fire only above the energy floor (bullets: or while rushing). With the commit decision, shot choice weighs energy
-// instead. Succeeds when the bot may fire.
-static std::unique_ptr<behavior::BehaviorNode> CreateEnergyFloor(const CombatSettings& settings, float floor,
-                                                                 bool rushing_ignores) {
-  using namespace behavior;
-  if (settings.commit_decision) return std::make_unique<PassNode>();
-  if (!rushing_ignores) return std::make_unique<PlayerEnergyPercentThresholdNode>(floor);
-
-  BehaviorBuilder builder;
-
-  // clang-format off
-  builder
-    .Selector()
-        .Child<BlackboardSetQueryNode>("rushing")
-        .Child<PlayerEnergyPercentThresholdNode>(floor)
-        .End();
-  // clang-format on
-
-  return builder.Build();
-}
-
-// Whether a shot is worth taking: by expected value with the commit decision (which also keeps the energy a backing
-// off or recharging bot needs), else the minimum shot speed check.
+// Whether a shot is worth taking, by expected value (which also keeps the energy a backing off or recharging bot
+// needs); while pursued, a cover shot is always worth it when the bot uses cover fire.
 static std::unique_ptr<behavior::BehaviorNode> CreateShotChoice(const CombatSettings& settings, WeaponType weapon,
                                                                 const char* velocity_key) {
   using namespace behavior;
-  if (!settings.commit_decision) return CreateShotSpeedCheck(settings, velocity_key);
-  if (!settings.cover_fire) return std::make_unique<ShotValueNode>(weapon, velocity_key, settings.shot_judgement);
+  auto value = [&]() {
+    return std::make_unique<ShotValueNode>(weapon, velocity_key, settings.shot_judgement, settings.bomb_appetite);
+  };
+  if (!settings.cover_fire) return value();
 
   BehaviorBuilder builder;
 
@@ -1054,16 +812,16 @@ static std::unique_ptr<behavior::BehaviorNode> CreateShotChoice(const CombatSett
   builder
     .Selector()
         .Child<CoverShotNode>()
-        .Child<ShotValueNode>(weapon, velocity_key, settings.shot_judgement)
+        .Composite(value())
         .End();
   // clang-format on
 
   return builder.Build();
 }
 
-// Accepting hits, with the commit decision, when the bot's risk appetite allows any. Always succeeds.
+// Accepting hits, when the bot's risk appetite allows any. Always succeeds.
 static std::unique_ptr<behavior::BehaviorNode> CreateAccept(const CombatSettings& settings, CommitDecision& decision) {
-  if (!settings.commit_decision || settings.accept_confidence > 1.0f - 1e-3f) return std::make_unique<PassNode>();
+  if (settings.accept_confidence > 1.0f - 1e-3f) return std::make_unique<PassNode>();
 
   return std::make_unique<AcceptNode>(&decision, settings.accept_confidence, settings.dodge_threshold.value_or(1.0f),
                                       settings.damage_judgement, settings.judgement_noise);
@@ -1108,20 +866,20 @@ static std::unique_ptr<behavior::BehaviorNode> CreatePatrol(const CombatSettings
   return builder.Build();
 }
 
-// Whether the bot is pursued while backing off, for cover shots and mines: with the commit decision only.
+// Whether the bot is pursued while backing off, for cover shots and mines.
 static std::unique_ptr<behavior::BehaviorNode> CreatePursuitCheck(const CombatSettings& settings) {
-  if (!settings.commit_decision || (!settings.cover_fire && !settings.mine_cover)) return std::make_unique<PassNode>();
+  if (!settings.cover_fire && !settings.mine_cover) return std::make_unique<PassNode>();
 
   return std::make_unique<PursuitNode>();
 }
 
 // Mines in a pursuer's path, when the bot uses them. Always succeeds.
 static std::unique_ptr<behavior::BehaviorNode> CreateMineCover(const CombatSettings& settings) {
-  if (!settings.commit_decision || !settings.mine_cover) return std::make_unique<PassNode>();
+  if (!settings.mine_cover) return std::make_unique<PassNode>();
 
-  // A bot that anticipates well waits until the pursuer is on its trail.
+  // A bot with good judgement waits until the pursuer is on its trail.
   return std::make_unique<behavior::SuccessNode>(
-      std::make_unique<MineCoverNode>(settings.mine_cover_range, settings.anticipation >= 0.5f));
+      std::make_unique<MineCoverNode>(settings.mine_cover_range, settings.mine_on_trail));
 }
 
 // Bomb only into enough of our own bullet damage already heading at the target. Succeeds when that's the case, or
@@ -1152,9 +910,7 @@ std::unique_ptr<behavior::BehaviorNode> CreateCombatTree(const CombatSettings& s
   const float multifire_range = settings.multifire_range.value_or(15.0f);
   const float antiwarp_energy = settings.antiwarp_energy.value_or(0.75f);
   const float repel_trigger = settings.repel_trigger.value_or(1.0f);
-  const float bomb_energy = settings.bomb_energy.value_or(0.65f);
   const float bomb_min_range = settings.bomb_min_range.value_or(10.0f);
-  const float bullet_energy = settings.bullet_energy.value_or(0.3f);
 
   // clang-format off
   builder
@@ -1170,7 +926,7 @@ std::unique_ptr<behavior::BehaviorNode> CreateCombatTree(const CombatSettings& s
                     .Child<LockedTargetNode>(&senses.target_lock, "nearest_target")
                     .Child<PlayerPositionQueryNode>("nearest_target", "nearest_target_position")
                     .Child<EnergyEstimateQueryNode>(&senses.estimate, "nearest_target", "nearest_target_energy", "nearest_target_energy_sd")
-                    .Composite(CreateDecision(settings, senses.decision))
+                    .Child<CommitDecisionNode>(&senses.decision, "nearest_target")
                     .End()
                 .Sequence(CompositeDecorator::Success) // If we have a portal but no location, lay one down.
                     .Child<ShipItemCountThresholdNode>(ShipItemType::Portal, 1)
@@ -1248,9 +1004,7 @@ std::unique_ptr<behavior::BehaviorNode> CreateCombatTree(const CombatSettings& s
                         .Composite(CreateAimError(settings))
                         .Composite(CreatePursuitCheck(settings))
                         .Parallel()
-                            .Child<BlackboardEraseNode>("rushing")
-                            .Child<BlackboardEraseNode>("backing_off")
-                            .Selector() // Moving: dodge, rush, back off, or engage.
+                            .Selector() // Moving: dodge, or move by the mode.
                                 .Composite(CreateDodge(settings, true))
                                 .Composite(CreateMovement(settings))
                                 .End()
@@ -1262,7 +1016,6 @@ std::unique_ptr<behavior::BehaviorNode> CreateCombatTree(const CombatSettings& s
                                 .Child<InputActionNode>(InputAction::Burst)
                                 .End()
                             .Sequence(CompositeDecorator::Success) // Bomb fire check.
-                                .Composite(CreateEnergyFloor(settings, bomb_energy, false))
                                 .Child<ShipWeaponCapabilityQueryNode>(WeaponType::Bomb)
                                 .InvertChild<ShipWeaponCooldownQueryNode>(WeaponType::Bomb)
                                 .Composite(CreateBombOverlapCheck(settings))
@@ -1271,7 +1024,6 @@ std::unique_ptr<behavior::BehaviorNode> CreateCombatTree(const CombatSettings& s
                                 .Composite(CreateShotChoice(settings, WeaponType::Bomb, "bomb_fire_velocity"))
                                 .Child<RayNode>("self_position", "bomb_fire_velocity", "bomb_fire_ray")
                                 .Child<DynamicPlayerBoundingBoxQueryNode>("nearest_target", "target_bounds", 3.0f)
-                                .Composite(CreateHitBoxScale(settings))
                                 .Child<MoveRectangleNode>("target_bounds", "aimshot", "target_bounds")
                                 .Child<RenderRectNode>("world_camera", "target_bounds", Vector3f(1.0f, 0.0f, 0.0f))
                                 .Child<RenderRayNode>("world_camera", "bomb_fire_ray", 50.0f, Vector3f(1.0f, 1.0f, 0.0f))
@@ -1279,7 +1031,6 @@ std::unique_ptr<behavior::BehaviorNode> CreateCombatTree(const CombatSettings& s
                                 .Child<InputActionNode>(InputAction::Bomb)
                                 .End()
                             .Sequence(CompositeDecorator::Success) // Determine if a shot should be fired by using weapon trajectory and bounding boxes.
-                                .Composite(CreateEnergyFloor(settings, bullet_energy, true))
                                 .InvertChild<ShipWeaponCooldownQueryNode>(WeaponType::Bullet)
                                 .InvertChild<InputQueryNode>(InputAction::Bomb) // Don't try to shoot a bullet when shooting a bomb.
                                 .InvertChild<TileQueryNode>(kTileIdSafe)
@@ -1287,7 +1038,6 @@ std::unique_ptr<behavior::BehaviorNode> CreateCombatTree(const CombatSettings& s
                                 .Composite(CreateShotChoice(settings, WeaponType::Bullet, "bullet_fire_velocity"))
                                 .Child<RayNode>("self_position", "bullet_fire_velocity", "bullet_fire_ray")
                                 .Child<DynamicPlayerBoundingBoxQueryNode>("nearest_target", "target_bounds", 4.0f)
-                                .Composite(CreateHitBoxScale(settings))
                                 .Child<MoveRectangleNode>("target_bounds", "aimshot", "target_bounds")
                                 .Child<RayRectangleInterceptNode>("bullet_fire_ray", "target_bounds")
                                 .Child<InputActionNode>(InputAction::Bullet)

@@ -41,9 +41,9 @@ struct DecisionSettings {
   float disengage_confidence = 0.35f;
   // Never commit with less than this fraction of max energy (aggression).
   float commit_energy = 0.5f;
-  // Added to both confidences: a patient bot needs better odds to commit and backs off sooner (skill).
+  // Added to both confidences: a patient bot needs better odds to commit and backs off sooner (from Judgement).
   float patience = 0.0f;
-  // How far off the bot's judgement of that chance is, and how often it decides, in ticks (skill).
+  // How far off the bot's judgement of that chance is, and how often it decides, in ticks (from Judgement).
   float judgement_noise = 0.0f;
   u32 decision_ticks = 10;
   // Where a backing-off bot stops (tiles), and the fraction of max energy recharging stops at.

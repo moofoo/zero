@@ -23,13 +23,13 @@ constexpr u32 kIgnoreTicks = 500;
 constexpr float kRepelShare = 0.5f;
 
 TargetLock::TargetLock(ZeroBot& bot, float leash_distance, u32 lock_ticks, EnergyEstimate& estimate,
-                       Vector2f view_extent, std::optional<float> rush_enemy_energy)
+                       Vector2f view_extent, std::optional<float> weak_enemy_energy)
     : bot(bot),
       leash_distance(leash_distance),
       lock_ticks(lock_ticks),
       estimate(estimate),
       view_extent(view_extent),
-      rush_enemy_energy(rush_enemy_energy) {}
+      weak_enemy_energy(weak_enemy_energy) {}
 
 bool TargetLock::Ignored(u16 id, u32 now) const {
   auto it = ignore_until.find(id);
@@ -79,18 +79,18 @@ Player* TargetLock::Choose(const std::vector<Player*>& candidates) {
     return nullptr;
   };
 
-  // Whether the locked enemy is one the bot rushes, by its estimate.
+  // Whether the locked enemy is a weak one, by the bot's estimate.
   auto locked_weak = [&]() {
     Player* target = locked != kNone ? find(locked) : nullptr;
-    return rush_enemy_energy && target && estimate.Get(*target).energy < *rush_enemy_energy;
+    return weak_enemy_energy && target && estimate.Get(*target).energy < *weak_enemy_energy;
   };
 
-  // A bot that rushes weak enemies switches to the weakest one on its screen below its threshold, by its estimate,
+  // A bot that goes after weak enemies switches to the weakest one on its screen below its threshold, by its estimate,
   // unless its target is weak already.
-  if (rush_enemy_energy) {
+  if (weak_enemy_energy) {
     if (!locked_weak()) {
       Player* weakest = nullptr;
-      float weakest_energy = *rush_enemy_energy;
+      float weakest_energy = *weak_enemy_energy;
       for (Player* player : candidates) {
         if (Ignored(player->id, now) || !OnScreen(*player, *self) || !WithinLeash(*player, *self)) continue;
         float energy = estimate.Get(*player).energy;

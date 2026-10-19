@@ -28,16 +28,17 @@ struct EnergyEstimate;
 // - or when another enemy hits it hard (30% of its max energy within 3 seconds), which takes over the lock
 // - or when it had to repel mostly the locked enemy's weapons: then it picks another target and ignores that enemy
 //   for a few seconds
-// - or, for a bot that rushes weak enemies, when an enemy on its screen is estimated below its rush threshold (and
-//   its target isn't): it switches to the weakest such enemy.
+// - or, for a bot that goes after weak enemies, when an enemy on its screen is estimated below its weak-enemy
+//   threshold (and its target isn't): it switches to the weakest such enemy. Whether to chase it is the commit
+//   decision's.
 // Without a lock, the target is the nearest enemy.
 struct TargetLock : EventHandler<WeaponSelfDamageEvent>, EventHandler<WeaponHitEvent>, EventHandler<WeaponFireEvent> {
   static constexpr u16 kNone = 0xFFFF;
 
-  // The estimate and view are what the bot knows of enemy energy and what's on its screen; rush_enemy_energy is unset
-  // for a bot that doesn't rush.
+  // The estimate and view are what the bot knows of enemy energy and what's on its screen; weak_enemy_energy is unset
+  // for a bot that doesn't go after weak enemies.
   TargetLock(ZeroBot& bot, float leash_distance, u32 lock_ticks, EnergyEstimate& estimate, Vector2f view_extent,
-             std::optional<float> rush_enemy_energy);
+             std::optional<float> weak_enemy_energy);
 
   // This tick's target among the enemies the bot could fight, or null when there are none.
   Player* Choose(const std::vector<Player*>& candidates);
@@ -57,7 +58,7 @@ struct TargetLock : EventHandler<WeaponSelfDamageEvent>, EventHandler<WeaponHitE
   u32 lock_ticks;
   EnergyEstimate& estimate;
   Vector2f view_extent;
-  std::optional<float> rush_enemy_energy;
+  std::optional<float> weak_enemy_energy;
 
   // The locked enemy, and this tick's target (often the same, but without a lock the nearest enemy).
   u16 locked = kNone;

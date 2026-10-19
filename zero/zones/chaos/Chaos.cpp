@@ -14,6 +14,7 @@
 #include <zero/zones/chaos/PlayerHistory.h>
 #include <zero/zones/chaos/TargetLock.h>
 
+#include <algorithm>
 #include <memory>
 #include <optional>
 #include <string>
@@ -48,8 +49,8 @@ static std::vector<Vector2f> ParseWaypoints(std::string_view text) {
 
 constexpr float kDefaultGreenUpgradeTarget = 0.75f;
 constexpr float kDefaultGreenMaxDistance = 25.0f;
-// How likely the bot is to notice a shot or hit on its screen, for its estimate of enemy energy.
-constexpr float kDefaultAttention = 0.7f;
+// How likely a bot with no Awareness is to notice a shot or hit on its screen, for its estimate of enemy energy.
+constexpr float kDefaultShotAwareness = 0.7f;
 // The bot's screen, in pixels: what it can see of weapons, shots and hits.
 constexpr int kDefaultViewWidth = 1920;
 constexpr int kDefaultViewHeight = 1080;
@@ -62,6 +63,21 @@ constexpr float kDefaultTargetLeashDistance = 120.0f;
 constexpr float kDefaultTargetLockSeconds = 10.0f;
 // How far bots hover from the enemy (tiles) without a LeashDistance.
 constexpr float kDefaultLeashDistance = 35.0f;
+
+// What Judgement sets, from 0 (a novice: impatient, noisy, slow to decide, overrating its shots and misjudging
+// damage) to 1 (a veteran), in a straight line between the two.
+struct JudgementRange {
+  float at_0;
+  float at_1;
+  float At(float judgement) const { return at_0 + (at_1 - at_0) * judgement; }
+};
+constexpr JudgementRange kPatience = {-0.08f, 0.08f};
+constexpr JudgementRange kJudgementNoise = {0.15f, 0.03f};
+constexpr JudgementRange kDecisionMs = {400.0f, 100.0f};
+constexpr JudgementRange kShotJudgement = {0.3f, 0.95f};
+constexpr JudgementRange kDamageJudgement = {0.4f, 0.05f};
+// From this Judgement on, a pursued bot lays a mine only when the pursuer is on its trail.
+constexpr float kMineOnTrailJudgement = 0.5f;
 
 // A float from the config, if the key is there.
 static std::optional<float> ReadOptionalFloat(Config& config, const std::string& group, const char* key) {
@@ -89,7 +105,7 @@ static int GetRequestedShip(ZeroBot& bot) {
 }
 
 // Looks a setting up in the bot's skill level, then its aggression preset, then its ship's section, then [Chaos]
-// (every bot's). A skill level can so override any style key, e.g. a veteran's own RetreatEnergy.
+// (every bot's). A skill level can so override any style key, e.g. a veteran's own RetreatDistance.
 struct SettingLookup {
   Config& config;
   std::string skill_group;
@@ -142,11 +158,8 @@ struct ChaosBehavior : public behavior::Behavior {
     if (!skill.empty()) Log(LogLevel::Info, "Skill: %s", skill.c_str());
 
     settings = CombatSettings();
-    settings.bomb_energy = lookup.GetFloat("BombEnergy");
-    settings.bullet_energy = lookup.GetFloat("BulletEnergy");
-    settings.retreat_energy = lookup.GetFloat("RetreatEnergy");
     settings.retreat_distance = lookup.GetFloat("RetreatDistance");
-    settings.rush_enemy_energy = lookup.GetFloat("RushEnemyEnergy");
+    settings.weak_enemy_energy = lookup.GetFloat("WeakEnemyEnergy");
     settings.bomb_min_range = lookup.GetFloat("BombMinRange");
     settings.dodge_threshold = lookup.GetFloat("DodgeThreshold");
     settings.repel_trigger = lookup.GetFloat("RepelTrigger");
@@ -154,19 +167,13 @@ struct ChaosBehavior : public behavior::Behavior {
     settings.antiwarp_energy = lookup.GetFloat("AntiwarpEnergy");
     settings.bomb_overlap_damage = lookup.GetFloat("BombOverlapDamage");
     settings.shot_spread_range = lookup.GetFloat("ShotSpreadRange");
+    settings.bomb_appetite = lookup.GetFloat("BombAppetite").value_or(settings.bomb_appetite);
     auto engage = lookup.Get("Engage");
     settings.engage_close = engage && std::string_view(*engage) == "close";
     settings.reaction_ticks = (int)(skill_float("ReactionMs").value_or(0.0f) / kMsPerTick);
     settings.aim_error = skill_float("AimError").value_or(0.0f);
-    settings.hit_box_scale = skill_float("HitBoxScale").value_or(1.0f);
-    settings.min_shot_speed = skill_float("MinShotSpeed").value_or(0.0f);
     settings.lead_skill = skill_float("LeadSkill").value_or(1.0f);
-    settings.anticipation = skill_float("Anticipation").value_or(0.0f);
     settings.dodge_error = skill_float("DodgeError").value_or(0.0f);
-    auto dodge_style = skill_group.empty() ? std::nullopt : config.GetString(skill_group, "DodgeStyle");
-    settings.dodge_map = dodge_style && std::string_view(*dodge_style) == "map";
-    settings.commit_decision = lookup.GetFloat("CommitDecision").value_or(0.0f) > 0.5f;
-    settings.shot_judgement = skill_float("ShotJudgement").value_or(1.0f);
     settings.cover_fire = lookup.GetFloat("CoverFire").value_or(1.0f) > 0.5f;
     settings.mine_cover = lookup.GetFloat("MineCover").value_or(1.0f) > 0.5f;
     settings.mine_cover_range = lookup.GetFloat("MineCoverRange").value_or(settings.mine_cover_range);
@@ -178,15 +185,32 @@ struct ChaosBehavior : public behavior::Behavior {
     }
     settings.look_ahead = lookup.GetFloat("LookAhead").value_or(settings.look_ahead);
     settings.corner_speed = lookup.GetFloat("CornerSpeed").value_or(settings.corner_speed);
-    settings.damage_judgement = skill_float("DamageJudgement").value_or(0.0f);
-    settings.judgement_noise = skill_float("JudgementNoise").value_or(0.0f);
     if (engage && !settings.engage_close && std::string_view(*engage) != "range") {
       Log(LogLevel::Warning, "Engage should be range or close, not %s: using range", *engage);
     }
     Log(LogLevel::Info, "Engage: %s", settings.engage_close ? "close" : "range");
 
+    // Judgement (0-1): how well the bot judges a fight. Without it, the bot judges soundly and without patience.
+    DecisionSettings decision_settings;
+    auto judgement = skill_float("Judgement");
+    if (judgement) {
+      float j = std::clamp(*judgement, 0.0f, 1.0f);
+      settings.shot_judgement = kShotJudgement.At(j);
+      settings.damage_judgement = kDamageJudgement.At(j);
+      settings.judgement_noise = kJudgementNoise.At(j);
+      settings.mine_on_trail = j >= kMineOnTrailJudgement;
+      decision_settings.patience = kPatience.At(j);
+      decision_settings.judgement_noise = settings.judgement_noise;
+      decision_settings.decision_ticks = (u32)(kDecisionMs.At(j) / kMsPerTick);
+      u32 decision_ms = (u32)(decision_settings.decision_ticks * kMsPerTick);
+      Log(LogLevel::Info, "Judgement %.2f: patience %+.2f, noise %.2f, deciding every %u ms", j,
+          decision_settings.patience, decision_settings.judgement_noise, decision_ms);
+    }
+
     // What the bot can see: weapons, shots and hits on its screen only. The screen is the player's window, the same
-    // for every bot, so it's a [Chaos] setting rather than a preset or ship key; attention is a trait of the bot.
+    // for every bot, so it's a [Chaos] setting rather than a preset or ship key. Awareness (0-1, skill) is how much of
+    // it the bot takes in: the chance of noticing each incoming weapon, for dodging and repelling, and each shot or
+    // hit, for its estimate of enemy energy.
     int view_width = config.GetInt(to_string(Zone::Chaos), "ViewWidth").value_or(kDefaultViewWidth);
     int view_height = config.GetInt(to_string(Zone::Chaos), "ViewHeight").value_or(kDefaultViewHeight);
     Vector2f view_extent(view_width / 16.0f / 2.0f, view_height / 16.0f / 2.0f);
@@ -194,36 +218,30 @@ struct ChaosBehavior : public behavior::Behavior {
 
     // Weapons count only once they've existed for the reaction time, and if noticed.
     ctx.blackboard.Set("weapon_reaction_ticks", settings.reaction_ticks);
-    ctx.blackboard.Set("weapon_notice", skill_float("NoticeWeapon").value_or(1.0f));
+    auto awareness = skill_float("Awareness");
+    if (awareness) awareness = std::clamp(*awareness, 0.0f, 1.0f);
+    ctx.blackboard.Set("weapon_notice", awareness.value_or(1.0f));
 
-    float attention = lookup.GetFloat("Attention").value_or(kDefaultAttention);
-    estimate = std::make_unique<EnergyEstimate>(*ctx.bot, attention, view_extent);
+    float shot_awareness = awareness.value_or(kDefaultShotAwareness);
+    estimate = std::make_unique<EnergyEstimate>(*ctx.bot, shot_awareness, view_extent);
     history = std::make_unique<PlayerHistory>(*ctx.bot);
     float target_leash = lookup.GetFloat("TargetLeashDistance").value_or(kDefaultTargetLeashDistance);
     float target_lock_seconds = lookup.GetFloat("TargetLockSeconds").value_or(kDefaultTargetLockSeconds);
-    // The commit decision: risk appetite from the style keys, judgement from the skill keys.
-    DecisionSettings decision_settings;
+    // The commit decision: risk appetite from the style keys, judgement from Judgement above.
     decision_settings.commit_confidence =
         lookup.GetFloat("CommitConfidence").value_or(decision_settings.commit_confidence);
     decision_settings.disengage_confidence =
         lookup.GetFloat("DisengageConfidence").value_or(decision_settings.disengage_confidence);
     decision_settings.commit_energy = lookup.GetFloat("CommitEnergy").value_or(decision_settings.commit_energy);
-    decision_settings.judgement_noise = skill_float("JudgementNoise").value_or(decision_settings.judgement_noise);
-    decision_settings.patience = skill_float("Patience").value_or(decision_settings.patience);
-    auto decision_ms = skill_float("DecisionMs");
-    if (decision_ms) decision_settings.decision_ticks = (u32)(*decision_ms / kMsPerTick);
     auto leash = lookup.GetFloat("LeashDistance");
     decision_settings.retreat_distance = settings.retreat_distance.value_or(leash.value_or(kDefaultLeashDistance));
     decision = std::make_unique<CommitDecision>(*ctx.bot, *estimate, decision_settings);
-    if (settings.commit_decision) {
-      Log(LogLevel::Info, "Commit decision: commit at %.2f, disengage below %.2f, noise %.2f",
-          decision_settings.commit_confidence, decision_settings.disengage_confidence,
-          decision_settings.judgement_noise);
-    }
+    Log(LogLevel::Info, "Commit decision: commit at %.2f, disengage below %.2f", decision_settings.commit_confidence,
+        decision_settings.disengage_confidence);
 
     target_lock = std::make_unique<TargetLock>(*ctx.bot, target_leash, (u32)(target_lock_seconds * kTicksPerSecond),
-                                               *estimate, view_extent, settings.rush_enemy_energy);
-    Log(LogLevel::Info, "View %dx%d, attention %.2f", view_width, view_height, attention);
+                                               *estimate, view_extent, settings.weak_enemy_energy);
+    Log(LogLevel::Info, "View %dx%d, awareness of shots and hits %.2f", view_width, view_height, shot_awareness);
 
     auto leash_distance = lookup.GetFloat("LeashDistance");
     if (leash_distance) ctx.blackboard.Set("leash_distance", *leash_distance);

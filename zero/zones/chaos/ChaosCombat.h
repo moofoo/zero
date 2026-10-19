@@ -13,28 +13,25 @@ struct EnergyEstimate;
 struct PlayerHistory;
 struct TargetLock;
 
-// How a Chaos bot fights. Every ship flies the same combat tree; these settings decide its style. Chaos reads them
-// from the bot's aggression preset ([Aggression.<name>], chosen with --aggression), then its ship's section
-// ([Ship.<name>], e.g. the Terrier's closer, more aggressive style), and a value set in neither keeps the built-in
-// number. A trait whose value is unset (dodge, rush, retreat, bomb overlap, shot spread) is left out.
+// How a Chaos bot fights. Every ship flies the same combat tree; these settings decide its style. Chaos reads each
+// style key from the bot's skill level ([Skill.<name>], which may override style), then its aggression preset
+// ([Aggression.<name>], chosen with --aggression), then its ship's section ([Ship.<name>], e.g. the Terrier's closer
+// style), then [Chaos], and a value set in none keeps the built-in number. A trait whose value is unset (dodge, the
+// weak-enemy switch, bomb overlap, shot spread) is left out.
 struct CombatSettings {
-  // Fire bombs / bullets only above this fraction of max energy.
-  std::optional<float> bomb_energy;
-  std::optional<float> bullet_energy;
-  // Back off below this fraction of max energy: to the retreat distance, or without one to the leash distance.
-  std::optional<float> retreat_energy;
+  // Back off to this distance from the enemy (tiles); without it, to the leash distance.
   std::optional<float> retreat_distance;
-  // Rush an enemy whose energy is below this.
-  std::optional<float> rush_enemy_energy;
+  // Switch to the weakest enemy on screen whose estimated energy is below this (the target lock), and stay on it.
+  std::optional<float> weak_enemy_energy;
   // Don't bomb an enemy closer than this (tiles).
   std::optional<float> bomb_min_range;
   // Dodge when incoming damage is at least this fraction of max energy.
   std::optional<float> dodge_threshold;
   // Repel (or warp out) when incoming damage is at least this times current energy.
   std::optional<float> repel_trigger;
-  // Multifire on when the enemy is further than this (tiles).
+  // Ship abilities: multifire on when the enemy is further than this (tiles); antiwarp on above this fraction of max
+  // energy.
   std::optional<float> multifire_range;
-  // Antiwarp on above this fraction of max energy.
   std::optional<float> antiwarp_energy;
   // Bomb only when at least this much of our own bullet damage is already heading at the target, so the bomb
   // lands among bullets and is harder to dodge.
@@ -43,42 +40,35 @@ struct CombatSettings {
   std::optional<float> shot_spread_range;
   // Close in on the target, rather than hovering at the leash distance.
   bool engage_close = false;
+  // How readily the bot bombs: a multiplier on a bomb's judged worth in the shot choice (1: as judged).
+  float bomb_appetite = 1.0f;
 
-  // Skill (a [Skill.<name>] section, chosen with --skill). The defaults are today's bots: perfect aim, instant
-  // reactions.
+  // Skill (a [Skill.<name>] section, chosen with --skill). The defaults are a bot with no skill level: perfect aim,
+  // instant reactions, sound judgement.
   // Aim at the target as seen this many ticks ago (weapons get the same delay through the view).
   int reaction_ticks = 0;
   // Aim drifts off target by about this many degrees.
   float aim_error = 0.0f;
-  // Scale of the box a shot's path must cross to be fired; larger takes more low-percentage shots.
-  float hit_box_scale = 1.0f;
-  // Hold shots slower than this along the line to the target (tiles/s), except while backing off.
-  float min_shot_speed = 0.0f;
-  // How much of the target's movement the bot leads its shots by (1: a full intercept), and how much it follows the
-  // turn the target is making (0: a straight line).
+  // How much of the target's movement the bot leads its shots by (1: a full intercept).
   float lead_skill = 1.0f;
-  float anticipation = 0.0f;
-  // Dodge to the safest nearby spot on the influence map, rather than pushing sideways; and how often a sideways push
-  // goes the wrong way.
-  bool dodge_map = false;
+  // How often a sideways dodge goes the wrong way.
   float dodge_error = 0.0f;
-
-  // The commit decision chooses how to move in a fight, in place of the RushEnemyEnergy and RetreatEnergy
-  // triggers.
-  bool commit_decision = false;
-  // With the commit decision, shots are chosen by expected value; this is how well the bot judges a shot's chance of
-  // hitting (1: accurately; lower overestimates it, so the bot sprays) (skill).
+  // From Judgement: how well the bot judges a shot's chance of hitting (1: accurately; lower overestimates it, so the
+  // bot sprays), how far off its judgement of a hit's damage is, and of its chance of winning.
   float shot_judgement = 1.0f;
+  float damage_judgement = 0.0f;
+  float judgement_noise = 0.0f;
+  // From Judgement: while pursued, lay a mine only when the pursuer is on the bot's trail.
+  bool mine_on_trail = false;
+
   // While backing off and pursued: fire cover shots back at the pursuer however slow, and lay mines in its path when
   // it's within this range (tiles) (style).
   bool cover_fire = true;
   bool mine_cover = true;
   float mine_cover_range = 25.0f;
   // Accepting a hit while committing or pressuring: when the win chance after taking it is at least this (style; 1:
-  // never), judging the damage with this much error and the chance with the decision's judgement noise (skill).
+  // never).
   float accept_confidence = 0.55f;
-  float damage_judgement = 0.0f;
-  float judgement_noise = 0.0f;
 
   // Following the patrol route: 0 classic (face each waypoint), 1 correction, 2 pursuit, 3 cornering (see RouteNode);
   // how far ahead along the route pursuit steers (tiles), and the speed cornering allows at a right angle (tiles/s).

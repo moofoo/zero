@@ -20,7 +20,7 @@ namespace chaos {
 //   notices the bomb as it notices any weapon (its Awareness), and only on its screen.
 // - A slow target: an enemy flying slower than kSlowSpeed is easier to hit (measured from Chaos games: bullets about
 //   1.45 times, bombs about 1.2 times within 20 tiles and 1.1 times beyond). Spotted once per slowdown, on screen.
-struct Opportunities : EventHandler<WeaponFireEvent> {
+struct Opportunities : EventHandler<WeaponFireEvent>, EventHandler<WeaponSelfDamageEvent> {
   // Below this speed (tiles/s) a target counts as slow.
   static constexpr float kSlowSpeed = 3.0f;
 
@@ -32,7 +32,13 @@ struct Opportunities : EventHandler<WeaponFireEvent> {
   // flying slowly (1 otherwise).
   float SlowFactor(const Player& player, bool bomb, float distance);
 
+  // Takes an opportunity with the bot's spotting chance.
+  bool Spot() { return Roll(spotting); }
+  // Seconds since the bot was last hit by an enemy.
+  float SecondsSinceHit() const;
+
   void HandleEvent(const WeaponFireEvent& event) override;
+  void HandleEvent(const WeaponSelfDamageEvent& event) override;
 
  private:
   struct Slowdown {
@@ -47,6 +53,8 @@ struct Opportunities : EventHandler<WeaponFireEvent> {
   std::mt19937 random;
   std::unordered_map<u16, u32> window_end;
   std::unordered_map<u16, Slowdown> slowdowns;
+  u32 last_hit_tick = 0;
+  bool hit_yet = false;
 
   bool OnScreen(const Player& player) const;
   bool Roll(float chance);

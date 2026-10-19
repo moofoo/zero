@@ -57,6 +57,17 @@ float Opportunities::SlowFactor(const Player& player, bool bomb, float distance)
   return distance < kSlowBombNearDistance ? kSlowBombNearFactor : kSlowBombFarFactor;
 }
 
+float Opportunities::SecondsSinceHit() const {
+  if (!hit_yet) return 1e6f;
+  return TICK_DIFF(GetCurrentTick(), last_hit_tick) / 100.0f;
+}
+
+void Opportunities::HandleEvent(const WeaponSelfDamageEvent& event) {
+  if (bot.game && event.shooter.id == bot.game->player_manager.player_id) return;
+  last_hit_tick = GetCurrentTick();
+  hit_yet = true;
+}
+
 void Opportunities::HandleEvent(const WeaponFireEvent& event) {
   Player* self = bot.game ? bot.game->player_manager.GetSelf() : nullptr;
   const Player& shooter = event.player;

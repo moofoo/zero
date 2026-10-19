@@ -393,6 +393,56 @@ struct SkilledAimNode : public behavior::BehaviorNode {
   float lead;
 };
 
+// The long-range opening: on a new target far away, with plenty of energy and no recent hits, the bot flies straight
+// at it, bombing as the shot choice allows, to weaken it before the fight proper ("fly at him at full speed and let off
+// two or three bombs"). Taken with the bot's spotting chance and logged as an "opening" tactic. It ends at the leash
+// distance, when incoming damage would make the bot dodge, below kEndEnergy, or after kMaxTicks; then the commit
+// decision's modes take over. Succeeds while the opening lasts.
+struct OpeningNode : public behavior::BehaviorNode {
+  OpeningNode(Opportunities* opportunities, float dodge_threshold)
+      : opportunities(opportunities), dodge_threshold(dodge_threshold) {}
+
+  static constexpr float kMinDistance = 40.0f;
+  static constexpr float kStartEnergy = 0.8f;
+  static constexpr float kEndEnergy = 0.6f;
+  static constexpr float kQuietSeconds = 3.0f;
+  static constexpr u32 kMaxTicks = 600;
+
+  behavior::ExecuteResult Execute(behavior::ExecuteContext& ctx) override {
+    Player* self = ctx.bot->game->player_manager.GetSelf();
+    auto opt_target = ctx.blackboard.Value<Player*>("nearest_target");
+    if (!self || !opt_target || !*opt_target) return behavior::ExecuteResult::Failure;
+    Player& target = **opt_target;
+    float max_energy = (float)ctx.bot->game->ship_controller.ship.energy;
+    float distance = self->position.Distance(target.position);
+    u32 now = GetCurrentTick();
+
+    if (target.id != target_id) {
+      target_id = target.id;
+      active = distance >= kMinDistance && self->energy >= kStartEnergy * max_energy &&
+               opportunities->SecondsSinceHit() >= kQuietSeconds && opportunities->Spot();
+      end_tick = now + kMaxTicks;
+      if (active && ctx.bot->combat_logger) ctx.bot->combat_logger->WriteTactic("opening", target.name);
+    }
+    if (!active) return behavior::ExecuteResult::Failure;
+
+    float leash = ctx.blackboard.ValueOr<float>("leash_distance", 35.0f);
+    float incoming = ctx.blackboard.ValueOr<float>("incoming_damage", 0.0f);
+    if (distance <= leash || self->energy < kEndEnergy * max_energy || TICK_GT(now, end_tick) ||
+        incoming >= dodge_threshold * max_energy) {
+      active = false;
+      return behavior::ExecuteResult::Failure;
+    }
+    return behavior::ExecuteResult::Success;
+  }
+
+  Opportunities* opportunities;
+  float dodge_threshold;
+  u16 target_id = 0xFFFF;
+  bool active = false;
+  u32 end_tick = 0;
+};
+
 // Aims where the target will be after bouncing off a wall, when its path meets one before the shot can reach it: the
 // guide's rebound. The target's flight is simulated with the game's own movement and bounces; the aim is left alone
 // when there's no bounce first. For bots that lead their shots fully. Logs a "rebound" tactic at most once a second.
@@ -717,6 +767,24 @@ static std::unique_ptr<behavior::BehaviorNode> CreateDodge(const CombatSettings&
 }
 
 static std::unique_ptr<behavior::BehaviorNode> CreateEngage(const CombatSettings& settings);
+
+// The long-range opening (OpeningNode): straight at the target at full speed.
+static std::unique_ptr<behavior::BehaviorNode> CreateOpening(const CombatSettings& settings,
+                                                             Opportunities& opportunities) {
+  using namespace behavior;
+  BehaviorBuilder builder;
+
+  // clang-format off
+  builder
+    .Sequence()
+        .Child<OpeningNode>(&opportunities, settings.dodge_threshold.value_or(1.0f))
+        .Child<FaceNode>("aimshot")
+        .Child<SeekNode>("aimshot", 0.0f, SeekNode::DistanceResolveType::Static)
+        .End();
+  // clang-format on
+
+  return builder.Build();
+}
 
 // Moving in a fight, by the commit decision's mode: commit closes in and finishes, disengage and recharge back off to
 // the retreat distance, hold keeps the leash distance in range style, and pressure engages in the bot's own style.
@@ -1078,8 +1146,9 @@ std::unique_ptr<behavior::BehaviorNode> CreateCombatTree(const CombatSettings& s
                         .Composite(CreateAimError(settings))
                         .Composite(CreatePursuitCheck(settings))
                         .Parallel()
-                            .Selector() // Moving: dodge, or move by the mode.
+                            .Selector() // Moving: dodge, an opening, or move by the mode.
                                 .Composite(CreateDodge(settings, true))
+                                .Composite(CreateOpening(settings, senses.opportunities))
                                 .Composite(CreateMovement(settings))
                                 .End()
                             .Sequence(CompositeDecorator::Success) // Use burst when near a wall.

@@ -43,7 +43,8 @@ using namespace svs;
 constexpr float kDefaultBombMinRange = 10.0f;
 // How loose the check that a shot's path crosses the target is: the box around the predicted intercept is the ship's
 // radius times up to this (at full energy; down to 1 at none). The bullet box was 4 (zero's SVS Warbird); 6 measured 45%
-// more bullets at the same hit rate (ticket 22).
+// more bullets at the same hit rate on 2026-10-20 (chaos-offline docs/metrics/bomb-value-2026-10-20.md). The bomb box
+// keeps the SVS Warbird's 3: a bomb's blast covers its misses.
 constexpr float kBulletBoxScale = 6.0f;
 constexpr float kBombBoxScale = 3.0f;
 // How far around the target to count our own bullets heading at it, for bombing into them (tiles).
@@ -743,8 +744,9 @@ struct MineCoverNode : public behavior::BehaviorNode {
 // below the reserve no shot is worth it. A shot slower than the weapon's own speed towards the target is less likely
 // to land. A bot that judges shots poorly overestimates their chance, up to double, and a bomb's worth is scaled by the
 // bot's appetite for bombing. A slow target the bot has spotted is likelier to be hit. A bomb spends a lot of energy at
-// once and blocks bullets after it, so it must also bring at least kMinBombEfficiency damage per energy (about what a
-// bomb is worth at 40 tiles): long, low-odds bombs are left for bullets (ticket 22).
+// once and blocks bullets after it, so it must also bring at least kMinBombEfficiency damage per energy, as the bot
+// judges it: long, low-odds bombs are left for bullets (ticket 22). A bot with poor judgement overrates its bombs, so
+// it bombs from further than it should, a novice's mistake.
 struct ShotValueNode : public behavior::BehaviorNode {
   ShotValueNode(WeaponType weapon, const char* velocity_key, float judgement, float bomb_appetite, float lead_skill,
                 Opportunities* opportunities)
@@ -755,6 +757,8 @@ struct ShotValueNode : public behavior::BehaviorNode {
         lead_skill(lead_skill),
         opportunities(opportunities) {}
 
+  // A bomb's least damage per energy: with the Chaos Warbird's 350-energy bomb, about a veteran's bomb at 50 tiles or a
+  // novice's at 40.
   static constexpr float kMinBombEfficiency = 0.35f;
   // Bullets keep only this share of the mode's reserve: a player keeps firing bullets as their energy falls, and a
   // bullet spends little at a time (ticket 22).
@@ -809,8 +813,9 @@ struct ShotValueNode : public behavior::BehaviorNode {
     if (spare <= 0.0f) return behavior::ExecuteResult::Failure;
     float worth = spare >= kPlenty ? kCheapest : kDearest + (kCheapest - kDearest) * (spare / kPlenty);
 
-    if (bomb && worth < kMinBombEfficiency) worth = kMinBombEfficiency;
-    return value >= cost * worth ? behavior::ExecuteResult::Success : behavior::ExecuteResult::Failure;
+    // Energy's price for this shot: a bomb's never below its least efficiency.
+    float price = bomb && worth < kMinBombEfficiency ? kMinBombEfficiency : worth;
+    return value >= cost * price ? behavior::ExecuteResult::Success : behavior::ExecuteResult::Failure;
   }
 
   WeaponType weapon;

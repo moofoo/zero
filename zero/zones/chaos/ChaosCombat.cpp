@@ -57,6 +57,24 @@ struct PassNode : public behavior::BehaviorNode {
   behavior::ExecuteResult Execute(behavior::ExecuteContext& ctx) override { return behavior::ExecuteResult::Success; }
 };
 
+// The commit decision's mode for this tick, from the blackboard (pressure before the first decision).
+static CombatMode CurrentMode(behavior::ExecuteContext& ctx) {
+  int mode = ctx.blackboard.ValueOr<int>("combat_mode", (int)CombatMode::Pressure);
+  return mode >= 0 && mode < (int)CombatMode::Count ? (CombatMode)mode : CombatMode::Pressure;
+}
+
+// Sets the actuator's thrust threshold for this tick (Steering::thrust_threshold). Always succeeds.
+struct ThrustThresholdNode : public behavior::BehaviorNode {
+  explicit ThrustThresholdNode(float threshold) : threshold(threshold) {}
+
+  behavior::ExecuteResult Execute(behavior::ExecuteContext& ctx) override {
+    ctx.bot->bot_controller->steering.thrust_threshold = threshold;
+    return behavior::ExecuteResult::Success;
+  }
+
+  float threshold;
+};
+
 // Writes a blackboard float multiplied by a constant to another key.
 struct ScaleNode : public behavior::BehaviorNode {
   ScaleNode(const char* input_key, float scale, const char* output_key)
@@ -459,33 +477,42 @@ struct OpeningCheckNode : public behavior::BehaviorNode {
 struct ThrustTimingNode : public behavior::BehaviorNode {
   explicit ThrustTimingNode(float piloting) : piloting(piloting) {}
 
-  // The alignment (cosine) each mode needs to thrust: commit, pressure, hold, disengage, recharge.
-  static constexpr float kAlignment[(int)CombatMode::Count] = {0.7f, 0.5f, 0.5f, 0.3f, 0.3f};
+  // The alignment (cosine) a mode needs to thrust.
+  static float Alignment(CombatMode mode) {
+    switch (mode) {
+      case CombatMode::Commit:
+        return 0.7f;
+      case CombatMode::Disengage:
+      case CombatMode::Recharge:
+        return 0.3f;
+      default:
+        return 0.5f;
+    }
+  }
 
   behavior::ExecuteResult Execute(behavior::ExecuteContext& ctx) override {
-    int mode = ctx.blackboard.ValueOr<int>("combat_mode", (int)CombatMode::Pressure);
-    if (mode < 0 || mode >= (int)CombatMode::Count) mode = (int)CombatMode::Pressure;
-    ctx.bot->bot_controller->steering.thrust_threshold = kAlignment[mode] * piloting;
+    ctx.bot->bot_controller->steering.thrust_threshold = Alignment(CurrentMode(ctx)) * piloting;
     return behavior::ExecuteResult::Success;
   }
 
   float piloting;
 };
 
-// A repositioning turn (ticket 19): when the bot has wanted a large change of velocity for a while, its heading is far
-// from it, and there's no shot to keep the aim for (the target is beyond kShotRange, or the bot is backing off), it
-// breaks aim to turn and burn towards the move, then turns back. Not while committing. Taken with the bot's Piloting as
-// its chance, once per occasion, and logged as a "reposition" tactic. Runs after the movement has set the steering
-// force; while turning it drops the facing, so the actuator turns to the force and thrusts once aligned. Always
-// succeeds.
+// A repositioning turn (ticket 19): when the bot has wanted a large change of velocity for a while, its heading lines
+// up with it neither way (so neither forward nor reverse thrust helps), and its target is too far for a shot worth
+// keeping the aim for, it breaks aim to turn and burn towards the move, then turns back. Not while committing or
+// dodging. Taken with the bot's Piloting as its chance, once per occasion: a declined occasion stays declined until the
+// bot stops wanting that move. Logged as a "reposition" tactic. Runs after the movement has set the steering force;
+// while turning it drops the facing, so the actuator turns to the force and thrusts once aligned. Always succeeds.
 struct RepositionNode : public behavior::BehaviorNode {
-  RepositionNode(float piloting) : piloting(piloting), random(std::random_device{}()) {}
+  explicit RepositionNode(float piloting) : piloting(piloting), random(std::random_device{}()) {}
 
   static constexpr float kMinMove = 6.0f;     // tiles/s of wanted change in velocity
   static constexpr float kStopMove = 2.0f;    // the turn ends below this
-  static constexpr float kOffCos = 0.5f;      // heading more than 60 degrees from the move
+  static constexpr float kOffCos = 0.5f;      // heading more than 60 degrees from the move, either way
   static constexpr u32 kWantTicks = 50;       // wanted for this long first
   static constexpr u32 kMaxTicks = 100;       // a turn lasts at most this long
+  static constexpr u32 kGapTicks = 20;        // not run for this long: start afresh
   static constexpr float kShotRange = 25.0f;  // closer than this, keep the aim
   static constexpr float kAlignedCos = 0.7f;  // thrust once the heading is this close to the move
 
@@ -494,17 +521,18 @@ struct RepositionNode : public behavior::BehaviorNode {
     auto opt_target = ctx.blackboard.Value<Player*>("nearest_target");
     auto& steering = ctx.bot->bot_controller->steering;
     u32 now = GetCurrentTick();
-    if (!self || !opt_target || !*opt_target) {
-      turning = false;
-      wanting = false;
+    if (TICK_DIFF(now, last_run_tick) > (s32)kGapTicks) Reset();
+    last_run_tick = now;
+    if (!self || !opt_target || !*opt_target || ctx.blackboard.Has("dodging")) {
+      Reset();
       return behavior::ExecuteResult::Success;
     }
 
+    CombatMode mode = CurrentMode(ctx);
     float move = steering.force.Length();
     if (turning) {
-      if (move < kStopMove || TICK_GT(now, turn_end)) {
-        turning = false;
-        wanting = false;
+      if (move < kStopMove || TICK_GT(now, turn_end) || mode == CombatMode::Commit) {
+        Reset();
       } else {
         steering.rotation = 0.0f;
         steering.thrust_threshold = kAlignedCos;
@@ -512,12 +540,10 @@ struct RepositionNode : public behavior::BehaviorNode {
       }
     }
 
-    int mode = ctx.blackboard.ValueOr<int>("combat_mode", (int)CombatMode::Pressure);
-    bool backing_off = mode == (int)CombatMode::Disengage || mode == (int)CombatMode::Recharge;
-    bool shot = !backing_off && self->position.Distance((*opt_target)->position) <= kShotRange;
-    bool off = move >= kMinMove && self->GetHeading().Dot(steering.force * (1.0f / move)) < kOffCos;
-    if (!off || shot || mode == (int)CombatMode::Commit) {
-      wanting = false;
+    bool in_range = self->position.Distance((*opt_target)->position) <= kShotRange;
+    bool off = move >= kMinMove && fabsf(self->GetHeading().Dot(steering.force * (1.0f / move))) < kOffCos;
+    if (!off || in_range || mode == CombatMode::Commit) {
+      Reset();
       return behavior::ExecuteResult::Success;
     }
 
@@ -526,12 +552,13 @@ struct RepositionNode : public behavior::BehaviorNode {
       want_start = now;
       return behavior::ExecuteResult::Success;
     }
-    if (TICK_DIFF(now, want_start) < (s32)kWantTicks) return behavior::ExecuteResult::Success;
+    if (declined || TICK_DIFF(now, want_start) < (s32)kWantTicks) return behavior::ExecuteResult::Success;
 
-    // The occasion has come: take it, or let it pass until the bot next has to start wanting.
-    wanting = false;
     bool take = piloting >= 1.0f || std::uniform_real_distribution<float>(0.0f, 1.0f)(random) < piloting;
-    if (!take) return behavior::ExecuteResult::Success;
+    if (!take) {
+      declined = true;
+      return behavior::ExecuteResult::Success;
+    }
 
     turning = true;
     turn_end = now + kMaxTicks;
@@ -541,9 +568,17 @@ struct RepositionNode : public behavior::BehaviorNode {
     return behavior::ExecuteResult::Success;
   }
 
+  void Reset() {
+    wanting = false;
+    declined = false;
+    turning = false;
+  }
+
   float piloting;
   std::mt19937 random;
+  u32 last_run_tick = 0;
   bool wanting = false;
+  bool declined = false;
   u32 want_start = 0;
   bool turning = false;
   u32 turn_end = 0;
@@ -680,8 +715,8 @@ struct PursuitNode : public behavior::BehaviorNode {
     ctx.blackboard.Erase("pursued");
     Player* self = ctx.bot->game->player_manager.GetSelf();
     auto opt_target = ctx.blackboard.Value<Player*>("nearest_target");
-    int mode = ctx.blackboard.ValueOr<int>("combat_mode", -1);
-    bool backing_off = mode == (int)CombatMode::Disengage || mode == (int)CombatMode::Recharge;
+    CombatMode mode = CurrentMode(ctx);
+    bool backing_off = mode == CombatMode::Disengage || mode == CombatMode::Recharge;
     if (!self || !opt_target || !*opt_target || !backing_off) return behavior::ExecuteResult::Success;
 
     Player& pursuer = **opt_target;
@@ -837,9 +872,7 @@ struct ShotValueNode : public behavior::BehaviorNode {
     value *= 2.0f - judgement;  // poor judgement overestimates
 
     // What energy is worth now, from how much the bot has over its mode's reserve.
-    int mode = ctx.blackboard.ValueOr<int>("combat_mode", (int)CombatMode::Pressure);
-    if (mode < 0 || mode >= (int)CombatMode::Count) mode = (int)CombatMode::Pressure;
-    float reserve = kReserve[mode];
+    float reserve = kReserve[(int)CurrentMode(ctx)];
     float spare = self->energy / (float)ship.energy - reserve;
     if (spare <= 0.0f) return behavior::ExecuteResult::Failure;
     float worth = spare >= kPlenty ? kCheapest : kDearest + (kCheapest - kDearest) * (spare / kPlenty);
@@ -857,7 +890,8 @@ struct ShotValueNode : public behavior::BehaviorNode {
 // Dodge when incoming damage is at least the threshold fraction of max energy, unless the bot has decided to accept
 // the hit. The dodge is a push sideways from the incoming weapons, sometimes the wrong way (DodgeError). Dodging only
 // steers: while fighting, the bot keeps facing its aim point, and aiming and firing carry on, as a player dodges and
-// shoots at once.
+// shoots at once. A dodge is a reflex, so it thrusts whatever the heading (thrust timing doesn't hold it back), and it
+// sets "dodging" for this tick.
 static std::unique_ptr<behavior::BehaviorNode> CreateDodge(const CombatSettings& settings, bool keep_facing) {
   using namespace behavior;
   if (!settings.dodge_threshold) return std::make_unique<FailureNode>();
@@ -872,6 +906,8 @@ static std::unique_ptr<behavior::BehaviorNode> CreateDodge(const CombatSettings&
         .Composite(settings.dodge_error > 0.0f
                        ? std::unique_ptr<BehaviorNode>(std::make_unique<DodgeErrorNode>(settings.dodge_error))
                        : std::unique_ptr<BehaviorNode>(std::make_unique<PassNode>()))
+        .Child<ThrustThresholdNode>(0.0f)
+        .Child<ScalarNode>(1.0f, "dodging")
         .Composite(keep_facing ? std::unique_ptr<BehaviorNode>(std::make_unique<FaceNode>("aimshot"))
                                : std::unique_ptr<BehaviorNode>(std::make_unique<PassNode>()))
         .End();
@@ -1290,6 +1326,7 @@ std::unique_ptr<behavior::BehaviorNode> CreateCombatTree(const CombatSettings& s
                         .Child<OpeningCheckNode>(&senses.opportunities, settings.dodge_threshold)
                         .Child<ThrustTimingNode>(settings.piloting)
                         .Parallel()
+                            .Child<BlackboardEraseNode>("dodging")
                             .Selector() // Moving: dodge, battle blasting, an opening, or move by the mode.
                                 .Composite(CreateDodge(settings, true))
                                 .Composite(CreateBattleMovement())

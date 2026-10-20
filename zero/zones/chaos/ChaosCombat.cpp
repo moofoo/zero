@@ -824,8 +824,8 @@ struct FlightPhaseNode : public behavior::BehaviorNode, EventHandler<WeaponFireE
       : piloting(piloting), bomb_min_range(bomb_min_range), random(std::random_device{}()) {}
 
   static constexpr float kShotRange = 40.0f;        // bullets are worth aiming for within this (tiles)
-  static constexpr u32 kMaxAimTicks = 80;           // an aim phase lasts at most this long
-  static constexpr u32 kMinSteerTicks = 40;         // a steer phase lasts at least this long
+  static constexpr u32 kMaxAimTicks = 100;          // an aim phase lasts at most this long
+  static constexpr u32 kMinSteerTicks = 25;         // a steer phase lasts at least this long
   static constexpr int kBurstBullets = 3;           // an aim phase ends after this many bullets
   static constexpr float kAlignedCos = 0.7f;        // steering thrusts once within about 45 degrees, either way
   static constexpr float kDodgeAlignedCos = 0.3f;   // a dodge thrusts once within about 72 degrees

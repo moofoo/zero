@@ -41,6 +41,11 @@ using namespace svs;
 
 // The closest a bot bombs an enemy without a BombMinRange (tiles): the SVS Warbird tree's.
 constexpr float kDefaultBombMinRange = 10.0f;
+// How loose the check that a shot's path crosses the target is: the box around the predicted intercept is the ship's
+// radius times up to this (at full energy; down to 1 at none). The bullet box was 4 (zero's SVS Warbird); 6 measured 45%
+// more bullets at the same hit rate (ticket 22).
+constexpr float kBulletBoxScale = 6.0f;
+constexpr float kBombBoxScale = 3.0f;
 // How far around the target to count our own bullets heading at it, for bombing into them (tiles).
 constexpr float kOutgoingDamageRadius = 40.0f;
 // How far around the aim point shots are spread, and over what period.
@@ -751,6 +756,9 @@ struct ShotValueNode : public behavior::BehaviorNode {
         opportunities(opportunities) {}
 
   static constexpr float kMinBombEfficiency = 0.45f;
+  // Bullets keep only this share of the mode's reserve: a player keeps firing bullets as their energy falls, and a
+  // bullet spends little at a time (ticket 22).
+  static constexpr float kBulletReserveShare = 0.5f;
 
   // With this much more than the reserve, energy is at its cheapest; at the reserve, its dearest.
   static constexpr float kPlenty = 0.3f;
@@ -796,7 +804,7 @@ struct ShotValueNode : public behavior::BehaviorNode {
     value *= 2.0f - judgement;  // poor judgement overestimates
 
     // What energy is worth now, from how much the bot has over its mode's reserve.
-    float reserve = ModeReserve(CurrentMode(ctx));
+    float reserve = ModeReserve(CurrentMode(ctx)) * (bomb ? 1.0f : kBulletReserveShare);
     float spare = self->energy / (float)ship.energy - reserve;
     if (spare <= 0.0f) return behavior::ExecuteResult::Failure;
     float worth = spare >= kPlenty ? kCheapest : kDearest + (kCheapest - kDearest) * (spare / kPlenty);
@@ -1432,7 +1440,7 @@ std::unique_ptr<behavior::BehaviorNode> CreateCombatTree(const CombatSettings& s
                                 .Child<ShotVelocityQueryNode>(WeaponType::Bomb, "bomb_fire_velocity")
                                 .Composite(CreateShotChoice(settings, WeaponType::Bomb, "bomb_fire_velocity", senses.opportunities))
                                 .Child<RayNode>("self_position", "bomb_fire_velocity", "bomb_fire_ray")
-                                .Child<DynamicPlayerBoundingBoxQueryNode>("nearest_target", "target_bounds", 3.0f)
+                                .Child<DynamicPlayerBoundingBoxQueryNode>("nearest_target", "target_bounds", kBombBoxScale)
                                 .Child<MoveRectangleNode>("target_bounds", "aimshot", "target_bounds")
                                 .Child<RenderRectNode>("world_camera", "target_bounds", Vector3f(1.0f, 0.0f, 0.0f))
                                 .Child<RenderRayNode>("world_camera", "bomb_fire_ray", 50.0f, Vector3f(1.0f, 1.0f, 0.0f))
@@ -1446,7 +1454,7 @@ std::unique_ptr<behavior::BehaviorNode> CreateCombatTree(const CombatSettings& s
                                 .Child<ShotVelocityQueryNode>(WeaponType::Bullet, "bullet_fire_velocity")
                                 .Composite(CreateShotChoice(settings, WeaponType::Bullet, "bullet_fire_velocity", senses.opportunities))
                                 .Child<RayNode>("self_position", "bullet_fire_velocity", "bullet_fire_ray")
-                                .Child<DynamicPlayerBoundingBoxQueryNode>("nearest_target", "target_bounds", 4.0f)
+                                .Child<DynamicPlayerBoundingBoxQueryNode>("nearest_target", "target_bounds", kBulletBoxScale)
                                 .Child<MoveRectangleNode>("target_bounds", "aimshot", "target_bounds")
                                 .Child<RayRectangleInterceptNode>("bullet_fire_ray", "target_bounds")
                                 .Child<InputActionNode>(InputAction::Bullet)

@@ -39,6 +39,8 @@ namespace chaos {
 
 using namespace svs;
 
+// The closest a bot bombs an enemy without a BombMinRange (tiles): the SVS Warbird tree's.
+constexpr float kDefaultBombMinRange = 10.0f;
 // How far around the target to count our own bullets heading at it, for bombing into them (tiles).
 constexpr float kOutgoingDamageRadius = 40.0f;
 // How far around the aim point shots are spread, and over what period.
@@ -61,6 +63,23 @@ struct PassNode : public behavior::BehaviorNode {
 static CombatMode CurrentMode(behavior::ExecuteContext& ctx) {
   int mode = ctx.blackboard.ValueOr<int>("combat_mode", (int)CombatMode::Pressure);
   return mode >= 0 && mode < (int)CombatMode::Count ? (CombatMode)mode : CombatMode::Pressure;
+}
+
+// The share of max energy a mode keeps in reserve, below which no shot is worth firing. Backing off keeps enough for a
+// few cover shots; recharging keeps the most.
+static float ModeReserve(CombatMode mode) {
+  switch (mode) {
+    case CombatMode::Commit:
+      return 0.1f;
+    case CombatMode::Hold:
+      return 0.35f;
+    case CombatMode::Disengage:
+      return 0.3f;
+    case CombatMode::Recharge:
+      return 0.5f;
+    default:
+      return 0.25f;
+  }
 }
 
 // Writes a blackboard float multiplied by a constant to another key.
@@ -728,9 +747,6 @@ struct ShotValueNode : public behavior::BehaviorNode {
         bomb_appetite(bomb_appetite),
         opportunities(opportunities) {}
 
-  // The share of max energy each mode keeps in reserve: commit, pressure, hold, disengage, recharge. Backing off keeps
-  // enough for a few cover shots; recharging keeps the most.
-  static constexpr float kReserve[(int)CombatMode::Count] = {0.1f, 0.25f, 0.35f, 0.3f, 0.5f};
   // With this much more than the reserve, energy is at its cheapest; at the reserve, its dearest.
   static constexpr float kPlenty = 0.3f;
   static constexpr float kCheapest = 0.1f;
@@ -774,7 +790,7 @@ struct ShotValueNode : public behavior::BehaviorNode {
     value *= 2.0f - judgement;  // poor judgement overestimates
 
     // What energy is worth now, from how much the bot has over its mode's reserve.
-    float reserve = kReserve[(int)CurrentMode(ctx)];
+    float reserve = ModeReserve(CurrentMode(ctx));
     float spare = self->energy / (float)ship.energy - reserve;
     if (spare <= 0.0f) return behavior::ExecuteResult::Failure;
     float worth = spare >= kPlenty ? kCheapest : kDearest + (kCheapest - kDearest) * (spare / kPlenty);
@@ -794,24 +810,40 @@ struct ShotValueNode : public behavior::BehaviorNode {
 // steering force (and facing), this alternates two phases:
 // - Steer: face the wanted move or its exact opposite, whichever is the smaller turn, and thrust forward or in reverse
 //   once nearly aligned. When the movement asks for little (hovering), weave sideways around the target, switching
-//   sides now and then, so the bot never parks. Dodges always steer.
-// - Aim: keep the movement's facing onto the aim point (thrust timed as ticket 19 has it), from when a shot is possible
-//   (in range, a weapon ready, energy above the mode's reserve) until a bomb or a burst of bullets is fired, or
-//   kMaxAimTicks pass.
+//   sides now and then, so the bot never parks. Dodges always steer, thrusting sooner in the turn.
+// - Aim: keep facing the aim point (thrust timed as ticket 19 has it), from when a shot is possible (bullets in range,
+//   or a bomb beyond the bot's minimum bombing range, with the weapon ready and energy above the mode's reserve) until
+//   a bomb or a burst of bullets is fired, or kMaxAimTicks pass.
 // Steering lasts at least kMinSteerTicks before the bot can aim again. Each steering phase is taken with the bot's
-// Piloting as its chance; one not taken means another aim phase. Always succeeds.
-struct FlightPhaseNode : public behavior::BehaviorNode {
-  explicit FlightPhaseNode(float piloting) : piloting(piloting), random(std::random_device{}()) {}
+// Piloting as its chance; one not taken means another aim phase, as a bot that doesn't pilot always aims. Shots are
+// counted from the bot's own fire events. Always succeeds.
+struct FlightPhaseNode : public behavior::BehaviorNode, EventHandler<WeaponFireEvent> {
+  FlightPhaseNode(float piloting, float bomb_min_range)
+      : piloting(piloting), bomb_min_range(bomb_min_range), random(std::random_device{}()) {}
 
-  static constexpr float kShotRange = 40.0f;      // bullets are worth aiming for within this (tiles)
-  static constexpr u32 kMaxAimTicks = 80;
-  static constexpr u32 kMinSteerTicks = 40;
-  static constexpr int kBurstBullets = 3;
-  static constexpr float kAlignedCos = 0.7f;      // thrust once within about 45 degrees of the move, either way
-  static constexpr float kSmallMove = 3.0f;       // a wanted change of velocity below this (tiles/s) gets the weave
-  static constexpr float kWeaveSpeed = 14.0f;     // sideways speed the weave aims for (tiles/s)
-  static constexpr u32 kWeaveMinTicks = 100;      // the weave switches sides every 1-2 seconds
+  static constexpr float kShotRange = 40.0f;        // bullets are worth aiming for within this (tiles)
+  static constexpr u32 kMaxAimTicks = 80;           // an aim phase lasts at most this long
+  static constexpr u32 kMinSteerTicks = 40;         // a steer phase lasts at least this long
+  static constexpr int kBurstBullets = 3;           // an aim phase ends after this many bullets
+  static constexpr float kAlignedCos = 0.7f;        // steering thrusts once within about 45 degrees, either way
+  static constexpr float kDodgeAlignedCos = 0.3f;   // a dodge thrusts once within about 72 degrees
+  static constexpr float kSwitchCos = 0.2f;         // forward and reverse swap only past this margin
+  static constexpr float kSmallMove = 3.0f;         // a wanted change of velocity below this (tiles/s) gets the weave
+  static constexpr float kWeaveSpeed = 14.0f;       // sideways speed the weave aims for (tiles/s)
+  static constexpr u32 kWeaveMinTicks = 100;        // the weave switches sides every 1-2 seconds
   static constexpr u32 kWeaveMaxTicks = 200;
+  static constexpr u32 kGapTicks = 20;              // not run for this long: start afresh, steering
+  static constexpr float kFacePointDistance = 10.0f;  // how far ahead the point to face is put (tiles)
+
+  void HandleEvent(const WeaponFireEvent& event) override {
+    if (event.player.id != self_id) return;
+    WeaponType type = event.data.type;
+    if (type == WeaponType::Bullet || type == WeaponType::BouncingBullet) {
+      ++bullets;
+    } else if ((type == WeaponType::Bomb || type == WeaponType::ProximityBomb) && !event.data.alternate) {
+      bomb_fired = true;
+    }
+  }
 
   behavior::ExecuteResult Execute(behavior::ExecuteContext& ctx) override {
     Game& game = *ctx.bot->game;
@@ -820,18 +852,13 @@ struct FlightPhaseNode : public behavior::BehaviorNode {
     auto opt_aimshot = ctx.blackboard.Value<Vector2f>("aimshot");
     if (!self || self->ship >= 8 || !opt_target || !*opt_target || !opt_aimshot) return behavior::ExecuteResult::Success;
     Player& target = **opt_target;
-    Ship& ship = game.ship_controller.ship;
+    self_id = self->id;
     u32 now = GetCurrentTick();
+    if (TICK_DIFF(now, last_run_tick) > (s32)kGapTicks) StartSteer(now);
+    last_run_tick = now;
     bool dodging = ctx.blackboard.Has("dodging");
 
-    // Shots fired since last tick, from the weapons' cooldowns being reset.
-    bool bomb_fired = ship.next_bomb_tick != last_bomb_tick && TICK_GT(ship.next_bomb_tick, now);
-    bool bullet_fired = !bomb_fired && ship.next_bullet_tick != last_bullet_tick && TICK_GT(ship.next_bullet_tick, now);
-    last_bomb_tick = ship.next_bomb_tick;
-    last_bullet_tick = ship.next_bullet_tick;
-
     if (aiming) {
-      if (bullet_fired) ++bullets;
       bool done = bomb_fired || bullets >= kBurstBullets || TICK_DIFF(now, phase_start) >= (s32)kMaxAimTicks;
       if (dodging) {
         StartSteer(now);
@@ -853,36 +880,45 @@ struct FlightPhaseNode : public behavior::BehaviorNode {
       return behavior::ExecuteResult::Success;
     }
 
-    // Steering: the wanted move, with the weave when it's small.
+    // Steering: the wanted move, or with the weave its steady sideways direction.
     Vector2f move = steering.force;
+    Vector2f heading_for = move;
     if (!dodging && move.Length() < kSmallMove) {
-      if (!TICK_GT(next_switch_tick, now)) {
-        side = -side;
-        next_switch_tick = now + std::uniform_int_distribution<u32>(kWeaveMinTicks, kWeaveMaxTicks)(random);
-      }
       Vector2f to_target = target.position - self->position;
       if (to_target.LengthSq() > 0.0f) {
+        if (!TICK_GT(next_switch_tick, now)) {
+          side = -side;
+          next_switch_tick = now + std::uniform_int_distribution<u32>(kWeaveMinTicks, kWeaveMaxTicks)(random);
+        }
         Vector2f across = Perpendicular(Normalize(to_target)) * side;
-        move = move + across * (kWeaveSpeed - self->velocity.Dot(across));
-        steering.force = move;
+        heading_for = across * kWeaveSpeed + move;
+        steering.force = move + across * (kWeaveSpeed - self->velocity.Dot(across));
       }
     }
-    if (move.LengthSq() <= 0.0f) return behavior::ExecuteResult::Success;
+    if (heading_for.LengthSq() <= 0.0f) return behavior::ExecuteResult::Success;
 
-    Vector2f direction = Normalize(move);
-    Vector2f facing = self->GetHeading().Dot(direction) >= 0.0f ? direction : direction * -1.0f;
+    // Forward or reverse, whichever is the smaller turn, keeping the last choice near the middle.
+    Vector2f direction = Normalize(heading_for);
+    float alignment = self->GetHeading().Dot(direction);
+    if (alignment > kSwitchCos) {
+      reverse = false;
+    } else if (alignment < -kSwitchCos) {
+      reverse = true;
+    }
+    Vector2f facing = reverse ? direction * -1.0f : direction;
     steering.rotation = 0.0f;
-    steering.Face(game, self->position + facing * 10.0f);
-    steering.thrust_threshold = kAlignedCos;
+    steering.Face(game, self->position + facing * kFacePointDistance);
+    steering.thrust_threshold = dodging ? kDodgeAlignedCos : kAlignedCos;
     return behavior::ExecuteResult::Success;
   }
 
   bool ShotPossible(behavior::ExecuteContext& ctx, const Player& self, const Player& target, u32 now) {
     Ship& ship = ctx.bot->game->ship_controller.ship;
-    if (self.position.Distance(target.position) > kShotRange) return false;
-    bool ready = !TICK_GT(ship.next_bullet_tick, now) || (ship.bombs > 0 && !TICK_GT(ship.next_bomb_tick, now));
-    float reserve = ShotValueNode::kReserve[(int)CurrentMode(ctx)];
-    return ready && self.energy > reserve * ship.energy;
+    if (self.energy <= ModeReserve(CurrentMode(ctx)) * ship.energy) return false;
+    float distance = self.position.Distance(target.position);
+    bool bullet = distance <= kShotRange && !TICK_GT(ship.next_bullet_tick, now);
+    bool bomb = ship.bombs > 0 && distance >= bomb_min_range && !TICK_GT(ship.next_bomb_tick, now);
+    return bullet || bomb;
   }
 
   bool Roll() {
@@ -893,6 +929,7 @@ struct FlightPhaseNode : public behavior::BehaviorNode {
     aiming = true;
     phase_start = now;
     bullets = 0;
+    bomb_fired = false;
   }
 
   void StartSteer(u32 now) {
@@ -900,13 +937,16 @@ struct FlightPhaseNode : public behavior::BehaviorNode {
     phase_start = now;
   }
 
+  u16 self_id = 0xFFFF;  // the bot's player, for its own fire events
   float piloting;
+  float bomb_min_range;
   std::mt19937 random;
   bool aiming = false;
   u32 phase_start = 0;
+  u32 last_run_tick = 0;
   int bullets = 0;
-  u32 last_bullet_tick = 0;
-  u32 last_bomb_tick = 0;
+  bool bomb_fired = false;
+  bool reverse = false;
   float side = 1.0f;
   u32 next_switch_tick = 0;
 };
@@ -915,14 +955,13 @@ struct FlightPhaseNode : public behavior::BehaviorNode {
 static std::unique_ptr<behavior::BehaviorNode> CreateFlightPhases(const CombatSettings& settings) {
   if (settings.piloting <= 0.0f) return std::make_unique<PassNode>();
 
-  return std::make_unique<FlightPhaseNode>(settings.piloting);
+  return std::make_unique<FlightPhaseNode>(settings.piloting, settings.bomb_min_range.value_or(kDefaultBombMinRange));
 }
 
 // Dodge when incoming damage is at least the threshold fraction of max energy, unless the bot has decided to accept
-// the hit. The dodge is a push sideways from the incoming weapons, sometimes the wrong way (DodgeError). Dodging only
-// steers: while fighting, the bot keeps facing its aim point, and aiming and firing carry on, as a player dodges and
-// shoots at once. It sets "dodging" for this tick, so a bot that steers by thrust (FlightPhaseNode) turns to dodge
-// properly.
+// the hit. The dodge is a push sideways from the incoming weapons, sometimes the wrong way (DodgeError). A bot that
+// doesn't pilot keeps facing its aim point while it dodges, so aiming and firing carry on; one that does turns to the
+// dodge (FlightPhaseNode), which the "dodging" flag set here tells it.
 static std::unique_ptr<behavior::BehaviorNode> CreateDodge(const CombatSettings& settings, bool keep_facing) {
   using namespace behavior;
   if (!settings.dodge_threshold) return std::make_unique<FailureNode>();
@@ -1253,7 +1292,7 @@ std::unique_ptr<behavior::BehaviorNode> CreateCombatTree(const CombatSettings& s
   const float multifire_range = settings.multifire_range.value_or(15.0f);
   const float antiwarp_energy = settings.antiwarp_energy.value_or(0.75f);
   const float repel_trigger = settings.repel_trigger.value_or(1.0f);
-  const float bomb_min_range = settings.bomb_min_range.value_or(10.0f);
+  const float bomb_min_range = settings.bomb_min_range.value_or(kDefaultBombMinRange);
 
   // clang-format off
   builder

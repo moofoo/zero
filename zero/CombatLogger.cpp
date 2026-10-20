@@ -203,6 +203,16 @@ void CombatLogger::WriteTactic(const char* name, const char* target) {
   fflush(file);
 }
 
+void CombatLogger::WriteDodge(WeaponData weapon, float distance, int age_ticks, int noticed_ticks, bool wrong_side) {
+  if (!file) return;
+
+  fprintf(file,
+          "{\"e\":\"dodge\",\"tick\":%u,\"weapon\":\"%s\",\"distance\":%.2f,\"age\":%d,\"noticed\":%d,"
+          "\"wrong_side\":%s}\n",
+          ServerTick(), GetWeaponName(weapon), distance, age_ticks, noticed_ticks, wrong_side ? "true" : "false");
+  fflush(file);
+}
+
 void CombatLogger::HandleEvent(const WeaponFireEvent& event) {
   if (!file || !bot.game) return;
   Game& game = *bot.game;

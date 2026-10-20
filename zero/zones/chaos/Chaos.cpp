@@ -14,6 +14,7 @@
 #include <zero/zones/chaos/Opportunities.h>
 #include <zero/zones/chaos/PlayerHistory.h>
 #include <zero/zones/chaos/TargetLock.h>
+#include <zero/zones/chaos/WeaponNotice.h>
 
 #include <algorithm>
 #include <memory>
@@ -55,6 +56,9 @@ constexpr float kDefaultShotAwareness = 0.7f;
 // The bot's screen, in pixels: what it can see of weapons, shots and hits.
 constexpr int kDefaultViewWidth = 1920;
 constexpr int kDefaultViewHeight = 1080;
+// A player reacts to a weapon they've noticed this long after, plus their perception delay (ReactionMs): deciding
+// which way to go.
+constexpr float kDodgeDecisionMs = 150.0f;
 // Milliseconds in a game tick.
 constexpr float kMsPerTick = 10.0f;
 constexpr float kTicksPerSecond = 1000.0f / kMsPerTick;
@@ -218,11 +222,17 @@ struct ChaosBehavior : public behavior::Behavior {
     Vector2f view_extent(view_width / 16.0f / 2.0f, view_height / 16.0f / 2.0f);
     ctx.blackboard.Set("view_extent", view_extent);
 
-    // Weapons count only once they've existed for the reaction time, and if noticed.
-    ctx.blackboard.Set("weapon_reaction_ticks", settings.reaction_ticks);
+    // Weapons count only once noticed, as a player notices them (WeaponNotice), and a dodge reaction time after.
+    // Without a skill level, every weapon on screen counts at once.
     auto awareness = skill_float("Awareness");
     if (awareness) awareness = std::clamp(*awareness, 0.0f, 1.0f);
-    ctx.blackboard.Set("weapon_notice", awareness.value_or(1.0f));
+    if (!skill_group.empty()) {
+      u32 dodge_reaction = (u32)(kDodgeDecisionMs / kMsPerTick) + (u32)settings.reaction_ticks;
+      weapon_notice = std::make_unique<WeaponNotice>(*ctx.bot, awareness.value_or(1.0f), view_extent, dodge_reaction);
+      ctx.blackboard.Set<behavior::WeaponNoticer*>("weapon_noticer", weapon_notice.get());
+      Log(LogLevel::Info, "Noticing weapons at awareness %.2f, reacting %u ms after", awareness.value_or(1.0f),
+          (u32)(dodge_reaction * kMsPerTick));
+    }
 
     float shot_awareness = awareness.value_or(kDefaultShotAwareness);
     estimate = std::make_unique<EnergyEstimate>(*ctx.bot, shot_awareness, view_extent);
@@ -286,7 +296,8 @@ struct ChaosBehavior : public behavior::Behavior {
               .Child<TimerSetNode>("next_freq_change_tick", 300)
               .Child<PlayerChangeFrequencyNode>("request_freq")
               .End()
-          .Composite(CreateCombatTree(settings, {*estimate, *history, *target_lock, *decision, *opportunities}))
+          .Composite(CreateCombatTree(settings, {*estimate, *history, *target_lock, *decision, *opportunities,
+                                                  weapon_notice.get()}))
           .End();
     // clang-format on
 
@@ -296,6 +307,7 @@ struct ChaosBehavior : public behavior::Behavior {
   CombatSettings settings;
   std::unique_ptr<EnergyEstimate> estimate;
   std::unique_ptr<PlayerHistory> history;
+  std::unique_ptr<WeaponNotice> weapon_notice;
   std::unique_ptr<Opportunities> opportunities;
   std::unique_ptr<TargetLock> target_lock;
   std::unique_ptr<CommitDecision> decision;

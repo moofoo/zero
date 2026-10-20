@@ -5,6 +5,7 @@
 #include "Opportunities.h"
 #include "PlayerHistory.h"
 #include "TargetLock.h"
+#include "WeaponNotice.h"
 
 #include <zero/behavior/BehaviorBuilder.h>
 #include <zero/behavior/BehaviorTree.h>
@@ -568,28 +569,95 @@ struct ReboundAimNode : public behavior::BehaviorNode {
   u32 next_log_tick = 0;
 };
 
-// Now and then sends a dodge the wrong way: with this chance, decided afresh each second, the dodge's push is reversed.
-struct DodgeErrorNode : public behavior::BehaviorNode {
-  explicit DodgeErrorNode(float chance) : chance(chance), random(std::random_device{}()) {}
+// Dodging incoming damage, as a player commits to a dodge: when the weapons the bot has noticed (WeaponNotice) would
+// do at least the threshold fraction of its max energy, or kill it, it picks a side away from their path and pushes
+// that way for at least kDodgeHoldTicks, or until nothing has been coming for kClearTicks, and succeeds. With
+// DodgeError's chance the side is the wrong one, decided when the dodge starts. Below the threshold it gives a small
+// push away and fails, letting the rest of the tree run.
+struct CommittedDodgeNode : public behavior::BehaviorNode {
+  CommittedDodgeNode(float threshold, float error, WeaponNotice* notice)
+      : threshold(threshold),
+        error(error),
+        notice(notice),
+        incoming(threshold, kDodgeDistance),
+        random(std::random_device{}()) {}
 
-  static constexpr u32 kRollTicks = 100;
+  static constexpr float kDodgeDistance = 35.0f;
+  static constexpr u32 kDodgeHoldTicks = 40;
+  // Weapons flicker in and out of the check (a mine as the bot passes it), so a dodge ends only once nothing has been
+  // coming for this long.
+  static constexpr u32 kClearTicks = 10;
+  static constexpr float kStrongForce = 10000.0f;
+  static constexpr float kMinimumForce = 2.0f;
 
   behavior::ExecuteResult Execute(behavior::ExecuteContext& ctx) override {
+    Player* self = ctx.bot->game->player_manager.GetSelf();
+    if (!self || self->ship >= 8) return behavior::ExecuteResult::Failure;
+
+    behavior::IncomingDamageReport report = incoming.GetIncomingDamage(ctx, self, kDodgeDistance);
     u32 now = GetCurrentTick();
-    if (!TICK_GT(next_roll_tick, now)) {
-      next_roll_tick = now + kRollTicks;
-      wrong = std::uniform_real_distribution<float>(0.0f, 1.0f)(random) < chance;
+    auto& steering = ctx.bot->bot_controller->steering;
+
+    if (report.weapon_count == 0) {
+      if (active && TICK_DIFF(now, last_incoming_tick) < (s32)kClearTicks &&
+          TICK_DIFF(now, start_tick) < (s32)kDodgeHoldTicks) {
+        steering.force = held_side * kStrongForce;
+        return behavior::ExecuteResult::Success;
+      }
+      active = false;
+      return behavior::ExecuteResult::Failure;
     }
-    if (wrong) {
-      auto& steering = ctx.bot->bot_controller->steering;
-      steering.force = steering.force * -1.0f;
+    last_incoming_tick = now;
+
+    float damage = report.weapon_count * report.average_damage;
+    float damage_percent = damage / (float)ctx.bot->game->ship_controller.ship.energy;
+    bool strong = damage_percent >= threshold || self->energy - damage <= 0;
+
+    Ray ray(report.average_origin, Normalize(report.average_direction));
+    Vector2f side = Normalize(self->position - ray.GetClosestPosition(self->position));
+
+    if (strong && !active) {
+      active = true;
+      start_tick = now;
+      wrong = error > 0.0f && std::uniform_real_distribution<float>(0.0f, 1.0f)(random) < error;
+      held_side = wrong ? side * -1.0f : side;
+      LogDodge(ctx, report, wrong);
     }
-    return behavior::ExecuteResult::Success;
+
+    if (active && (strong || TICK_DIFF(now, start_tick) < kDodgeHoldTicks)) {
+      steering.force = held_side * kStrongForce;
+      return behavior::ExecuteResult::Success;
+    }
+
+    active = false;
+    steering.force = side * (kMinimumForce + damage_percent * 10.0f);
+    return behavior::ExecuteResult::Failure;
   }
 
-  float chance;
+  void LogDodge(behavior::ExecuteContext& ctx, const behavior::IncomingDamageReport& report, bool wrong_side) {
+    if (!ctx.bot->combat_logger || !report.main_weapon) return;
+    const Weapon& weapon = *report.main_weapon;
+    WeaponManager& weapons = ctx.bot->game->weapon_manager;
+    u32 now = GetCurrentTick();
+    s32 alive = weapons.GetWeaponTotalAliveTime(weapon.data.type, weapon.data.alternate);
+    int age = alive - (int)TICK_DIFF(weapon.end_tick, now);
+    int noticed = -1;
+    if (notice) {
+      auto at = notice->NoticedAt(weapon);
+      if (at) noticed = (int)TICK_DIFF(now, *at);
+    }
+    ctx.bot->combat_logger->WriteDodge(weapon.data, report.main_distance, age, noticed, wrong_side);
+  }
+
+  float threshold;
+  float error;
+  WeaponNotice* notice;
+  behavior::DodgeIncomingDamage incoming;
+  bool active = false;
   bool wrong = false;
-  u32 next_roll_tick = 0;
+  u32 start_tick = 0;
+  u32 last_incoming_tick = 0;
+  Vector2f held_side;
   std::mt19937 random;
 };
 
@@ -841,8 +909,8 @@ struct ShotValueNode : public behavior::BehaviorNode {
 // Piloting as its chance; one not taken means another aim phase, as a bot that doesn't pilot always aims. Shots are
 // counted from the bot's own fire events. Always succeeds.
 struct FlightPhaseNode : public behavior::BehaviorNode, EventHandler<WeaponFireEvent> {
-  FlightPhaseNode(float piloting, float bomb_min_range)
-      : piloting(piloting), bomb_min_range(bomb_min_range), random(std::random_device{}()) {}
+  FlightPhaseNode(float piloting, float bomb_min_range, WeaponNotice* notice)
+      : piloting(piloting), bomb_min_range(bomb_min_range), notice(notice), random(std::random_device{}()) {}
 
   static constexpr float kShotRange = 40.0f;        // bullets are worth aiming for within this (tiles)
   static constexpr u32 kMaxAimTicks = 100;          // an aim phase lasts at most this long
@@ -859,6 +927,12 @@ struct FlightPhaseNode : public behavior::BehaviorNode, EventHandler<WeaponFireE
   static constexpr u32 kSwitchMaxTicks = 600;
   static constexpr u32 kGapTicks = 20;              // not run for this long: start afresh, steering
   static constexpr float kFacePointDistance = 10.0f;  // how far ahead the point to face is put (tiles)
+  // Sideways early: an enemy on screen within this many tiles, its nose within about 20 degrees of the bot, that could
+  // have a bomb ready (it hasn't been seen bombing within its bomb delay), has the bot steer across its line of fire:
+  // with full Piloting, at least the top orbiting speed and with this much of the speed along the line taken off.
+  static constexpr float kSidestepRange = 30.0f;
+  static constexpr float kSidestepCos = 0.94f;
+  static constexpr float kSidestepAlongCut = 0.8f;
 
   void HandleEvent(const WeaponFireEvent& event) override {
     if (event.player.id != self_id) return;
@@ -924,6 +998,22 @@ struct FlightPhaseNode : public behavior::BehaviorNode, EventHandler<WeaponFireE
       // The movement's force is its wanted velocity less the bot's; its wanted velocity towards the target is kept.
       float radial = (move + self->velocity).Dot(toward);
       Vector2f wanted = toward * radial + across * cruise_speed;
+      Player* threat = BombThreat(ctx, *self, now);
+      if (threat) {
+        // Across the threat's line of fire, keeping the way the bot is already going across it.
+        Vector2f line = Normalize(self->position - threat->position);
+        Vector2f lateral = Perpendicular(line);
+        float across_speed = wanted.Dot(lateral);
+        float sign = across_speed > 0.0f ? 1.0f : across_speed < 0.0f ? -1.0f : side;
+        float speed = fabsf(across_speed);
+        speed += piloting * std::max(0.0f, kCruiseMaxSpeed - speed);
+        float along = wanted.Dot(line) * (1.0f - piloting * kSidestepAlongCut);
+        wanted = line * along + lateral * (sign * speed);
+        if (threat->id != last_threat_id && ctx.bot->combat_logger) {
+          ctx.bot->combat_logger->WriteTactic("sidestep", threat->name);
+        }
+      }
+      last_threat_id = threat ? threat->id : 0xFFFF;
       heading_for = wanted - self->velocity;
       steering.force = heading_for;
     }
@@ -953,6 +1043,34 @@ struct FlightPhaseNode : public behavior::BehaviorNode, EventHandler<WeaponFireE
     return bullet || bomb;
   }
 
+  // The nearest enemy that could bomb the bot now: on its screen, within kSidestepRange, nose on it, and not seen
+  // bombing within its ship's bomb delay (a bot that doesn't keep track of noticed weapons assumes a bomb is ready).
+  Player* BombThreat(behavior::ExecuteContext& ctx, const Player& self, u32 now) {
+    Game& game = *ctx.bot->game;
+    Vector2f extent = ctx.blackboard.ValueOr<Vector2f>("view_extent", Vector2f(1e6f, 1e6f));
+    Player* nearest = nullptr;
+    float nearest_distance = kSidestepRange;
+    for (size_t i = 0; i < game.player_manager.player_count; ++i) {
+      Player& enemy = game.player_manager.players[i];
+      if (enemy.id == self.id || enemy.ship >= 8 || enemy.frequency == self.frequency || enemy.enter_delay > 0.0f) {
+        continue;
+      }
+      Vector2f delta = self.position - enemy.position;
+      if (fabsf(delta.x) > extent.x || fabsf(delta.y) > extent.y) continue;
+      float distance = delta.Length();
+      if (distance <= 0.0f || distance > nearest_distance) continue;
+      if (enemy.GetHeading().Dot(delta * (1.0f / distance)) < kSidestepCos) continue;
+      if (notice) {
+        auto last = notice->LastBombSeen(enemy.id);
+        u32 delay = game.connection.settings.ShipSettings[enemy.ship].BombFireDelay;
+        if (last && TICK_DIFF(now, *last) < (s32)delay) continue;
+      }
+      nearest = &enemy;
+      nearest_distance = distance;
+    }
+    return nearest;
+  }
+
   bool Roll() {
     return piloting >= 1.0f || std::uniform_real_distribution<float>(0.0f, 1.0f)(random) < piloting;
   }
@@ -972,6 +1090,8 @@ struct FlightPhaseNode : public behavior::BehaviorNode, EventHandler<WeaponFireE
   u16 self_id = 0xFFFF;  // the bot's player, for its own fire events
   float piloting;
   float bomb_min_range;
+  WeaponNotice* notice;
+  u16 last_threat_id = 0xFFFF;
   std::mt19937 random;
   bool aiming = false;
   u32 phase_start = 0;
@@ -986,17 +1106,20 @@ struct FlightPhaseNode : public behavior::BehaviorNode, EventHandler<WeaponFireE
 };
 
 // Steering and aiming in phases, for bots that pilot at all. Always succeeds.
-static std::unique_ptr<behavior::BehaviorNode> CreateFlightPhases(const CombatSettings& settings) {
+static std::unique_ptr<behavior::BehaviorNode> CreateFlightPhases(const CombatSettings& settings,
+                                                                  WeaponNotice* notice) {
   if (settings.piloting <= 0.0f) return std::make_unique<PassNode>();
 
-  return std::make_unique<FlightPhaseNode>(settings.piloting, settings.bomb_min_range.value_or(kDefaultBombMinRange));
+  return std::make_unique<FlightPhaseNode>(settings.piloting, settings.bomb_min_range.value_or(kDefaultBombMinRange),
+                                           notice);
 }
 
 // Dodge when incoming damage is at least the threshold fraction of max energy, unless the bot has decided to accept
-// the hit. The dodge is a push sideways from the incoming weapons, sometimes the wrong way (DodgeError). A bot that
-// doesn't pilot keeps facing its aim point while it dodges, so aiming and firing carry on; one that does turns to the
-// dodge (FlightPhaseNode), which the "dodging" flag set here tells it.
-static std::unique_ptr<behavior::BehaviorNode> CreateDodge(const CombatSettings& settings, bool keep_facing) {
+// the hit. The dodge is a push sideways from the incoming weapons, held to one side, sometimes the wrong one
+// (CommittedDodgeNode). A bot that doesn't pilot keeps facing its aim point while it dodges, so aiming and firing carry
+// on; one that does turns to the dodge (FlightPhaseNode), which the "dodging" flag set here tells it.
+static std::unique_ptr<behavior::BehaviorNode> CreateDodge(const CombatSettings& settings, bool keep_facing,
+                                                           WeaponNotice* notice) {
   using namespace behavior;
   if (!settings.dodge_threshold) return std::make_unique<FailureNode>();
 
@@ -1006,10 +1129,7 @@ static std::unique_ptr<behavior::BehaviorNode> CreateDodge(const CombatSettings&
   builder
     .Sequence()
         .InvertChild<BlackboardSetQueryNode>("accepting")
-        .Child<DodgeIncomingDamage>(*settings.dodge_threshold, 35.0f)
-        .Composite(settings.dodge_error > 0.0f
-                       ? std::unique_ptr<BehaviorNode>(std::make_unique<DodgeErrorNode>(settings.dodge_error))
-                       : std::unique_ptr<BehaviorNode>(std::make_unique<PassNode>()))
+        .Child<CommittedDodgeNode>(*settings.dodge_threshold, settings.dodge_error, notice)
         .Child<ScalarNode>(1.0f, "dodging")
         .Composite(keep_facing ? std::unique_ptr<BehaviorNode>(std::make_unique<FaceNode>("aimshot"))
                                : std::unique_ptr<BehaviorNode>(std::make_unique<PassNode>()))
@@ -1407,7 +1527,7 @@ std::unique_ptr<behavior::BehaviorNode> CreateCombatTree(const CombatSettings& s
                     .Sequence() // Path to target if they aren't immediately visible, dodging on the way.
                         .InvertChild<VisibilityQueryNode>("nearest_target_position")
                         .Selector()
-                            .Composite(CreateDodge(settings, false))
+                            .Composite(CreateDodge(settings, false, senses.weapon_notice))
                             .Sequence()
                                 .Child<GoToNode>("nearest_target_position")
                                 .Child<RenderPathNode>(Vector3f(0.0f, 1.0f, 0.5f))
@@ -1424,12 +1544,12 @@ std::unique_ptr<behavior::BehaviorNode> CreateCombatTree(const CombatSettings& s
                         .Parallel()
                             .Child<BlackboardEraseNode>("dodging")
                             .Selector() // Moving: dodge, battle blasting, an opening, or move by the mode.
-                                .Composite(CreateDodge(settings, true))
+                                .Composite(CreateDodge(settings, true, senses.weapon_notice))
                                 .Composite(CreateBattleMovement())
                                 .Composite(CreateOpening())
                                 .Composite(CreateMovement(settings))
                                 .End()
-                            .Composite(CreateFlightPhases(settings))
+                            .Composite(CreateFlightPhases(settings, senses.weapon_notice))
                             .Sequence(CompositeDecorator::Success) // Use burst when near a wall.
                                 .Child<ShipWeaponCapabilityQueryNode>(WeaponType::Burst)
                                 .InvertChild<ShipWeaponCooldownQueryNode>(WeaponType::Bomb)

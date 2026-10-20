@@ -10,11 +10,19 @@
 namespace zero {
 namespace behavior {
 
+// Decides which enemy weapons a bot has noticed and has had time to react to, for a behavior that keeps track of
+// noticing over time (set as "weapon_noticer").
+struct WeaponNoticer {
+  virtual ~WeaponNoticer() = default;
+  virtual bool Reacting(const Weapon& weapon) const = 0;
+};
+
 // Which weapons a node may react to. Without the blackboard keys below, every weapon counts. A behavior that should
 // react only to what a player in its seat would see sets:
 // - "view_extent": half its screen's size, in tiles. Only weapons on screen count.
-// - "weapon_reaction_ticks": an enemy weapon counts only once it has existed this long.
-// - "weapon_notice": the chance of noticing each enemy weapon at all, decided once per weapon.
+// - "weapon_noticer": a WeaponNoticer* that decides which enemy weapons count. Without one:
+//   - "weapon_reaction_ticks": an enemy weapon counts only once it has existed this long.
+//   - "weapon_notice": the chance of noticing each enemy weapon at all, decided once per weapon.
 // Weapons fired by the bot's own team always count.
 struct WeaponView {
   WeaponView(ExecuteContext& ctx, const Player& self)
@@ -24,6 +32,7 @@ struct WeaponView {
       limited = true;
       extent = *opt_extent;
     }
+    noticer = ctx.blackboard.ValueOr<WeaponNoticer*>("weapon_noticer", nullptr);
     reaction_ticks = ctx.blackboard.ValueOr<int>("weapon_reaction_ticks", 0);
     notice = ctx.blackboard.ValueOr<float>("weapon_notice", 1.0f);
   }
@@ -35,6 +44,7 @@ struct WeaponView {
     }
 
     if (weapon.frequency == freq) return true;
+    if (noticer) return noticer->Reacting(weapon);
     if (reaction_ticks > 0 && GetAge(weapon) < reaction_ticks) return false;
     if (notice < 1.0f && NoticeRoll(weapon) >= notice) return false;
 
@@ -64,6 +74,7 @@ struct WeaponView {
   u16 freq;
   Vector2f extent;
   bool limited = false;
+  WeaponNoticer* noticer = nullptr;
   int reaction_ticks = 0;
   float notice = 1.0f;
 };

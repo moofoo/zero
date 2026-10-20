@@ -22,6 +22,9 @@ struct IncomingDamageReport {
   Vector2f average_origin;
   float average_damage;
   u32 weapon_count;
+  // The weapon with the most weighted damage, and its distance along its path to the bot.
+  const Weapon* main_weapon = nullptr;
+  float main_distance = 0.0f;
 };
 
 struct DodgeIncomingDamage : public behavior::BehaviorNode {
@@ -104,6 +107,9 @@ struct DodgeIncomingDamage : public behavior::BehaviorNode {
     Vector2f average_origin;
     float average_damage = 0.0f;
     size_t incoming_count = 0;
+    const Weapon* main_weapon = nullptr;
+    float main_damage = 0.0f;
+    float main_distance = 0.0f;
 
     WeaponView view(ctx, *self);
 
@@ -158,6 +164,11 @@ struct DodgeIncomingDamage : public behavior::BehaviorNode {
         if (threat_percent < 0.0f) threat_percent = 0.0f;
 
         float damage = (float)GetEstimatedWeaponDamage(weapon, ctx.bot->game->connection) * threat_percent;
+        if (!main_weapon || damage > main_damage) {
+          main_weapon = &weapon;
+          main_damage = damage;
+          main_distance = dist;
+        }
         Vector2f weighted_direction = direction * threat_percent;
 
         // Reduce the effect of this direction if the damage is lower than average.
@@ -180,6 +191,8 @@ struct DodgeIncomingDamage : public behavior::BehaviorNode {
     report.average_direction = average_direction;
     report.average_origin = average_origin;
     report.weapon_count = (u32)incoming_count;
+    report.main_weapon = main_weapon;
+    report.main_distance = main_distance;
 
     return report;
   }

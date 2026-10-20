@@ -13,6 +13,7 @@ struct EnergyEstimate;
 struct Opportunities;
 struct PlayerHistory;
 struct TargetLock;
+struct WeaponNotice;
 
 // How a Chaos bot fights. Every ship flies the same combat tree; these settings decide its style. Chaos reads each
 // style key from the bot's skill level ([Skill.<name>], which may override style), then its aggression preset
@@ -92,6 +93,8 @@ struct CombatSenses {
   TargetLock& target_lock;
   CommitDecision& decision;
   Opportunities& opportunities;
+  // Which enemy weapons the bot has noticed; null for a bot without a skill level, which sees every weapon at once.
+  WeaponNotice* weapon_notice;
 };
 
 std::unique_ptr<behavior::BehaviorNode> CreateCombatTree(const CombatSettings& settings, CombatSenses senses);

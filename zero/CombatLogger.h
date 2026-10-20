@@ -42,6 +42,10 @@ struct CombatLogger : EventHandler<WeaponFireEvent>,
   // The bot took an opportunity (a tactic) against a player: e.g. "window" or "slow".
   void WriteTactic(const char* name, const char* target);
 
+  // The bot started a dodge: from the most threatening weapon (its distance along its path, how long ago it was fired,
+  // and how long ago the bot noticed it, -1 if it doesn't keep track), and whether it went the wrong way.
+  void WriteDodge(WeaponData weapon, float distance, int age_ticks, int noticed_ticks, bool wrong_side);
+
   void HandleEvent(const WeaponFireEvent& event) override;
   void HandleEvent(const WeaponSelfDamageEvent& event) override;
   void HandleEvent(const WeaponHitEvent& event) override;

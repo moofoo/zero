@@ -472,6 +472,83 @@ struct ThrustTimingNode : public behavior::BehaviorNode {
   float piloting;
 };
 
+// A repositioning turn (ticket 19): when the bot has wanted a large change of velocity for a while, its heading is far
+// from it, and there's no shot to keep the aim for (the target is beyond kShotRange, or the bot is backing off), it
+// breaks aim to turn and burn towards the move, then turns back. Not while committing. Taken with the bot's Piloting as
+// its chance, once per occasion, and logged as a "reposition" tactic. Runs after the movement has set the steering
+// force; while turning it drops the facing, so the actuator turns to the force and thrusts once aligned. Always
+// succeeds.
+struct RepositionNode : public behavior::BehaviorNode {
+  RepositionNode(float piloting) : piloting(piloting), random(std::random_device{}()) {}
+
+  static constexpr float kMinMove = 6.0f;     // tiles/s of wanted change in velocity
+  static constexpr float kStopMove = 2.0f;    // the turn ends below this
+  static constexpr float kOffCos = 0.5f;      // heading more than 60 degrees from the move
+  static constexpr u32 kWantTicks = 50;       // wanted for this long first
+  static constexpr u32 kMaxTicks = 100;       // a turn lasts at most this long
+  static constexpr float kShotRange = 25.0f;  // closer than this, keep the aim
+  static constexpr float kAlignedCos = 0.7f;  // thrust once the heading is this close to the move
+
+  behavior::ExecuteResult Execute(behavior::ExecuteContext& ctx) override {
+    Player* self = ctx.bot->game->player_manager.GetSelf();
+    auto opt_target = ctx.blackboard.Value<Player*>("nearest_target");
+    auto& steering = ctx.bot->bot_controller->steering;
+    u32 now = GetCurrentTick();
+    if (!self || !opt_target || !*opt_target) {
+      turning = false;
+      wanting = false;
+      return behavior::ExecuteResult::Success;
+    }
+
+    float move = steering.force.Length();
+    if (turning) {
+      if (move < kStopMove || TICK_GT(now, turn_end)) {
+        turning = false;
+        wanting = false;
+      } else {
+        steering.rotation = 0.0f;
+        steering.thrust_threshold = kAlignedCos;
+        return behavior::ExecuteResult::Success;
+      }
+    }
+
+    int mode = ctx.blackboard.ValueOr<int>("combat_mode", (int)CombatMode::Pressure);
+    bool backing_off = mode == (int)CombatMode::Disengage || mode == (int)CombatMode::Recharge;
+    bool shot = !backing_off && self->position.Distance((*opt_target)->position) <= kShotRange;
+    bool off = move >= kMinMove && self->GetHeading().Dot(steering.force * (1.0f / move)) < kOffCos;
+    if (!off || shot || mode == (int)CombatMode::Commit) {
+      wanting = false;
+      return behavior::ExecuteResult::Success;
+    }
+
+    if (!wanting) {
+      wanting = true;
+      want_start = now;
+      return behavior::ExecuteResult::Success;
+    }
+    if (TICK_DIFF(now, want_start) < (s32)kWantTicks) return behavior::ExecuteResult::Success;
+
+    // The occasion has come: take it, or let it pass until the bot next has to start wanting.
+    wanting = false;
+    bool take = piloting >= 1.0f || std::uniform_real_distribution<float>(0.0f, 1.0f)(random) < piloting;
+    if (!take) return behavior::ExecuteResult::Success;
+
+    turning = true;
+    turn_end = now + kMaxTicks;
+    steering.rotation = 0.0f;
+    steering.thrust_threshold = kAlignedCos;
+    if (ctx.bot->combat_logger) ctx.bot->combat_logger->WriteTactic("reposition", (*opt_target)->name);
+    return behavior::ExecuteResult::Success;
+  }
+
+  float piloting;
+  std::mt19937 random;
+  bool wanting = false;
+  u32 want_start = 0;
+  bool turning = false;
+  u32 turn_end = 0;
+};
+
 // Aims where the target will be after bouncing off a wall, when its path meets one before the shot can reach it: the
 // guide's rebound. The target's flight, as the bot saw it `delay` ticks ago, is simulated with the game's own movement
 // and bounces; the aim is left alone when there's no bounce first. For bots that lead their shots fully. Bullets and
@@ -825,6 +902,13 @@ static std::unique_ptr<behavior::BehaviorNode> CreateBattleMovement() {
   // clang-format on
 
   return builder.Build();
+}
+
+// Repositioning turns, for bots that pilot at all. Always succeeds.
+static std::unique_ptr<behavior::BehaviorNode> CreateReposition(const CombatSettings& settings) {
+  if (settings.piloting <= 0.0f) return std::make_unique<PassNode>();
+
+  return std::make_unique<RepositionNode>(settings.piloting);
 }
 
 // The long-range opening (OpeningCheckNode): straight at the target at full speed.
@@ -1212,6 +1296,7 @@ std::unique_ptr<behavior::BehaviorNode> CreateCombatTree(const CombatSettings& s
                                 .Composite(CreateOpening())
                                 .Composite(CreateMovement(settings))
                                 .End()
+                            .Composite(CreateReposition(settings))
                             .Sequence(CompositeDecorator::Success) // Use burst when near a wall.
                                 .Child<ShipWeaponCapabilityQueryNode>(WeaponType::Burst)
                                 .InvertChild<ShipWeaponCooldownQueryNode>(WeaponType::Bomb)

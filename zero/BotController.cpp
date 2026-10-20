@@ -193,7 +193,7 @@ void BotController::Update(RenderContext& rc, InputState& input, behavior::Execu
     }
   }
 
-  actuator.Update(game, input, steering.force, steering.rotation, steering.rotation_threshold);
+  actuator.Update(game, input, steering.force, steering.rotation, steering.rotation_threshold, steering.thrust_threshold);
   chat_queue.Update();
   last_input = input;
 }

@@ -10,11 +10,15 @@ struct Steering {
   Vector2f force;
   float rotation = 0.0f;
   float rotation_threshold = 0.75f;
+  // Thrust only when the heading is at least this aligned (cosine) with the force: forward when it points that way,
+  // backward when it points away, else coast. 0 or less thrusts whenever there's a force.
+  float thrust_threshold = 0.0f;
 
   void Reset() {
     force = Vector2f(0, 0);
     rotation = 0.0f;
     rotation_threshold = 0.75f;
+    thrust_threshold = 0.0f;
   }
 
   inline static float GetMaxSpeed(Game& game) {

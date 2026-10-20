@@ -175,6 +175,7 @@ struct ChaosBehavior : public behavior::Behavior {
     settings.aim_error = skill_float("AimError").value_or(0.0f);
     settings.lead_skill = skill_float("LeadSkill").value_or(1.0f);
     settings.dodge_error = skill_float("DodgeError").value_or(0.0f);
+    settings.piloting = std::clamp(skill_float("Piloting").value_or(1.0f), 0.0f, 1.0f);
     settings.cover_fire = lookup.GetFloat("CoverFire").value_or(1.0f) > 0.5f;
     settings.mine_cover = lookup.GetFloat("MineCover").value_or(1.0f) > 0.5f;
     settings.mine_cover_range = lookup.GetFloat("MineCoverRange").value_or(settings.mine_cover_range);

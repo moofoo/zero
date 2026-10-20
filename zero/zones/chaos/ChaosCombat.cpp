@@ -452,6 +452,26 @@ struct OpeningCheckNode : public behavior::BehaviorNode {
   u32 end_tick = 0;
 };
 
+// Thrust timing in a fight (ticket 19): the ship thrusts only along its heading and fires the way it faces, so while
+// aiming, thrust helps only when the heading happens to line up with the move the bot wants. Sets the actuator's thrust
+// threshold for this tick, the mode's alignment times the bot's Piloting: committing keeps the aim and thrusts only when
+// well aligned; backing off thrusts more freely, backwards too, still facing the enemy. Always succeeds.
+struct ThrustTimingNode : public behavior::BehaviorNode {
+  explicit ThrustTimingNode(float piloting) : piloting(piloting) {}
+
+  // The alignment (cosine) each mode needs to thrust: commit, pressure, hold, disengage, recharge.
+  static constexpr float kAlignment[(int)CombatMode::Count] = {0.7f, 0.5f, 0.5f, 0.3f, 0.3f};
+
+  behavior::ExecuteResult Execute(behavior::ExecuteContext& ctx) override {
+    int mode = ctx.blackboard.ValueOr<int>("combat_mode", (int)CombatMode::Pressure);
+    if (mode < 0 || mode >= (int)CombatMode::Count) mode = (int)CombatMode::Pressure;
+    ctx.bot->bot_controller->steering.thrust_threshold = kAlignment[mode] * piloting;
+    return behavior::ExecuteResult::Success;
+  }
+
+  float piloting;
+};
+
 // Aims where the target will be after bouncing off a wall, when its path meets one before the shot can reach it: the
 // guide's rebound. The target's flight, as the bot saw it `delay` ticks ago, is simulated with the game's own movement
 // and bounces; the aim is left alone when there's no bounce first. For bots that lead their shots fully. Bullets and
@@ -1184,6 +1204,7 @@ std::unique_ptr<behavior::BehaviorNode> CreateCombatTree(const CombatSettings& s
                         .Composite(CreateAimError(settings))
                         .Composite(CreatePursuitCheck(settings))
                         .Child<OpeningCheckNode>(&senses.opportunities, settings.dodge_threshold)
+                        .Child<ThrustTimingNode>(settings.piloting)
                         .Parallel()
                             .Selector() // Moving: dodge, battle blasting, an opening, or move by the mode.
                                 .Composite(CreateDodge(settings, true))

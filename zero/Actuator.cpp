@@ -2,7 +2,8 @@
 
 namespace zero {
 
-void Actuator::Update(Game& game, InputState& input, const Vector2f& force, float rotation, float rotation_threshold) {
+void Actuator::Update(Game& game, InputState& input, const Vector2f& force, float rotation, float rotation_threshold,
+                      float thrust_threshold) {
   if (!enabled) return;
 
   float enter_delay = (game.connection.settings.EnterDelay / 100.0f);
@@ -60,7 +61,15 @@ void Actuator::Update(Game& game, InputState& input, const Vector2f& force, floa
 
   bool clockwise = !leftside;
 
-  if (has_force) {
+  if (has_force && thrust_threshold > 0.0f) {
+    // Timed thrust: only when the heading helps the move the force asks for.
+    float alignment = heading.Dot(Normalize(force));
+    if (alignment >= thrust_threshold) {
+      input.SetAction(InputAction::Forward, true);
+    } else if (alignment <= -thrust_threshold) {
+      input.SetAction(InputAction::Backward, true);
+    }
+  } else if (has_force) {
     if (behind) {
       input.SetAction(InputAction::Backward, true);
     } else {

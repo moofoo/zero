@@ -54,6 +54,9 @@ struct CombatSettings {
   float lead_skill = 1.0f;
   // How often a sideways dodge goes the wrong way.
   float dodge_error = 0.0f;
+  // How well the bot times its thrust in a fight, 0-1: 0 thrusts whenever it wants to move, however its ship faces;
+  // 1 thrusts only when its heading helps, by the commit decision's mode (ticket 19).
+  float piloting = 1.0f;
   // From Judgement: how well the bot judges a shot's chance of hitting (1: accurately; lower overestimates it, so the
   // bot sprays), how far off its judgement of a hit's damage is, and of its chance of winning.
   float shot_judgement = 1.0f;

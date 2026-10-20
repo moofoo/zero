@@ -809,9 +809,10 @@ struct ShotValueNode : public behavior::BehaviorNode {
 // they want to go and thrust hard, swing onto the target to shoot, and turn away again. After the movement has set its
 // steering force (and facing), this alternates two phases:
 // - Steer: face the wanted move or its exact opposite, whichever is the smaller turn, and thrust forward or in reverse
-//   once nearly aligned, weaving sideways around the target on top of the movement's own push, switching sides and
-//   speed now and then, as a player keeps changing velocity, so the bot never parks and is hard to lead. Dodges steer
-//   without the weave, thrusting sooner in the turn.
+//   once nearly aligned. The move is an orbit: circle the target at a cruising speed that varies, keeping the
+//   movement's push towards or away from it (so a commit spirals in and backing off spirals out), now and then
+//   switching direction. Circling never lets the needed change of velocity fade, so the bot keeps thrusting and turning
+//   at speed, as a player does, and is hard to lead. Dodges steer without the orbit, thrusting sooner in the turn.
 // - Aim: keep facing the aim point (thrust timed as ticket 19 has it), from when a shot is possible (bullets in range,
 //   or a bomb beyond the bot's minimum bombing range, with the weapon ready and energy above the mode's reserve) until
 //   a bomb or a burst of bullets is fired, or kMaxAimTicks pass.
@@ -829,10 +830,12 @@ struct FlightPhaseNode : public behavior::BehaviorNode, EventHandler<WeaponFireE
   static constexpr float kAlignedCos = 0.7f;        // steering thrusts once within about 45 degrees, either way
   static constexpr float kDodgeAlignedCos = 0.3f;   // a dodge thrusts once within about 72 degrees
   static constexpr float kSwitchCos = 0.2f;         // forward and reverse swap only past this margin
-  static constexpr float kWeaveMinSpeed = 10.0f;    // sideways speed the weave aims for, picked at each switch (tiles/s)
-  static constexpr float kWeaveMaxSpeed = 18.0f;
-  static constexpr u32 kWeaveMinTicks = 50;         // the weave switches sides every 0.5-1.5 seconds
-  static constexpr u32 kWeaveMaxTicks = 150;
+  static constexpr float kCruiseMinSpeed = 13.0f;   // orbiting speed, picked afresh every 1-2 seconds (tiles/s)
+  static constexpr float kCruiseMaxSpeed = 19.0f;
+  static constexpr u32 kCruiseMinTicks = 100;
+  static constexpr u32 kCruiseMaxTicks = 200;
+  static constexpr u32 kSwitchMinTicks = 300;       // the orbit switches direction every 3-6 seconds
+  static constexpr u32 kSwitchMaxTicks = 600;
   static constexpr u32 kGapTicks = 20;              // not run for this long: start afresh, steering
   static constexpr float kFacePointDistance = 10.0f;  // how far ahead the point to face is put (tiles)
 
@@ -881,20 +884,26 @@ struct FlightPhaseNode : public behavior::BehaviorNode, EventHandler<WeaponFireE
       return behavior::ExecuteResult::Success;
     }
 
-    // Steering: the wanted move with the weave on top, facing along their steady sum.
+    // Steering: the orbit's velocity, with the movement's push towards or away from the target, less the velocity the
+    // bot has: the change it needs, which circling keeps from fading.
     Vector2f move = steering.force;
     Vector2f heading_for = move;
     Vector2f to_target = target.position - self->position;
     if (!dodging && to_target.LengthSq() > 0.0f) {
       if (!TICK_GT(next_switch_tick, now)) {
         side = -side;
-        weave_speed = std::uniform_real_distribution<float>(kWeaveMinSpeed, kWeaveMaxSpeed)(random);
-        next_switch_tick = now + std::uniform_int_distribution<u32>(kWeaveMinTicks, kWeaveMaxTicks)(random);
+        next_switch_tick = now + std::uniform_int_distribution<u32>(kSwitchMinTicks, kSwitchMaxTicks)(random);
       }
-      // Thrust along the facing, not just the correction still needed: a player keeps thrusting, and the ship's top
-      // speed bounds it, so the weave's turns become the change of velocity.
-      Vector2f across = Perpendicular(Normalize(to_target)) * side;
-      heading_for = across * weave_speed + move;
+      if (!TICK_GT(next_cruise_tick, now)) {
+        cruise_speed = std::uniform_real_distribution<float>(kCruiseMinSpeed, kCruiseMaxSpeed)(random);
+        next_cruise_tick = now + std::uniform_int_distribution<u32>(kCruiseMinTicks, kCruiseMaxTicks)(random);
+      }
+      Vector2f toward = Normalize(to_target);
+      Vector2f across = Perpendicular(toward) * side;
+      // The movement's force is its wanted velocity less the bot's; its wanted velocity towards the target is kept.
+      float radial = (move + self->velocity).Dot(toward);
+      Vector2f wanted = toward * radial + across * cruise_speed;
+      heading_for = wanted - self->velocity;
       steering.force = heading_for;
     }
     if (heading_for.LengthSq() <= 0.0f) return behavior::ExecuteResult::Success;
@@ -950,8 +959,9 @@ struct FlightPhaseNode : public behavior::BehaviorNode, EventHandler<WeaponFireE
   bool bomb_fired = false;
   bool reverse = false;
   float side = 1.0f;
-  float weave_speed = kWeaveMinSpeed;
   u32 next_switch_tick = 0;
+  float cruise_speed = kCruiseMinSpeed;
+  u32 next_cruise_tick = 0;
 };
 
 // Steering and aiming in phases, for bots that pilot at all. Always succeeds.

@@ -16,10 +16,14 @@ namespace chaos {
 constexpr float kBulletHitChance[] = {0.78f, 0.51f, 0.41f, 0.30f, 0.21f, 0.19f, 0.17f, 0.18f,
                                       0.17f, 0.12f, 0.09f, 0.09f, 0.09f, 0.10f, 0.08f};
 constexpr float kHitChanceStep = 5.0f;
-// Bombs: hits per bomb fired (a bomb can hit more than one ship), and the average hit as a share of a direct hit's
-// damage, from the same games (420 of 750).
-constexpr float kBombHitsPerBomb = 0.33f;
-constexpr float kBombAverageDamage = 0.56f;
+// Bombs: damage per bomb fired (blast and shrapnel, every ship hit) as a share of a direct hit's (750), by distance at
+// firing in 5-tile steps, measured on 2026-10-20 over about 100,000 bombs (chaos-offline docs/metrics/bomb-value-
+// 2026-10-20.md): novices (LeadSkill 0.3) and veterans (1.0). They differ only at range.
+constexpr float kBombDamageNovice[] = {0.312f, 0.312f, 0.299f, 0.283f, 0.259f, 0.227f, 0.196f, 0.169f,
+                                       0.160f, 0.148f, 0.119f, 0.119f, 0.099f, 0.084f, 0.061f};
+constexpr float kBombDamageVeteran[] = {0.301f, 0.387f, 0.357f, 0.328f, 0.297f, 0.256f, 0.232f, 0.207f,
+                                        0.196f, 0.172f, 0.171f, 0.137f, 0.119f, 0.119f, 0.087f};
+constexpr float kNoviceLeadSkill = 0.3f;
 // Bots fire only when a shot lines up: about a quarter of their ships' maximum rate while engaged.
 constexpr float kEngagedFireFraction = 0.25f;
 // The exchange is judged as a fight at no more than this distance (tiles): the question is who would win if it came to
@@ -60,8 +64,14 @@ float BulletHitChance(float distance) {
   return kBulletHitChance[step < steps ? step : steps - 1];
 }
 
-float BombExpectedDamage(float direct_hit_damage) {
-  return direct_hit_damage * kBombAverageDamage * kBombHitsPerBomb;
+float BombDamageShare(float distance, float lead_skill) {
+  int steps = (int)(sizeof(kBombDamageVeteran) / sizeof(kBombDamageVeteran[0]));
+  int step = (int)(distance / kHitChanceStep);
+  if (step < 0) step = 0;
+  if (step >= steps) step = steps - 1;
+  float t = (lead_skill - kNoviceLeadSkill) / (1.0f - kNoviceLeadSkill);
+  t = t < 0.0f ? 0.0f : t > 1.0f ? 1.0f : t;
+  return kBombDamageNovice[step] + (kBombDamageVeteran[step] - kBombDamageNovice[step]) * t;
 }
 
 float BulletDamage(const ArenaSettings& arena, float guns) {
@@ -109,8 +119,9 @@ float CommitDecision::DamageRate(Player& shooter, Player& victim, bool shooter_i
     rate += FireRate(ship.BulletFireDelay) * kEngagedFireFraction * chance * BulletDamage(arena, guns);
   }
   if (bombs > 0.0f) {
+    float lead = shooter_is_self ? settings.lead_skill : kGuessedLeadSkill;
     rate += FireRate(ship.BombFireDelay) * kEngagedFireFraction *
-            BombExpectedDamage(arena.BombDamageLevel / 1000.0f) * bomb_factor;
+            BombDamageShare(fight_distance, lead) * (arena.BombDamageLevel / 1000.0f) * bomb_factor;
   }
 
   // Facing away, they have to turn first.

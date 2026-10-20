@@ -737,15 +737,20 @@ struct MineCoverNode : public behavior::BehaviorNode {
 // worth the energy it costs. Energy is cheap with plenty to spare and dear near the reserve the bot's mode needs, and
 // below the reserve no shot is worth it. A shot slower than the weapon's own speed towards the target is less likely
 // to land. A bot that judges shots poorly overestimates their chance, up to double, and a bomb's worth is scaled by the
-// bot's appetite for bombing. A slow target the bot has spotted is likelier to be hit.
+// bot's appetite for bombing. A slow target the bot has spotted is likelier to be hit. A bomb spends a lot of energy at
+// once and blocks bullets after it, so it must also bring at least kMinBombEfficiency damage per energy (about what a
+// bomb is worth at 30 tiles): long, low-odds bombs are left for bullets (ticket 22).
 struct ShotValueNode : public behavior::BehaviorNode {
-  ShotValueNode(WeaponType weapon, const char* velocity_key, float judgement, float bomb_appetite,
+  ShotValueNode(WeaponType weapon, const char* velocity_key, float judgement, float bomb_appetite, float lead_skill,
                 Opportunities* opportunities)
       : weapon(weapon),
         velocity_key(velocity_key),
         judgement(judgement),
         bomb_appetite(bomb_appetite),
+        lead_skill(lead_skill),
         opportunities(opportunities) {}
+
+  static constexpr float kMinBombEfficiency = 0.45f;
 
   // With this much more than the reserve, energy is at its cheapest; at the reserve, its dearest.
   static constexpr float kPlenty = 0.3f;
@@ -779,7 +784,8 @@ struct ShotValueNode : public behavior::BehaviorNode {
     float cost;
     if (bomb) {
       float level = ship.bombs > 0 ? ship.bombs - 1.0f : 0.0f;
-      value = BombExpectedDamage(arena.BombDamageLevel / 1000.0f) * speed_factor * slow_factor * bomb_appetite;
+      value = BombDamageShare(distance, lead_skill) * (arena.BombDamageLevel / 1000.0f) * speed_factor * slow_factor *
+              bomb_appetite;
       cost = ship_settings.BombFireEnergy + ship_settings.BombFireEnergyUpgrade * level;
     } else {
       float guns = ship.guns > 0 ? (float)ship.guns : 1.0f;
@@ -795,6 +801,7 @@ struct ShotValueNode : public behavior::BehaviorNode {
     if (spare <= 0.0f) return behavior::ExecuteResult::Failure;
     float worth = spare >= kPlenty ? kCheapest : kDearest + (kCheapest - kDearest) * (spare / kPlenty);
 
+    if (bomb && worth < kMinBombEfficiency) worth = kMinBombEfficiency;
     return value >= cost * worth ? behavior::ExecuteResult::Success : behavior::ExecuteResult::Failure;
   }
 
@@ -802,6 +809,7 @@ struct ShotValueNode : public behavior::BehaviorNode {
   const char* velocity_key;
   float judgement;
   float bomb_appetite;
+  float lead_skill;
   Opportunities* opportunities;
 };
 
@@ -1197,7 +1205,7 @@ static std::unique_ptr<behavior::BehaviorNode> CreateShotChoice(const CombatSett
   using namespace behavior;
   auto value = [&]() {
     return std::make_unique<ShotValueNode>(weapon, velocity_key, settings.shot_judgement, settings.bomb_appetite,
-                                           &opportunities);
+                                           settings.lead_skill, &opportunities);
   };
   if (!settings.cover_fire) return value();
 

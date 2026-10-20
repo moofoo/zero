@@ -29,8 +29,12 @@ const char* to_string(CombatMode mode);
 
 // A bullet's chance of hitting an enemy this far away (tiles), measured from Chaos games.
 float BulletHitChance(float distance);
-// A bomb's expected damage per bomb fired, measured from Chaos games: hits per bomb times the average hit.
-float BombExpectedDamage(float direct_hit_damage);
+// A bomb's expected damage per bomb fired at an enemy this far away (tiles), as a share of a direct hit's damage,
+// measured from Chaos games: blast and shrapnel, for a bot leading its shots by this much (LeadSkill, 0-1). Better
+// leading keeps more of a long bomb's chance.
+float BombDamageShare(float distance, float lead_skill);
+// An enemy's lead skill as the bot guesses it, for the bombs it fires: between a novice's and a veteran's.
+constexpr float kGuessedLeadSkill = 0.65f;
 // A bullet's damage at a gun level (1 and up), from the arena's settings.
 float BulletDamage(const ArenaSettings& arena, float guns);
 // A ship's gun or bomb level as another player guesses it: the middle of its initial-to-maximum range.
@@ -50,6 +54,8 @@ struct DecisionSettings {
   // Where a backing-off bot stops (tiles), and the fraction of max energy recharging stops at.
   float retreat_distance = 35.0f;
   float recharge_to = 0.9f;
+  // How much of a target's movement the bot leads its shots by, for its own bombs' expected damage (skill).
+  float lead_skill = 1.0f;
 };
 
 // The commit decision: whether to commit, pressure, hold, disengage or recharge, from a quick estimate of who would run

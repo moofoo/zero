@@ -235,6 +235,7 @@ struct ChaosBehavior : public behavior::Behavior {
     decision_settings.disengage_confidence =
         lookup.GetFloat("DisengageConfidence").value_or(decision_settings.disengage_confidence);
     decision_settings.commit_energy = lookup.GetFloat("CommitEnergy").value_or(decision_settings.commit_energy);
+    decision_settings.lead_skill = settings.lead_skill;
     auto leash = lookup.GetFloat("LeashDistance");
     decision_settings.retreat_distance = settings.retreat_distance.value_or(leash.value_or(kDefaultLeashDistance));
     // Spotting opponents' mistakes: as likely as the bot's Judgement (without one, always), noticing their bombs as it

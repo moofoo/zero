@@ -809,8 +809,9 @@ struct ShotValueNode : public behavior::BehaviorNode {
 // they want to go and thrust hard, swing onto the target to shoot, and turn away again. After the movement has set its
 // steering force (and facing), this alternates two phases:
 // - Steer: face the wanted move or its exact opposite, whichever is the smaller turn, and thrust forward or in reverse
-//   once nearly aligned. When the movement asks for little (hovering), weave sideways around the target, switching
-//   sides now and then, so the bot never parks. Dodges always steer, thrusting sooner in the turn.
+//   once nearly aligned, weaving sideways around the target on top of the movement's own push, switching sides and
+//   speed now and then, as a player keeps changing velocity, so the bot never parks and is hard to lead. Dodges steer
+//   without the weave, thrusting sooner in the turn.
 // - Aim: keep facing the aim point (thrust timed as ticket 19 has it), from when a shot is possible (bullets in range,
 //   or a bomb beyond the bot's minimum bombing range, with the weapon ready and energy above the mode's reserve) until
 //   a bomb or a burst of bullets is fired, or kMaxAimTicks pass.
@@ -828,10 +829,10 @@ struct FlightPhaseNode : public behavior::BehaviorNode, EventHandler<WeaponFireE
   static constexpr float kAlignedCos = 0.7f;        // steering thrusts once within about 45 degrees, either way
   static constexpr float kDodgeAlignedCos = 0.3f;   // a dodge thrusts once within about 72 degrees
   static constexpr float kSwitchCos = 0.2f;         // forward and reverse swap only past this margin
-  static constexpr float kSmallMove = 3.0f;         // a wanted change of velocity below this (tiles/s) gets the weave
-  static constexpr float kWeaveSpeed = 14.0f;       // sideways speed the weave aims for (tiles/s)
-  static constexpr u32 kWeaveMinTicks = 100;        // the weave switches sides every 1-2 seconds
-  static constexpr u32 kWeaveMaxTicks = 200;
+  static constexpr float kWeaveMinSpeed = 10.0f;    // sideways speed the weave aims for, picked at each switch (tiles/s)
+  static constexpr float kWeaveMaxSpeed = 18.0f;
+  static constexpr u32 kWeaveMinTicks = 50;         // the weave switches sides every 0.5-1.5 seconds
+  static constexpr u32 kWeaveMaxTicks = 150;
   static constexpr u32 kGapTicks = 20;              // not run for this long: start afresh, steering
   static constexpr float kFacePointDistance = 10.0f;  // how far ahead the point to face is put (tiles)
 
@@ -880,20 +881,21 @@ struct FlightPhaseNode : public behavior::BehaviorNode, EventHandler<WeaponFireE
       return behavior::ExecuteResult::Success;
     }
 
-    // Steering: the wanted move, or with the weave its steady sideways direction.
+    // Steering: the wanted move with the weave on top, facing along their steady sum.
     Vector2f move = steering.force;
     Vector2f heading_for = move;
-    if (!dodging && move.Length() < kSmallMove) {
-      Vector2f to_target = target.position - self->position;
-      if (to_target.LengthSq() > 0.0f) {
-        if (!TICK_GT(next_switch_tick, now)) {
-          side = -side;
-          next_switch_tick = now + std::uniform_int_distribution<u32>(kWeaveMinTicks, kWeaveMaxTicks)(random);
-        }
-        Vector2f across = Perpendicular(Normalize(to_target)) * side;
-        heading_for = across * kWeaveSpeed + move;
-        steering.force = move + across * (kWeaveSpeed - self->velocity.Dot(across));
+    Vector2f to_target = target.position - self->position;
+    if (!dodging && to_target.LengthSq() > 0.0f) {
+      if (!TICK_GT(next_switch_tick, now)) {
+        side = -side;
+        weave_speed = std::uniform_real_distribution<float>(kWeaveMinSpeed, kWeaveMaxSpeed)(random);
+        next_switch_tick = now + std::uniform_int_distribution<u32>(kWeaveMinTicks, kWeaveMaxTicks)(random);
       }
+      // Thrust along the facing, not just the correction still needed: a player keeps thrusting, and the ship's top
+      // speed bounds it, so the weave's turns become the change of velocity.
+      Vector2f across = Perpendicular(Normalize(to_target)) * side;
+      heading_for = across * weave_speed + move;
+      steering.force = heading_for;
     }
     if (heading_for.LengthSq() <= 0.0f) return behavior::ExecuteResult::Success;
 
@@ -948,6 +950,7 @@ struct FlightPhaseNode : public behavior::BehaviorNode, EventHandler<WeaponFireE
   bool bomb_fired = false;
   bool reverse = false;
   float side = 1.0f;
+  float weave_speed = kWeaveMinSpeed;
   u32 next_switch_tick = 0;
 };
 

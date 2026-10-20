@@ -744,7 +744,7 @@ struct MineCoverNode : public behavior::BehaviorNode {
 // to land. A bot that judges shots poorly overestimates their chance, up to double, and a bomb's worth is scaled by the
 // bot's appetite for bombing. A slow target the bot has spotted is likelier to be hit. A bomb spends a lot of energy at
 // once and blocks bullets after it, so it must also bring at least kMinBombEfficiency damage per energy (about what a
-// bomb is worth at 30 tiles): long, low-odds bombs are left for bullets (ticket 22).
+// bomb is worth at 40 tiles): long, low-odds bombs are left for bullets (ticket 22).
 struct ShotValueNode : public behavior::BehaviorNode {
   ShotValueNode(WeaponType weapon, const char* velocity_key, float judgement, float bomb_appetite, float lead_skill,
                 Opportunities* opportunities)
@@ -755,7 +755,7 @@ struct ShotValueNode : public behavior::BehaviorNode {
         lead_skill(lead_skill),
         opportunities(opportunities) {}
 
-  static constexpr float kMinBombEfficiency = 0.45f;
+  static constexpr float kMinBombEfficiency = 0.35f;
   // Bullets keep only this share of the mode's reserve: a player keeps firing bullets as their energy falls, and a
   // bullet spends little at a time (ticket 22).
   static constexpr float kBulletReserveShare = 0.5f;

@@ -179,7 +179,6 @@ struct ChaosBehavior : public behavior::Behavior {
     settings.bomb_min_range = lookup.GetFloat("BombMinRange");
     settings.dodge_threshold = lookup.GetFloat("DodgeThreshold");
     settings.repel_trigger = lookup.GetFloat("RepelTrigger");
-    settings.multifire_range = lookup.GetFloat("MultifireRange");
     settings.antiwarp_energy = lookup.GetFloat("AntiwarpEnergy");
     settings.bomb_overlap_damage = lookup.GetFloat("BombOverlapDamage");
     settings.shot_spread_range = lookup.GetFloat("ShotSpreadRange");
@@ -269,7 +268,8 @@ struct ChaosBehavior : public behavior::Behavior {
     // notices any weapon.
     opportunities = std::make_unique<Opportunities>(*ctx.bot, judgement ? std::clamp(*judgement, 0.0f, 1.0f) : 1.0f,
                                                     awareness.value_or(1.0f), view_extent);
-    decision = std::make_unique<CommitDecision>(*ctx.bot, *estimate, *opportunities, *sight, decision_settings);
+    decision = std::make_unique<CommitDecision>(*ctx.bot, *estimate, *opportunities, *sight, weapon_notice.get(),
+                                                decision_settings);
     Log(LogLevel::Info, "Commit decision: commit at %.2f, disengage below %.2f", decision_settings.commit_confidence,
         decision_settings.disengage_confidence);
 

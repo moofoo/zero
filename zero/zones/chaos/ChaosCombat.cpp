@@ -41,8 +41,9 @@ namespace chaos {
 
 using namespace svs;
 
-// The closest a bot bombs an enemy without a BombMinRange (tiles): the SVS Warbird tree's.
-constexpr float kDefaultBombMinRange = 10.0f;
+// The closest a bot bombs an enemy without a BombMinRange (tiles): none, since a bomb's value counts the damage it does
+// to its own shooter close in (ticket 28). BombMinRange is a style key for bots that hang back further.
+constexpr float kDefaultBombMinRange = 0.0f;
 // How loose the check that a shot's path crosses the target is: the box around the predicted intercept is the ship's
 // radius times up to this (at full energy; down to 1 at none). The bullet box was 4 (zero's SVS Warbird); 6 measured 45%
 // more bullets at the same hit rate on 2026-10-20 (chaos-offline docs/metrics/bomb-value-2026-10-20.md). The bomb box
@@ -361,6 +362,28 @@ struct RouteNode : public behavior::BehaviorNode {
   Navigation style;
   float look_ahead;
   float corner_speed;
+};
+
+// Corralling (ticket 28): multifire spreads bullets over an area to slow or turn a target breaking away, rather than to
+// do damage. Succeeds while the target is between kCorralMin and kCorralMax tiles away and opening the distance by at
+// least kCorralSpeed tiles/s; otherwise the bot fires single bullets, as players do.
+struct CorralQueryNode : public behavior::BehaviorNode {
+  static constexpr float kCorralMin = 15.0f;
+  static constexpr float kCorralMax = 35.0f;
+  static constexpr float kCorralSpeed = 5.0f;
+
+  behavior::ExecuteResult Execute(behavior::ExecuteContext& ctx) override {
+    Player* self = ctx.bot->game->player_manager.GetSelf();
+    auto opt_target = ctx.blackboard.Value<Player*>("nearest_target");
+    if (!self || !opt_target || !*opt_target) return behavior::ExecuteResult::Failure;
+    const Player& target = **opt_target;
+
+    Vector2f to_target = target.position - self->position;
+    float distance = to_target.Length();
+    if (distance < kCorralMin || distance > kCorralMax) return behavior::ExecuteResult::Failure;
+    float opening = (target.velocity - self->velocity).Dot(to_target * (1.0f / distance));
+    return opening >= kCorralSpeed ? behavior::ExecuteResult::Success : behavior::ExecuteResult::Failure;
+  }
 };
 
 // Chooses the bot's target through its target lock, from the enemies it could fight and can see (EnemySight): in a
@@ -873,11 +896,14 @@ struct ShotValueNode : public behavior::BehaviorNode {
     // The shot's expected damage, as the bot judges it, and its energy cost.
     float value;
     float cost;
+    float self_damage = 0.0f;
     if (bomb) {
       float level = ship.bombs > 0 ? ship.bombs - 1.0f : 0.0f;
       value = BombDamageShare(distance, lead_skill) * (arena.BombDamageLevel / 1000.0f) * speed_factor * slow_factor *
               bomb_appetite;
       cost = ship_settings.BombFireEnergy + ship_settings.BombFireEnergyUpgrade * level;
+      // What it costs the bot itself: its own blast, close in (ticket 28).
+      self_damage = BombSelfDamageShare(distance) * (arena.BombDamageLevel / 1000.0f);
     } else {
       float guns = ship.guns > 0 ? (float)ship.guns : 1.0f;
       float chance = BulletHitChance(distance) * speed_factor * slow_factor;
@@ -885,6 +911,7 @@ struct ShotValueNode : public behavior::BehaviorNode {
       cost = ship_settings.BulletFireEnergy * guns;
     }
     value *= 2.0f - judgement;  // poor judgement overestimates
+    value -= self_damage;
 
     // What energy is worth now, from how much the bot has over its mode's reserve.
     float reserve = ModeReserve(CurrentMode(ctx)) * (bomb ? 1.0f : kBulletReserveShare);
@@ -944,6 +971,17 @@ struct FlightPhaseNode : public behavior::BehaviorNode, EventHandler<WeaponFireE
   static constexpr float kSidestepRange = 30.0f;
   static constexpr float kSidestepCos = 0.94f;
   static constexpr float kSidestepAlongCut = 0.8f;
+  // Closing the gap (ticket 28): committing, the bot closes on its target at kClosingSpeed tiles/s faster than the
+  // target moves, then within kShadowRange shadows it: matches its velocity (by Piloting) and keeps kShadowOffset
+  // tiles off to the side of its heading, correcting at kShadowGain per second. While shadowing it keeps aiming and
+  // firing until the velocity it needs is more than kShadowSlack tiles/s off, then steers until within half that.
+  static constexpr float kClosingSpeed = 12.0f;
+  static constexpr float kShadowRange = 10.0f;
+  static constexpr float kShadowOffset = 6.0f;
+  static constexpr float kShadowGain = 1.5f;
+  static constexpr float kShadowMaxCorrection = 12.0f;
+  static constexpr float kShadowSlack = 4.0f;
+  static constexpr u32 kMaxShadowAimTicks = 300;
 
   void HandleEvent(const WeaponFireEvent& event) override {
     if (event.player.id != self_id) return;
@@ -967,9 +1005,15 @@ struct FlightPhaseNode : public behavior::BehaviorNode, EventHandler<WeaponFireE
     if (TICK_DIFF(now, last_run_tick) > (s32)kGapTicks) StartSteer(now);
     last_run_tick = now;
     bool dodging = ctx.blackboard.Has("dodging");
+    bool committing = !dodging && CurrentMode(ctx) == CombatMode::Commit;
+    bool shadowing = committing && self->position.Distance(target.position) <= kShadowRange;
+    Vector2f shadow_change = shadowing ? ShadowVelocity(*self, target) - self->velocity : Vector2f();
+    float shadow_off = shadow_change.Length();
 
     if (aiming) {
-      bool done = bomb_fired || bullets >= kBurstBullets || TICK_DIFF(now, phase_start) >= (s32)kMaxAimTicks;
+      s32 aimed = TICK_DIFF(now, phase_start);
+      bool done = shadowing ? shadow_off > kShadowSlack || aimed >= (s32)kMaxShadowAimTicks
+                            : bomb_fired || bullets >= kBurstBullets || aimed >= (s32)kMaxAimTicks;
       if (dodging) {
         StartSteer(now);
       } else if (done) {
@@ -979,12 +1023,15 @@ struct FlightPhaseNode : public behavior::BehaviorNode, EventHandler<WeaponFireE
           StartAim(now);
         }
       }
-    } else if (!dodging && TICK_DIFF(now, phase_start) >= (s32)kMinSteerTicks && ShotPossible(ctx, *self, target, now)) {
+    } else if (!dodging && TICK_DIFF(now, phase_start) >= (s32)kMinSteerTicks &&
+               ShotPossible(ctx, *self, target, now) && (!shadowing || shadow_off <= kShadowSlack * 0.5f)) {
       StartAim(now);
     }
 
     auto& steering = ctx.bot->bot_controller->steering;
     if (aiming) {
+      // Shadowing, the bot keeps matching the target as far as its facing allows while it shoots.
+      if (shadowing) steering.force = shadow_change;
       steering.rotation = 0.0f;
       steering.Face(game, *opt_aimshot);
       return behavior::ExecuteResult::Success;
@@ -1009,7 +1056,12 @@ struct FlightPhaseNode : public behavior::BehaviorNode, EventHandler<WeaponFireE
       // The movement's force is its wanted velocity less the bot's; its wanted velocity towards the target is kept.
       float radial = (move + self->velocity).Dot(toward);
       Vector2f wanted = toward * radial + across * cruise_speed;
-      Player* threat = BombThreat(ctx, *self, now);
+      if (shadowing) {
+        wanted = ShadowVelocity(*self, target);
+      } else if (committing) {
+        wanted = target.velocity + toward * kClosingSpeed;
+      }
+      Player* threat = committing ? nullptr : BombThreat(ctx, *self, now);
       if (threat) {
         // Across the threat's line of fire, keeping the way the bot is already going across it.
         Vector2f line = Normalize(self->position - threat->position);
@@ -1052,6 +1104,17 @@ struct FlightPhaseNode : public behavior::BehaviorNode, EventHandler<WeaponFireE
     bool bullet = distance <= kShotRange && !TICK_GT(ship.next_bullet_tick, now);
     bool bomb = ship.bombs > 0 && distance >= bomb_min_range && !TICK_GT(ship.next_bomb_tick, now);
     return bullet || bomb;
+  }
+
+  // Shadowing: the target's velocity, as much of it as the bot's Piloting matches, plus a correction toward a point
+  // kShadowOffset tiles to the side of the target's heading, on the side the bot is already on.
+  Vector2f ShadowVelocity(const Player& self, const Player& target) const {
+    Vector2f lateral = Perpendicular(target.GetHeading());
+    float on_side = (self.position - target.position).Dot(lateral);
+    Vector2f point = target.position + lateral * ((on_side >= 0.0f ? 1.0f : -1.0f) * kShadowOffset);
+    Vector2f correction = (point - self.position) * kShadowGain;
+    if (correction.Length() > kShadowMaxCorrection) correction = Normalize(correction) * kShadowMaxCorrection;
+    return target.velocity * piloting + correction;
   }
 
   // The nearest enemy that could bomb the bot now: on its screen, within kSidestepRange, nose on it, and not seen
@@ -1454,7 +1517,6 @@ std::unique_ptr<behavior::BehaviorNode> CreateCombatTree(const CombatSettings& s
   BehaviorBuilder builder;
 
   // The built-in numbers are the SVS Warbird tree's.
-  const float multifire_range = settings.multifire_range.value_or(15.0f);
   const float antiwarp_energy = settings.antiwarp_energy.value_or(0.75f);
   const float repel_trigger = settings.repel_trigger.value_or(1.0f);
   const float bomb_min_range = settings.bomb_min_range.value_or(kDefaultBombMinRange);
@@ -1480,16 +1542,16 @@ std::unique_ptr<behavior::BehaviorNode> CreateCombatTree(const CombatSettings& s
                     .InvertChild<ShipPortalPositionQueryNode>()
                     .Child<InputActionNode>(InputAction::Portal)
                     .End()
-                .Selector(CompositeDecorator::Success) // Multifire on when far from the enemy, off when close.
+                .Selector(CompositeDecorator::Success) // Multifire only to corral a target breaking away.
                     .Sequence()
                         .Child<ShipCapabilityQueryNode>(ShipCapability_Multifire)
-                        .Child<DistanceThresholdNode>("nearest_target_position", multifire_range)
+                        .Child<CorralQueryNode>()
                         .InvertChild<ShipMultifireQueryNode>()
                         .Child<InputActionNode>(InputAction::Multifire)
                         .End()
                     .Sequence()
                         .Child<ShipCapabilityQueryNode>(ShipCapability_Multifire)
-                        .InvertChild<DistanceThresholdNode>("nearest_target_position", multifire_range)
+                        .InvertChild<CorralQueryNode>()
                         .Child<ShipMultifireQueryNode>()
                         .Child<InputActionNode>(InputAction::Multifire)
                         .End()

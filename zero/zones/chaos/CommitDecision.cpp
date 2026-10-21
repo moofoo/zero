@@ -3,11 +3,16 @@
 #include "EnemySight.h"
 #include "EnergyEstimate.h"
 #include "Opportunities.h"
+#include "WeaponNotice.h"
 
 #include <math.h>
+#include <zero/CombatLogger.h>
 #include <zero/ZeroBot.h>
 #include <zero/game/Clock.h>
 #include <zero/game/Game.h>
+#include <zero/game/WeaponManager.h>
+
+#include <algorithm>
 
 namespace zero {
 namespace chaos {
@@ -26,6 +31,10 @@ constexpr float kBombDamageNovice[] = {0.312f, 0.312f, 0.299f, 0.283f, 0.259f, 0
 constexpr float kBombDamageVeteran[] = {0.301f, 0.387f, 0.357f, 0.328f, 0.297f, 0.256f, 0.232f, 0.207f,
                                         0.196f, 0.172f, 0.171f, 0.137f, 0.119f, 0.119f, 0.087f};
 static_assert(sizeof(kBombDamageNovice) == sizeof(kBombDamageVeteran), "the bomb tables need the same steps");
+// Self-damage per bomb fired, in the same steps and shares, from about 32,000 bot bombs (runs S2, T1b, L1, L2): a
+// shooter's own blast as the bomb goes off near it, at an enemy that closed in or against a wall.
+constexpr float kBombSelfDamage[] = {0.775f, 0.371f, 0.193f, 0.103f, 0.062f, 0.042f, 0.034f, 0.029f,
+                                     0.020f, 0.017f, 0.018f, 0.018f, 0.018f, 0.018f, 0.018f};
 // The novices' LeadSkill when the bomb table was measured (the veterans' was 1).
 constexpr float kNoviceLeadSkill = 0.3f;
 // An enemy's lead skill as the bot guesses it, for the bombs it fires: between a novice's and a veteran's.
@@ -45,6 +54,10 @@ constexpr float kOneSided = 0.8f;
 constexpr float kHysteresis = 0.05f;
 // A commit lasts at least this long (ticks), unless the fight turns clearly against the bot.
 constexpr u32 kMinCommitTicks = 150;
+// A won bomb exchange: the bot's bomb within this many tiles of the target as it goes off, and the target's last bomb
+// at the bot, missed, within this many ticks before.
+constexpr float kWonBlast = 1.5f;
+constexpr u32 kWonTicks = 300;
 
 const char* to_string(CombatMode mode) {
   switch (mode) {
@@ -71,6 +84,17 @@ static int DistanceStep(float distance, int steps) {
 
 float BulletHitChance(float distance) {
   return kBulletHitChance[DistanceStep(distance, (int)(sizeof(kBulletHitChance) / sizeof(kBulletHitChance[0])))];
+}
+
+float BombSelfDamageShare(float distance) {
+  // Each step's value stands for the middle of its distances; between middles, a straight line.
+  constexpr int steps = (int)(sizeof(kBombSelfDamage) / sizeof(kBombSelfDamage[0]));
+  float position = distance / kDistanceStep - 0.5f;
+  if (position <= 0.0f) return kBombSelfDamage[0];
+  int step = (int)position;
+  if (step >= steps - 1) return kBombSelfDamage[steps - 1];
+  float t = position - (float)step;
+  return kBombSelfDamage[step] + (kBombSelfDamage[step + 1] - kBombSelfDamage[step]) * t;
 }
 
 float BombDamageShare(float distance, float lead_skill) {
@@ -100,11 +124,12 @@ static float NormalCdf(float x) {
 }
 
 CommitDecision::CommitDecision(ZeroBot& bot, EnergyEstimate& estimate, Opportunities& opportunities, EnemySight& sight,
-                               DecisionSettings settings)
+                               WeaponNotice* notice, DecisionSettings settings)
     : bot(bot),
       estimate(estimate),
       opportunities(opportunities),
       sight(sight),
+      notice(notice),
       settings(settings),
       random(std::random_device{}()) {}
 
@@ -140,6 +165,13 @@ float CommitDecision::DamageRate(Player& shooter, Player& victim, bool shooter_i
   float facing = shooter.GetHeading().Dot(to_victim);
   if (facing < 0.0f) facing = 0.0f;
   return rate * (kFacingAwayShare + (1.0f - kFacingAwayShare) * facing);
+}
+
+float CommitDecision::OwnBombDamageRate(const ShipSettings& ship, float bombs, float distance) {
+  if (bombs <= 0.0f) return 0.0f;
+  auto& arena = bot.game->connection.settings;
+  return FireRate(ship.BombFireDelay) * kEngagedFireFraction * BombSelfDamageShare(distance) *
+         (arena.BombDamageLevel / 1000.0f);
 }
 
 float CommitDecision::FiringCost(const ShipSettings& ship, float guns, float bombs) {
@@ -178,8 +210,14 @@ float CommitDecision::WinChance(Player& self, Player& target, float self_energy)
   // A fire window: the target can't fire for a moment, which is worth the damage it would have dealt.
   self_energy += DamageRate(target, self, false) * opportunities.WindowSeconds(target);
 
-  float self_loss = incoming + self_spend - self_recharge;
-  float target_loss = outgoing + target_spend - target_recharge;
+  // Each side's own bombs hurt it at close range.
+  float fight_distance = std::min(self.position.Distance(target.position), kFightDistance);
+  float self_blast = OwnBombDamageRate(arena.ShipSettings[self.ship], (float)own.bombs, fight_distance);
+  float target_blast = OwnBombDamageRate(
+      target_ship, GuessedLevel(target_ship.InitialBombs, target_ship.MaxBombs), fight_distance);
+
+  float self_loss = incoming + self_spend + self_blast - self_recharge;
+  float target_loss = outgoing + target_spend + target_blast - target_recharge;
 
   // When only one side would wear the other down, that side is likely, but not certain, to win.
   if (self_loss <= 0.0f && target_loss <= 0.0f) return 0.5f;
@@ -236,6 +274,31 @@ CombatMode CommitDecision::Choose(float chance, Player& self, Player& target) {
 float CommitDecision::WinChanceAfter(Player& self, Player& target, float damage) {
   float energy = self.energy - damage;
   return energy > 0.0f ? WinChance(self, target, energy) : 0.0f;
+}
+
+static bool IsBomb(const Weapon& weapon) {
+  return (weapon.data.type == WeaponType::Bomb || weapon.data.type == WeaponType::ProximityBomb) &&
+         !weapon.data.alternate;
+}
+
+void CommitDecision::HandleEvent(const WeaponSelfDamageEvent& event) {
+  if (IsBomb(event.weapon)) bomb_damage_tick[event.shooter.id] = GetCurrentTick();
+}
+
+void CommitDecision::HandleEvent(const WeaponHitEvent& event) {
+  Player* self = bot.game->player_manager.GetSelf();
+  if (!notice || !self || !event.target || event.weapon.player_id != self->id || !IsBomb(event.weapon)) return;
+  if (event.target->frequency == self->frequency) return;
+  if (event.weapon.GetPosition().Distance(event.target->position) > kWonBlast) return;
+
+  u32 now = GetCurrentTick();
+  auto bombed = notice->LastBombSeen(event.target->id);
+  if (!bombed || TICK_DIFF(now, *bombed) > (s32)kWonTicks) return;
+  auto hurt = bomb_damage_tick.find(event.target->id);
+  if (hurt != bomb_damage_tick.end() && !TICK_GT(*bombed, hurt->second)) return;  // their bomb landed
+
+  next_decision_tick = now;
+  if (bot.combat_logger) bot.combat_logger->WriteTactic("won exchange", event.target->name);
 }
 
 CombatMode CommitDecision::Decide(Player& self, Player& target) {

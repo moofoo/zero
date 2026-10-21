@@ -32,9 +32,7 @@ struct CombatSettings {
   std::optional<float> dodge_threshold;
   // Repel (or warp out) when incoming damage is at least this times current energy.
   std::optional<float> repel_trigger;
-  // Ship abilities: multifire on when the enemy is further than this (tiles); antiwarp on above this fraction of max
-  // energy.
-  std::optional<float> multifire_range;
+  // Ship abilities: antiwarp on above this fraction of max energy.
   std::optional<float> antiwarp_energy;
   // Bomb only when at least this much of our own bullet damage is already heading at the target, so the bomb
   // lands among bullets and is harder to dodge.

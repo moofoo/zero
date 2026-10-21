@@ -1,8 +1,10 @@
 #pragma once
 
 #include <zero/Types.h>
+#include <zero/game/GameEvent.h>
 
 #include <random>
+#include <unordered_map>
 
 namespace zero {
 
@@ -16,6 +18,7 @@ namespace chaos {
 struct EnemySight;
 struct EnergyEstimate;
 struct Opportunities;
+struct WeaponNotice;
 
 // What a bot is doing in a fight, chosen by the commit decision:
 // - Commit: close in and finish them.
@@ -34,6 +37,9 @@ float BulletHitChance(float distance);
 // measured from Chaos games: blast and shrapnel, for a bot leading its shots by this much (LeadSkill, 0-1). Better
 // leading keeps more of a long bomb's chance.
 float BombDamageShare(float distance, float lead_skill);
+// The damage a bomb fired at an enemy this far away (tiles) does to its own shooter, on average, as a share of a direct
+// hit's damage: measured from Chaos games (ticket 28), interpolated between distances.
+float BombSelfDamageShare(float distance);
 // A bullet's damage at a gun level (1 and up), from the arena's settings.
 float BulletDamage(const ArenaSettings& arena, float guns);
 // A ship's gun or bomb level as another player guesses it: the middle of its initial-to-maximum range.
@@ -64,9 +70,15 @@ struct DecisionSettings {
 // games. The opponent's mistakes the bot has spotted count too (Opportunities): a fire window is energy in the bot's
 // favour, the damage the target can't deal during it, and a slow target takes more of the bot's damage. A mode must
 // clear its threshold by a margin to replace the current one.
-struct CommitDecision {
+// A won bomb exchange (ticket 28) re-decides at once rather than when the next decision is due: the bot's bomb hits an
+// enemy straight on (within kWonBlast tiles of the blast) while that enemy's last bomb it noticed, in the kWonTicks
+// before, missed it. A player takes that as the cue to close in.
+struct CommitDecision : EventHandler<WeaponHitEvent>, EventHandler<WeaponSelfDamageEvent> {
   CommitDecision(ZeroBot& bot, EnergyEstimate& estimate, Opportunities& opportunities, EnemySight& sight,
-                 DecisionSettings settings);
+                 WeaponNotice* notice, DecisionSettings settings);
+
+  void HandleEvent(const WeaponHitEvent& event) override;
+  void HandleEvent(const WeaponSelfDamageEvent& event) override;
 
   // The mode for this tick, re-deciding when due.
   CombatMode Decide(Player& self, Player& target);
@@ -85,7 +97,10 @@ struct CommitDecision {
   EnergyEstimate& estimate;
   Opportunities& opportunities;
   EnemySight& sight;
+  WeaponNotice* notice;
   DecisionSettings settings;
+  // When each enemy's bomb last hurt the bot, to tell a missed bomb from one that landed.
+  std::unordered_map<u16, u32> bomb_damage_tick;
   std::mt19937 random;
 
   CombatMode mode = CombatMode::Pressure;
@@ -101,6 +116,8 @@ struct CommitDecision {
   float DamageRate(Player& shooter, Player& victim, bool shooter_is_self);
   // Energy per second a ship spends firing while engaged.
   float FiringCost(const ShipSettings& ship, float guns, float bombs);
+  // The energy a ship loses to its own bombs while bombing an enemy this far away (per second).
+  float OwnBombDamageRate(const ShipSettings& ship, float bombs, float distance);
   CombatMode Choose(float chance, Player& self, Player& target);
 };
 

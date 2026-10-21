@@ -46,6 +46,9 @@ constexpr float kEngagedFireFraction = 0.25f;
 constexpr float kFightDistance = 15.0f;
 // A ship facing away from its victim still turns and fires: the least share of its damage counted.
 constexpr float kFacingAwayShare = 0.3f;
+// Another ship's facing is judged over about this long (ticks), not at an instant: one that has been flying away isn't
+// fighting, but one that has just turned is.
+constexpr float kFacingMemoryTicks = 200.0f;
 // Other enemies further than this (tiles) don't count towards the danger.
 constexpr float kThirdPartyDistance = 50.0f;
 // When only one side would wear the other down, how sure the bot is of the outcome.
@@ -160,11 +163,26 @@ float CommitDecision::DamageRate(Player& shooter, Player& victim, bool shooter_i
             BombDamageShare(fight_distance, lead) * (arena.BombDamageLevel / 1000.0f) * bomb_factor;
   }
 
-  // Facing away, they have to turn first.
+  // Facing away, they have to turn first. The bot's own damage doesn't depend on its facing: it turns to shoot in its
+  // aim phases. Another ship's is its facing over the last moments.
+  if (shooter_is_self) return rate;
   Vector2f to_victim = Normalize(victim.position - shooter.position);
   float facing = shooter.GetHeading().Dot(to_victim);
   if (facing < 0.0f) facing = 0.0f;
-  return rate * (kFacingAwayShare + (1.0f - kFacingAwayShare) * facing);
+  return rate * (kFacingAwayShare + (1.0f - kFacingAwayShare) * AverageFacing(shooter.id, facing));
+}
+
+float CommitDecision::AverageFacing(u16 id, float facing) {
+  u32 now = GetCurrentTick();
+  auto it = facing_average.find(id);
+  if (it == facing_average.end() || TICK_DIFF(now, it->second.tick) > (s32)(kFacingMemoryTicks * 5.0f)) {
+    facing_average[id] = {facing, now};
+    return facing;
+  }
+  float weight = 1.0f - expf(-(float)TICK_DIFF(now, it->second.tick) / kFacingMemoryTicks);
+  it->second.value += (facing - it->second.value) * weight;
+  it->second.tick = now;
+  return it->second.value;
 }
 
 float CommitDecision::OwnBombDamageRate(const ShipSettings& ship, float bombs, float distance) {

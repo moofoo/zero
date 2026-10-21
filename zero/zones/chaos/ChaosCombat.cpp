@@ -982,6 +982,9 @@ struct FlightPhaseNode : public behavior::BehaviorNode, EventHandler<WeaponFireE
   static constexpr float kShadowMaxCorrection = 12.0f;
   static constexpr float kShadowSlack = 4.0f;
   static constexpr u32 kMaxShadowAimTicks = 300;
+  // Closing beyond shadowing range, the bot steers longer between aim phases and aims more briefly, so it gets there.
+  static constexpr u32 kMinClosingSteerTicks = 75;
+  static constexpr u32 kMaxClosingAimTicks = 40;
 
   void HandleEvent(const WeaponFireEvent& event) override {
     if (event.player.id != self_id) return;
@@ -1012,8 +1015,9 @@ struct FlightPhaseNode : public behavior::BehaviorNode, EventHandler<WeaponFireE
 
     if (aiming) {
       s32 aimed = TICK_DIFF(now, phase_start);
+      u32 max_aim = committing ? kMaxClosingAimTicks : kMaxAimTicks;
       bool done = shadowing ? shadow_off > kShadowSlack || aimed >= (s32)kMaxShadowAimTicks
-                            : bomb_fired || bullets >= kBurstBullets || aimed >= (s32)kMaxAimTicks;
+                            : bomb_fired || bullets >= kBurstBullets || aimed >= (s32)max_aim;
       if (dodging) {
         StartSteer(now);
       } else if (done) {
@@ -1023,7 +1027,8 @@ struct FlightPhaseNode : public behavior::BehaviorNode, EventHandler<WeaponFireE
           StartAim(now);
         }
       }
-    } else if (!dodging && TICK_DIFF(now, phase_start) >= (s32)kMinSteerTicks &&
+    } else if (!dodging &&
+               TICK_DIFF(now, phase_start) >= (s32)(committing && !shadowing ? kMinClosingSteerTicks : kMinSteerTicks) &&
                ShotPossible(ctx, *self, target, now) && (!shadowing || shadow_off <= kShadowSlack * 0.5f)) {
       StartAim(now);
     }

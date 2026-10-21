@@ -99,6 +99,12 @@ struct CommitDecision : EventHandler<WeaponHitEvent>, EventHandler<WeaponSelfDam
   EnemySight& sight;
   WeaponNotice* notice;
   DecisionSettings settings;
+  // Each other ship's facing toward the bot, averaged over time, and when it was last updated.
+  struct Average {
+    float value;
+    u32 tick;
+  };
+  std::unordered_map<u16, Average> facing_average;
   // When each enemy's bomb last hurt the bot, to tell a missed bomb from one that landed.
   std::unordered_map<u16, u32> bomb_damage_tick;
   std::mt19937 random;
@@ -116,6 +122,8 @@ struct CommitDecision : EventHandler<WeaponHitEvent>, EventHandler<WeaponSelfDam
   float DamageRate(Player& shooter, Player& victim, bool shooter_is_self);
   // Energy per second a ship spends firing while engaged.
   float FiringCost(const ShipSettings& ship, float guns, float bombs);
+  // Another ship's facing toward the bot (0-1), averaged over the last moments, with this facing now.
+  float AverageFacing(u16 id, float facing);
   // The energy a ship loses to its own bombs while bombing an enemy this far away (per second).
   float OwnBombDamageRate(const ShipSettings& ship, float bombs, float distance);
   CombatMode Choose(float chance, Player& self, Player& target);

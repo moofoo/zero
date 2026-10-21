@@ -50,6 +50,11 @@ struct TargetLock : EventHandler<WeaponSelfDamageEvent>, EventHandler<WeaponHitE
   // This tick's target among the enemies the bot could fight and can see, or null when there are none.
   Player* Choose(const std::vector<Player*>& candidates);
 
+  // The enemy the commit decision is committed against, or kNone (ticket 28): while committed, the lock holds on it.
+  // Nearer enemies and weaker ones don't take it, its quiet timer is kept fresh and the leash doesn't apply; only an
+  // enemy hitting the bot hard (a takeover) or losing the target moves the lock.
+  void SetCommitted(u16 id) { committed = id; }
+
   // Where to look for the locked enemy, out of sight, while searching for it.
   std::optional<Vector2f> SearchPosition() const { return search_position; }
 
@@ -75,6 +80,8 @@ struct TargetLock : EventHandler<WeaponSelfDamageEvent>, EventHandler<WeaponHitE
   Opportunities& opportunities;
   EnemySight& sight;
 
+  // The enemy the bot is committed against, set by the commit decision each tick.
+  u16 committed = kNone;
   // Searching for the locked enemy out of sight: where it would be.
   std::optional<Vector2f> search_position;
 

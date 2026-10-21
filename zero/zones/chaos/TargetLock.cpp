@@ -173,9 +173,20 @@ Player* TargetLock::Choose(const std::vector<Player*>& candidates) {
 
   UpdateBattle(candidates, *self, now);
 
+  // Committed against an enemy in sight: the lock is on it.
+  bool holding = false;
+  if (committed != kNone && !battling && find(committed)) {
+    if (locked != committed) {
+      locked = committed;
+      Note("committed");
+    }
+    last_contact[locked] = now;
+    holding = true;
+  }
+
   // A bot that goes after weak enemies switches to the weakest one on its screen below its threshold, by its estimate,
   // unless its target is weak already.
-  if (weak_enemy_energy && !battling) {
+  if (weak_enemy_energy && !battling && !holding) {
     if (!locked_weak()) {
       Player* weakest = nullptr;
       float weakest_energy = *weak_enemy_energy;
@@ -228,7 +239,7 @@ Player* TargetLock::Choose(const std::vector<Player*>& candidates) {
         reason.clear();
         return nullptr;
       }
-    } else if (!WithinLeash(*target, *self)) {
+    } else if (!holding && !WithinLeash(*target, *self)) {
       Release("too far");
     } else {
       auto contact = last_contact.find(locked);

@@ -169,7 +169,8 @@ struct EnergyEstimateQueryNode : public behavior::BehaviorNode {
 
 // Runs the commit decision against the target, writes the mode to the blackboard as an int, and logs each change.
 struct CommitDecisionNode : public behavior::BehaviorNode {
-  CommitDecisionNode(CommitDecision* decision, const char* target_key) : decision(decision), target_key(target_key) {}
+  CommitDecisionNode(CommitDecision* decision, TargetLock* lock, const char* target_key)
+      : decision(decision), lock(lock), target_key(target_key) {}
 
   behavior::ExecuteResult Execute(behavior::ExecuteContext& ctx) override {
     Player* self = ctx.bot->game->player_manager.GetSelf();
@@ -177,6 +178,8 @@ struct CommitDecisionNode : public behavior::BehaviorNode {
     if (!self || !opt_target || !*opt_target) return behavior::ExecuteResult::Failure;
 
     CombatMode mode = decision->Decide(*self, **opt_target);
+    // Committed, the target lock holds on this enemy.
+    lock->SetCommitted(mode == CombatMode::Commit ? (*opt_target)->id : TargetLock::kNone);
     if (mode != logged || !logged_once) {
       if (ctx.bot->combat_logger) ctx.bot->combat_logger->WriteMode(to_string(mode), decision->win_chance);
       logged = mode;
@@ -187,6 +190,7 @@ struct CommitDecisionNode : public behavior::BehaviorNode {
   }
 
   CommitDecision* decision;
+  TargetLock* lock;
   const char* target_key;
   CombatMode logged = CombatMode::Pressure;
   bool logged_once = false;
@@ -1547,7 +1551,7 @@ std::unique_ptr<behavior::BehaviorNode> CreateCombatTree(const CombatSettings& s
                     .Child<LockedTargetNode>(&senses.target_lock, &senses.sight, "nearest_target")
                     .Child<PlayerPositionQueryNode>("nearest_target", "nearest_target_position")
                     .Child<EnergyEstimateQueryNode>(&senses.estimate, "nearest_target", "nearest_target_energy", "nearest_target_energy_sd")
-                    .Child<CommitDecisionNode>(&senses.decision, "nearest_target")
+                    .Child<CommitDecisionNode>(&senses.decision, &senses.target_lock, "nearest_target")
                     .End()
                 .Sequence(CompositeDecorator::Success) // If we have a portal but no location, lay one down.
                     .Child<ShipItemCountThresholdNode>(ShipItemType::Portal, 1)

@@ -13,6 +13,7 @@ struct ZeroBot;
 
 namespace chaos {
 
+struct EnemySight;
 struct EnergyEstimate;
 struct Opportunities;
 
@@ -64,7 +65,8 @@ struct DecisionSettings {
 // favour, the damage the target can't deal during it, and a slow target takes more of the bot's damage. A mode must
 // clear its threshold by a margin to replace the current one.
 struct CommitDecision {
-  CommitDecision(ZeroBot& bot, EnergyEstimate& estimate, Opportunities& opportunities, DecisionSettings settings);
+  CommitDecision(ZeroBot& bot, EnergyEstimate& estimate, Opportunities& opportunities, EnemySight& sight,
+                 DecisionSettings settings);
 
   // The mode for this tick, re-deciding when due.
   CombatMode Decide(Player& self, Player& target);
@@ -82,6 +84,7 @@ struct CommitDecision {
   ZeroBot& bot;
   EnergyEstimate& estimate;
   Opportunities& opportunities;
+  EnemySight& sight;
   DecisionSettings settings;
   std::mt19937 random;
 

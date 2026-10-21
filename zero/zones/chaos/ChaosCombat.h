@@ -9,6 +9,7 @@ namespace zero {
 namespace chaos {
 
 struct CommitDecision;
+struct EnemySight;
 struct EnergyEstimate;
 struct Opportunities;
 struct PlayerHistory;
@@ -95,6 +96,8 @@ struct CombatSenses {
   Opportunities& opportunities;
   // Which enemy weapons the bot has noticed; null for a bot without a skill level, which sees every weapon at once.
   WeaponNotice* weapon_notice;
+  // Which enemies the bot can see, on its screen or radar.
+  EnemySight& sight;
 };
 
 std::unique_ptr<behavior::BehaviorNode> CreateCombatTree(const CombatSettings& settings, CombatSenses senses);

@@ -1,9 +1,12 @@
 #include "TargetLock.h"
 
+#include "EnemySight.h"
 #include "EnergyEstimate.h"
 #include "Opportunities.h"
 
 #include <math.h>
+
+#include <algorithm>
 
 #include <zero/CombatLogger.h>
 #include <zero/ZeroBot.h>
@@ -28,16 +31,23 @@ constexpr float kBattleQuietSeconds = 3.0f;
 constexpr float kBattleEnergy = 0.7f;
 constexpr u32 kMaxBattleTicks = 1000;
 constexpr u32 kBattleGapTicks = 300;
+// Searching for a locked enemy out of sight: for at most this long after last seeing it, flying to where it was then,
+// carried on by its velocity for up to kSearchLeadTicks; arriving within kSearchArrival tiles ends the search.
+constexpr u32 kSearchTicks = 300;
+constexpr u32 kSearchLeadTicks = 100;
+constexpr float kSearchArrival = 4.0f;
 
 TargetLock::TargetLock(ZeroBot& bot, float leash_distance, u32 lock_ticks, EnergyEstimate& estimate,
-                       Vector2f view_extent, std::optional<float> weak_enemy_energy, Opportunities& opportunities)
+                       Vector2f view_extent, std::optional<float> weak_enemy_energy, Opportunities& opportunities,
+                       EnemySight& sight)
     : bot(bot),
       leash_distance(leash_distance),
       lock_ticks(lock_ticks),
       estimate(estimate),
       view_extent(view_extent),
       weak_enemy_energy(weak_enemy_energy),
-      opportunities(opportunities) {}
+      opportunities(opportunities),
+      sight(sight) {}
 
 bool TargetLock::Ignored(u16 id, u32 now) const {
   auto it = ignore_until.find(id);
@@ -73,6 +83,29 @@ bool TargetLock::OnScreen(const Player& player, const Player& self) const {
 
 bool TargetLock::WithinLeash(const Player& player, const Player& self) const {
   return player.position.Distance(self.position) <= leash_distance;
+}
+
+bool TargetLock::Search(const Player& self, bool others_in_sight, u32 now) {
+  search_position.reset();
+  Player* enemy = bot.game->player_manager.GetPlayerById(locked);
+  auto seen = sight.LastSeen(locked);
+  // Dead, respawning, spectating or gone from the arena: nothing to search for.
+  if (!enemy || enemy->ship >= 8 || enemy->IsRespawning() || !seen) {
+    Release("gone");
+    return false;
+  }
+  u32 since = (u32)TICK_DIFF(now, seen->tick);
+  if (others_in_sight || since > kSearchTicks) {
+    Release("out of sight");
+    return false;
+  }
+  Vector2f where = seen->position + seen->velocity * ((float)std::min(since, kSearchLeadTicks) / 100.0f);
+  if (where.Distance(self.position) <= kSearchArrival) {
+    Release("lost");
+    return false;
+  }
+  search_position = where;
+  return true;
 }
 
 void TargetLock::UpdateBattle(const std::vector<Player*>& candidates, const Player& self, u32 now) {
@@ -182,10 +215,19 @@ Player* TargetLock::Choose(const std::vector<Player*>& candidates) {
     Note("third party");
   }
 
+  search_position.reset();
   if (locked != kNone && !battling) {
     Player* target = find(locked);
     if (!target) {
-      Release("gone");
+      if (Search(*self, !candidates.empty(), now)) {
+        // Looking for it: no target this tick.
+        if (current != kNone || !reason.empty()) {
+          if (bot.combat_logger) bot.combat_logger->WriteTarget(nullptr, "searching");
+          current = kNone;
+        }
+        reason.clear();
+        return nullptr;
+      }
     } else if (!WithinLeash(*target, *self)) {
       Release("too far");
     } else {

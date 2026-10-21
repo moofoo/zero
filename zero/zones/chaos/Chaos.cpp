@@ -10,6 +10,7 @@
 #include <zero/zones/ZoneController.h>
 #include <zero/zones/chaos/ChaosCombat.h>
 #include <zero/zones/chaos/CommitDecision.h>
+#include <zero/zones/chaos/EnemySight.h>
 #include <zero/zones/chaos/EnergyEstimate.h>
 #include <zero/zones/chaos/Opportunities.h>
 #include <zero/zones/chaos/PlayerHistory.h>
@@ -56,6 +57,16 @@ constexpr float kDefaultShotAwareness = 0.7f;
 // The bot's screen, in pixels: what it can see of weapons, shots and hits.
 constexpr int kDefaultViewWidth = 1920;
 constexpr int kDefaultViewHeight = 1080;
+// How long a player takes to notice an enemy that appears only on their radar (seconds), by Awareness: a veteran
+// watches the radar, a novice mostly the screen.
+struct AwarenessCurve {
+  float At(float awareness) const {
+    if (awareness <= 0.55f) return 3.0f + (0.55f - awareness) / 0.55f;
+    if (awareness <= 0.75f) return 3.0f + (1.5f - 3.0f) * (awareness - 0.55f) / 0.2f;
+    return 1.5f + (0.5f - 1.5f) * std::min(1.0f, (awareness - 0.75f) / 0.25f);
+  }
+};
+constexpr AwarenessCurve kRadarNotice;
 // A player reacts to a weapon they've noticed this long after, plus their perception delay (ReactionMs): deciding
 // which way to go.
 constexpr float kDodgeDecisionMs = 150.0f;
@@ -234,6 +245,12 @@ struct ChaosBehavior : public behavior::Behavior {
           (u32)(dodge_reaction * kMsPerTick));
     }
 
+    // Enemies on the bot's screen are seen at once; one only on its radar once it notices the dot, after a delay that
+    // Awareness sets (without a skill level, at once).
+    float radar_notice_seconds = awareness ? kRadarNotice.At(*awareness) : 0.0f;
+    sight = std::make_unique<EnemySight>(*ctx.bot, view_extent, (u32)(radar_notice_seconds * kTicksPerSecond));
+    Log(LogLevel::Info, "Noticing enemies on radar after %.1f s", radar_notice_seconds);
+
     float shot_awareness = awareness.value_or(kDefaultShotAwareness);
     estimate = std::make_unique<EnergyEstimate>(*ctx.bot, shot_awareness, view_extent);
     history = std::make_unique<PlayerHistory>(*ctx.bot);
@@ -252,12 +269,13 @@ struct ChaosBehavior : public behavior::Behavior {
     // notices any weapon.
     opportunities = std::make_unique<Opportunities>(*ctx.bot, judgement ? std::clamp(*judgement, 0.0f, 1.0f) : 1.0f,
                                                     awareness.value_or(1.0f), view_extent);
-    decision = std::make_unique<CommitDecision>(*ctx.bot, *estimate, *opportunities, decision_settings);
+    decision = std::make_unique<CommitDecision>(*ctx.bot, *estimate, *opportunities, *sight, decision_settings);
     Log(LogLevel::Info, "Commit decision: commit at %.2f, disengage below %.2f", decision_settings.commit_confidence,
         decision_settings.disengage_confidence);
 
     target_lock = std::make_unique<TargetLock>(*ctx.bot, target_leash, (u32)(target_lock_seconds * kTicksPerSecond),
-                                               *estimate, view_extent, settings.weak_enemy_energy, *opportunities);
+                                               *estimate, view_extent, settings.weak_enemy_energy, *opportunities,
+                                               *sight);
     Log(LogLevel::Info, "View %dx%d, awareness of shots and hits %.2f", view_width, view_height, shot_awareness);
 
     auto leash_distance = lookup.GetFloat("LeashDistance");
@@ -297,7 +315,7 @@ struct ChaosBehavior : public behavior::Behavior {
               .Child<PlayerChangeFrequencyNode>("request_freq")
               .End()
           .Composite(CreateCombatTree(settings, {*estimate, *history, *target_lock, *decision, *opportunities,
-                                                  weapon_notice.get()}))
+                                                  weapon_notice.get(), *sight}))
           .End();
     // clang-format on
 
@@ -308,6 +326,7 @@ struct ChaosBehavior : public behavior::Behavior {
   std::unique_ptr<EnergyEstimate> estimate;
   std::unique_ptr<PlayerHistory> history;
   std::unique_ptr<WeaponNotice> weapon_notice;
+  std::unique_ptr<EnemySight> sight;
   std::unique_ptr<Opportunities> opportunities;
   std::unique_ptr<TargetLock> target_lock;
   std::unique_ptr<CommitDecision> decision;

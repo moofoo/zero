@@ -1,5 +1,6 @@
 #include "CommitDecision.h"
 
+#include "EnemySight.h"
 #include "EnergyEstimate.h"
 #include "Opportunities.h"
 
@@ -98,9 +99,14 @@ static float NormalCdf(float x) {
   return 0.5f * erfcf(-x / sqrtf(2.0f));
 }
 
-CommitDecision::CommitDecision(ZeroBot& bot, EnergyEstimate& estimate, Opportunities& opportunities,
+CommitDecision::CommitDecision(ZeroBot& bot, EnergyEstimate& estimate, Opportunities& opportunities, EnemySight& sight,
                                DecisionSettings settings)
-    : bot(bot), estimate(estimate), opportunities(opportunities), settings(settings), random(std::random_device{}()) {}
+    : bot(bot),
+      estimate(estimate),
+      opportunities(opportunities),
+      sight(sight),
+      settings(settings),
+      random(std::random_device{}()) {}
 
 float CommitDecision::DamageRate(Player& shooter, Player& victim, bool shooter_is_self) {
   if (shooter.ship >= 8) return 0.0f;
@@ -155,12 +161,12 @@ float CommitDecision::WinChance(Player& self, Player& target, float self_energy)
   float self_recharge = own.recharge / 10.0f;
   float incoming = DamageRate(target, self, false);
 
-  // Other enemies near the bot add to the danger.
+  // Other enemies near the bot that it can see add to the danger.
   auto& players = bot.game->player_manager;
   for (size_t i = 0; i < players.player_count; ++i) {
     Player& other = players.players[i];
     if (other.id == self.id || other.id == target.id || other.ship >= 8 || other.frequency == self.frequency) continue;
-    if (other.position.Distance(self.position) > kThirdPartyDistance) continue;
+    if (other.position.Distance(self.position) > kThirdPartyDistance || !sight.Sees(other)) continue;
     incoming += DamageRate(other, self, false);
   }
 

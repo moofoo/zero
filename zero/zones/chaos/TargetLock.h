@@ -17,6 +17,7 @@ struct ZeroBot;
 
 namespace chaos {
 
+struct EnemySight;
 struct EnergyEstimate;
 struct Opportunities;
 
@@ -35,17 +36,22 @@ struct Opportunities;
 // - or, battle blasting (ticket 24): when the bot isn't fighting and two other enemies are trading hits on its screen
 //   at range, it may lock onto the weaker of them (by its spotting chance) and bomb their fight from a distance, until
 //   their fight ends, the bot is hit, or a few seconds pass; nothing else moves the lock meanwhile.
-// Without a lock, the target is the nearest enemy.
+// The bot chooses only among enemies it can see (EnemySight). A locked enemy that goes out of sight is searched for:
+// the bot flies to where it would be for up to kSearchTicks, while it sees no other enemy, and lets go if it gets
+// there and sees nothing. Without a lock, the target is the nearest enemy it can see.
 struct TargetLock : EventHandler<WeaponSelfDamageEvent>, EventHandler<WeaponHitEvent>, EventHandler<WeaponFireEvent> {
   static constexpr u16 kNone = 0xFFFF;
 
   // The estimate and view are what the bot knows of enemy energy and what's on its screen; weak_enemy_energy is unset
   // for a bot that doesn't go after weak enemies.
   TargetLock(ZeroBot& bot, float leash_distance, u32 lock_ticks, EnergyEstimate& estimate, Vector2f view_extent,
-             std::optional<float> weak_enemy_energy, Opportunities& opportunities);
+             std::optional<float> weak_enemy_energy, Opportunities& opportunities, EnemySight& sight);
 
-  // This tick's target among the enemies the bot could fight, or null when there are none.
+  // This tick's target among the enemies the bot could fight and can see, or null when there are none.
   Player* Choose(const std::vector<Player*>& candidates);
+
+  // Where to look for the locked enemy, out of sight, while searching for it.
+  std::optional<Vector2f> SearchPosition() const { return search_position; }
 
   // Whether the bot is bombing two other enemies' fight.
   bool Battling() const { return battling; }
@@ -67,6 +73,10 @@ struct TargetLock : EventHandler<WeaponSelfDamageEvent>, EventHandler<WeaponHitE
   Vector2f view_extent;
   std::optional<float> weak_enemy_energy;
   Opportunities& opportunities;
+  EnemySight& sight;
+
+  // Searching for the locked enemy out of sight: where it would be.
+  std::optional<Vector2f> search_position;
 
   // The locked enemy, and this tick's target (often the same, but without a lock the nearest enemy).
   u16 locked = kNone;
@@ -101,6 +111,8 @@ struct TargetLock : EventHandler<WeaponSelfDamageEvent>, EventHandler<WeaponHitE
   bool OnScreen(const Player& player, const Player& self) const;
   // Damage this player did to the bot in the last few seconds.
   int RecentDamage(u16 id, u32 now);
+  // Keeps searching for the locked enemy out of sight, or lets go of it; true while searching.
+  bool Search(const Player& self, bool others_in_sight, u32 now);
   // Starts, keeps or ends battle blasting, moving the lock when a battle starts.
   void UpdateBattle(const std::vector<Player*>& candidates, const Player& self, u32 now);
 };

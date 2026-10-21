@@ -1,6 +1,7 @@
 #include "ChaosCombat.h"
 
 #include "CommitDecision.h"
+#include "EnemySight.h"
 #include "EnergyEstimate.h"
 #include "Opportunities.h"
 #include "PlayerHistory.h"
@@ -362,10 +363,12 @@ struct RouteNode : public behavior::BehaviorNode {
   float corner_speed;
 };
 
-// Chooses the bot's target through its target lock, from the enemies it could fight: in a ship, not respawning, not
-// in a safe zone, reachable over the map, and not vanished from where it was last seen (as NearestMemoryTargetNode).
+// Chooses the bot's target through its target lock, from the enemies it could fight and can see (EnemySight): in a
+// ship, not respawning, not in a safe zone, reachable over the map, and not vanished from where it was last seen (as
+// NearestMemoryTargetNode). While the lock searches for an enemy out of sight, sets "search_position" and fails.
 struct LockedTargetNode : public behavior::BehaviorNode {
-  LockedTargetNode(TargetLock* lock, const char* player_key) : lock(lock), player_key(player_key) {}
+  LockedTargetNode(TargetLock* lock, EnemySight* sight, const char* player_key)
+      : lock(lock), sight(sight), player_key(player_key) {}
 
   behavior::ExecuteResult Execute(behavior::ExecuteContext& ctx) override {
     Game& game = *ctx.bot->game;
@@ -384,11 +387,18 @@ struct LockedTargetNode : public behavior::BehaviorNode {
       if (game.radar.InRadarView(player->position) && !game.player_manager.IsSynchronized(*player)) continue;
       if (!ctx.bot->bot_controller->region_registry->IsConnected(self->position, player->position)) continue;
       if (game.connection.map.GetTileId(player->position) == kTileIdSafe) continue;
+      if (!sight->Sees(*player)) continue;
 
       candidates.push_back(player);
     }
 
     Player* target = lock->Choose(candidates);
+    auto search = lock->SearchPosition();
+    if (search) {
+      ctx.blackboard.Set("search_position", *search);
+    } else {
+      ctx.blackboard.Erase("search_position");
+    }
     if (lock->Battling()) {
       ctx.blackboard.Set("battle", true);
     } else {
@@ -401,6 +411,7 @@ struct LockedTargetNode : public behavior::BehaviorNode {
   }
 
   TargetLock* lock;
+  EnemySight* sight;
   const char* player_key;
   std::vector<Player*> candidates;
 };
@@ -1459,7 +1470,7 @@ std::unique_ptr<behavior::BehaviorNode> CreateCombatTree(const CombatSettings& s
             .Sequence() // Find nearest target and either path to them or seek them directly.
                 .Sequence()
                     .Child<PlayerPositionQueryNode>("self_position")
-                    .Child<LockedTargetNode>(&senses.target_lock, "nearest_target")
+                    .Child<LockedTargetNode>(&senses.target_lock, &senses.sight, "nearest_target")
                     .Child<PlayerPositionQueryNode>("nearest_target", "nearest_target_position")
                     .Child<EnergyEstimateQueryNode>(&senses.estimate, "nearest_target", "nearest_target_energy", "nearest_target_energy_sd")
                     .Child<CommitDecisionNode>(&senses.decision, "nearest_target")
@@ -1588,6 +1599,10 @@ std::unique_ptr<behavior::BehaviorNode> CreateCombatTree(const CombatSettings& s
                             .End()
                         .End()
                     .End()
+                .End()
+            .Sequence() // Look for the enemy the bot lost sight of where it would be.
+                .Child<BlackboardSetQueryNode>("search_position")
+                .Child<GoToNode>("search_position")
                 .End()
             .Sequence()
                 .Child<FindNearestGreenNode>("nearest_green_position")

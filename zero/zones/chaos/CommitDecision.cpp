@@ -60,6 +60,11 @@ constexpr u32 kMinCommitTicks = 150;
 // A won bomb exchange: the bot's bomb within this many tiles of the target as it goes off, and the target's last bomb
 // at the bot, missed, within this many ticks before.
 constexpr float kWonBlast = 1.5f;
+// A commit begun further away than this (tiles) is a closing-in: it holds unless the odds fall below the disengage
+// threshold, and on arriving within this distance the fight is judged afresh, staying committed only if the odds
+// still clear the commit threshold. A commit up close also holds unless the odds fall below the disengage threshold:
+// small drifts don't break a finish.
+constexpr float kCommitRange = 25.0f;
 constexpr u32 kWonTicks = 300;
 
 const char* to_string(CombatMode mode) {
@@ -278,6 +283,18 @@ CombatMode CommitDecision::Choose(float chance, Player& self, Player& target) {
     return CombatMode::Recharge;
   }
 
+  if (mode == CombatMode::Commit) {
+    if (self.position.Distance(target.position) > kCommitRange) {
+      closing = true;
+      if (chance >= disengage) return CombatMode::Commit;
+    } else if (closing) {
+      closing = false;
+      if (chance >= commit - kHysteresis) return CombatMode::Commit;
+    } else if (chance >= disengage) {
+      return CombatMode::Commit;
+    }
+  }
+
   float commit_bar = mode == CombatMode::Commit ? commit - kHysteresis : commit + kHysteresis;
   float disengage_bar = mode == CombatMode::Disengage ? disengage + kHysteresis : disengage - kHysteresis;
   if (chance >= commit_bar && can_commit) return CombatMode::Commit;
@@ -321,6 +338,9 @@ void CommitDecision::HandleEvent(const WeaponHitEvent& event) {
 
 CombatMode CommitDecision::Decide(Player& self, Player& target) {
   u32 now = GetCurrentTick();
+  float distance = self.position.Distance(target.position);
+  // Arriving from a closing-in: judge the fight afresh now.
+  if (mode == CombatMode::Commit && closing && distance <= kCommitRange) next_decision_tick = now;
   if (TICK_GT(next_decision_tick, now)) return mode;
   next_decision_tick = now + settings.decision_ticks;
 
@@ -333,7 +353,10 @@ CombatMode CommitDecision::Decide(Player& self, Player& target) {
 
   win_chance = chance;
   CombatMode chosen = Choose(chance, self, target);
-  if (chosen == CombatMode::Commit && mode != CombatMode::Commit) commit_tick = now;
+  if (chosen == CombatMode::Commit && mode != CombatMode::Commit) {
+    commit_tick = now;
+    closing = distance > kCommitRange;
+  }
   mode = chosen;
   return mode;
 }

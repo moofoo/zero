@@ -865,6 +865,10 @@ struct ShotValueNode : public behavior::BehaviorNode {
   // Bullets keep only this share of the mode's reserve: a player keeps firing bullets as their energy falls, and a
   // bullet spends little at a time (ticket 22).
   static constexpr float kBulletReserveShare = 0.5f;
+  // Closing in on a commit (ticket 28), beyond this many tiles the bot fires bullets only at this hit chance or better
+  // (a slow target's counts), keeping its energy for the finish.
+  static constexpr float kClosingHoldFire = 20.0f;
+  static constexpr float kClosingMinHitChance = 0.3f;
 
   // With this much more than the reserve, energy is at its cheapest; at the reserve, its dearest.
   static constexpr float kPlenty = 0.3f;
@@ -907,6 +911,9 @@ struct ShotValueNode : public behavior::BehaviorNode {
     } else {
       float guns = ship.guns > 0 ? (float)ship.guns : 1.0f;
       float chance = BulletHitChance(distance) * speed_factor * slow_factor;
+      if (distance > kClosingHoldFire && chance < kClosingMinHitChance && CurrentMode(ctx) == CombatMode::Commit) {
+        return behavior::ExecuteResult::Failure;
+      }
       value = (chance < 1.0f ? chance : 1.0f) * BulletDamage(arena, guns);
       cost = ship_settings.BulletFireEnergy * guns;
     }
@@ -1027,8 +1034,8 @@ struct FlightPhaseNode : public behavior::BehaviorNode, EventHandler<WeaponFireE
           StartAim(now);
         }
       }
-    } else if (!dodging &&
-               TICK_DIFF(now, phase_start) >= (s32)(committing && !shadowing ? kMinClosingSteerTicks : kMinSteerTicks) &&
+    } else if (!dodging && TICK_DIFF(now, phase_start) >= (s32)(committing && !shadowing ? kMinClosingSteerTicks
+                                                                                        : kMinSteerTicks) &&
                ShotPossible(ctx, *self, target, now) && (!shadowing || shadow_off <= kShadowSlack * 0.5f)) {
       StartAim(now);
     }

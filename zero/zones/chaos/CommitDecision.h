@@ -113,6 +113,8 @@ struct CommitDecision : EventHandler<WeaponHitEvent>, EventHandler<WeaponSelfDam
   u32 next_decision_tick = 0;
   // When the bot last committed: a commit lasts a minimum time.
   u32 commit_tick = 0;
+  // Whether the commit is still closing in from beyond kCommitRange.
+  bool closing = false;
 
   // The chance the target runs out of energy before the bot does, if both fight on at fighting range, with the bot
   // at this energy.

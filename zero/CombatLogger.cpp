@@ -141,9 +141,11 @@ void CombatLogger::Update() {
 
   fprintf(file,
           "{\"e\":\"state\",\"tick\":%u,\"x\":%.2f,\"y\":%.2f,\"vx\":%.2f,\"vy\":%.2f,\"energy\":%d,"
-          "\"max_energy\":%u,\"hx\":%.3f,\"hy\":%.3f,\"thrust\":%d,\"fx\":%.2f,\"fy\":%.2f}\n",
+          "\"max_energy\":%u,\"hx\":%.3f,\"hy\":%.3f,\"thrust\":%d,\"fx\":%.2f,\"fy\":%.2f,\"cloak\":%d,"
+          "\"stealth\":%d}\n",
           tick, self->position.x, self->position.y, self->velocity.x, self->velocity.y, (int)self->energy,
-          bot.game->ship_controller.ship.energy, heading.x, heading.y, thrust, force.x, force.y);
+          bot.game->ship_controller.ship.energy, heading.x, heading.y, thrust, force.x, force.y,
+          (self->togglables & Status_Cloak) ? 1 : 0, (self->togglables & Status_Stealth) ? 1 : 0);
   fflush(file);
 }
 

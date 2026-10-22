@@ -147,6 +147,81 @@ struct PursuerNode : public behavior::BehaviorNode, EventHandler<WeaponSelfDamag
   bool turning = false;
 };
 
+// Cloak (ticket 29): a Spider hides with cloak and stealth, as far as it has them (cloak hides it on screen, stealth
+// on radar), while not under pressure, and switches them off under pressure to regenerate faster for the fight, as
+// players do. Under pressure: damage has passed between it and an enemy within kPressureTicks, it's committing on a
+// target within kPressureRange tiles, or its energy is below kPressureEnergy of max. A bot that doesn't manage its
+// cloak (a novice) hides only with no enemy around and keeps it on until a shot drops it, without re-cloaking in a
+// fight. Toggles are at least kToggleTicks apart. Firing drops cloak by itself. Always succeeds.
+struct CloakNode : public behavior::BehaviorNode, EventHandler<WeaponSelfDamageEvent>, EventHandler<WeaponHitEvent> {
+  static constexpr u32 kPressureTicks = 300;
+  static constexpr float kPressureRange = 20.0f;
+  static constexpr float kPressureEnergy = 0.6f;
+  static constexpr u32 kToggleTicks = 50;
+  static constexpr u8 kSpiderShip = 2;  // 0 is the Warbird
+
+  explicit CloakNode(bool manages) : manages(manages) {}
+
+  void HandleEvent(const WeaponSelfDamageEvent& event) override { last_damage_tick = GetCurrentTick(); }
+  void HandleEvent(const WeaponHitEvent& event) override {
+    if (self_id != 0xFFFF && event.weapon.player_id == self_id && event.target && event.target->id != self_id) {
+      last_damage_tick = GetCurrentTick();
+    }
+  }
+
+  behavior::ExecuteResult Execute(behavior::ExecuteContext& ctx) override {
+    Game& game = *ctx.bot->game;
+    Player* self = game.player_manager.GetSelf();
+    if (!self || self->ship >= 8) return behavior::ExecuteResult::Success;
+    self_id = self->id;
+    Ship& ship = game.ship_controller.ship;
+    // Spiders only, for now: other ships with stealth from a prize don't use it yet.
+    if (self->ship != kSpiderShip) return behavior::ExecuteResult::Success;
+    bool can_cloak = ship.capability & ShipCapability_Cloak;
+    bool can_stealth = ship.capability & ShipCapability_Stealth;
+    if (!can_cloak && !can_stealth) return behavior::ExecuteResult::Success;
+
+    u32 now = GetCurrentTick();
+    bool fighting = TICK_DIFF(now, last_damage_tick) <= (s32)kPressureTicks;
+    auto opt_target = ctx.blackboard.Value<Player*>("nearest_target");
+    bool has_target = opt_target && *opt_target;
+    bool cloaked = self->togglables & Status_Cloak;
+    bool stealthed = self->togglables & Status_Stealth;
+    bool hide_cloak, hide_stealth;
+    if (manages) {
+      bool closing = CurrentMode(ctx) == CombatMode::Commit && has_target &&
+                     (*opt_target)->position.Distance(self->position) <= kPressureRange;
+      bool low = self->energy < kPressureEnergy * ship.energy;
+      hide_cloak = hide_stealth = !(fighting || closing || low);
+    } else {
+      // A novice hides only with no enemy around, and keeps each toggle on once it is (until a shot drops cloak): it
+      // doesn't think to re-cloak in or after a fight, or to switch them off for the regeneration.
+      bool alone = !has_target && !fighting;
+      hide_cloak = cloaked || alone;
+      hide_stealth = stealthed || alone;
+    }
+    if (TICK_DIFF(now, last_toggle_tick) < (s32)kToggleTicks) return behavior::ExecuteResult::Success;
+
+    auto& input = *ctx.bot->bot_controller->input;
+    // Toggles take the key press and its action callback, as InputActionNode does.
+    if (can_cloak && cloaked != hide_cloak) {
+      input.SetAction(InputAction::Cloak, true);
+      input.OnAction(InputAction::Cloak);
+      last_toggle_tick = now;
+    } else if (can_stealth && stealthed != hide_stealth) {
+      input.SetAction(InputAction::Stealth, true);
+      input.OnAction(InputAction::Stealth);
+      last_toggle_tick = now;
+    }
+    return behavior::ExecuteResult::Success;
+  }
+
+  bool manages;
+  u16 self_id = 0xFFFF;
+  u32 last_damage_tick = 0;
+  u32 last_toggle_tick = 0;
+};
+
 // Recharging out of reach (ticket 30): beyond kOutOfReachShare of the retreat distance, the bot stops running and
 // recharges where it is, facing its enemy; a pursuer that keeps coming brings it back within reach or makes it turn.
 struct OutOfReachNode : public behavior::BehaviorNode {
@@ -947,6 +1022,9 @@ struct ShotValueNode : public behavior::BehaviorNode {
   // (a slow target's counts), keeping its energy for the finish.
   static constexpr float kClosingHoldFire = 20.0f;
   static constexpr float kClosingMinHitChance = 0.3f;
+  // A cloaked bot's opening shot (ticket 29).
+  static constexpr float kAmbushRange = 15.0f;
+  static constexpr float kAmbushBombFactor = 1.5f;
 
   // With this much more than the reserve, energy is at its cheapest; at the reserve, its dearest.
   static constexpr float kPlenty = 0.3f;
@@ -1017,6 +1095,12 @@ struct ShotValueNode : public behavior::BehaviorNode {
 
     // Energy's price for this shot: a bomb's never below its least efficiency.
     float price = bomb && worth < kMinBombEfficiency ? kMinBombEfficiency : worth;
+    // Cloaked (ticket 29), the first shot gives the bot away: it opens only within kAmbushRange, or with a bomb worth
+    // kAmbushBombFactor times the usual.
+    if ((self->togglables & Status_Cloak) && distance > kAmbushRange &&
+        !(bomb && value >= cost * price * kAmbushBombFactor)) {
+      return behavior::ExecuteResult::Failure;
+    }
     return value >= cost * price ? behavior::ExecuteResult::Success : behavior::ExecuteResult::Failure;
   }
 
@@ -1676,6 +1760,7 @@ std::unique_ptr<behavior::BehaviorNode> CreateCombatTree(const CombatSettings& s
             .InvertChild<ShipQueryNode>("request_ship")
             .Child<ShipRequestNode>("request_ship")
             .End()
+        .InvertChild<CloakNode>(settings.manages_cloak) // Cloak and stealth, every tick; never ends the selector.
         .Selector() // Choose to fight the player or follow waypoints.
             .Sequence() // Find nearest target and either path to them or seek them directly.
                 .Sequence()

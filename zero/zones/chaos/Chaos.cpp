@@ -96,6 +96,8 @@ constexpr JudgementRange kDamageJudgement = {0.4f, 0.05f};
 constexpr float kMineOnTrailJudgement = 0.5f;
 // From this Judgement up, a bot backing off turns on a pursuer that's catching it (novices keep running).
 constexpr float kTurnOnPursuerJudgement = 0.5f;
+// From this Judgement up, a bot switches cloak and stealth off under pressure (novices leave them on).
+constexpr float kManageCloakJudgement = 0.5f;
 
 // A float from the config, if the key is there.
 static std::optional<float> ReadOptionalFloat(Config& config, const std::string& group, const char* key) {
@@ -218,6 +220,7 @@ struct ChaosBehavior : public behavior::Behavior {
       settings.judgement_noise = kJudgementNoise.At(j);
       settings.mine_on_trail = j >= kMineOnTrailJudgement;
       settings.turns_on_pursuers = j >= kTurnOnPursuerJudgement;
+      settings.manages_cloak = j >= kManageCloakJudgement;
       decision_settings.patience = kPatience.At(j);
       decision_settings.judgement_noise = settings.judgement_noise;
       decision_settings.decision_ticks = (u32)(kDecisionMs.At(j) / kMsPerTick);

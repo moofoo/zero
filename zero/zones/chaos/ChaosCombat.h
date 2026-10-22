@@ -66,6 +66,9 @@ struct CombatSettings {
   bool mine_on_trail = false;
   // From Judgement: backing off and being chased down, turn on the pursuer (ticket 30). Sound judgement does.
   bool turns_on_pursuers = true;
+  // From Judgement: switch cloak and stealth off under pressure, for the regeneration (ticket 29). Sound judgement
+  // does; a novice leaves them on in a fight.
+  bool manages_cloak = true;
 
   // While backing off and pursued: fire cover shots back at the pursuer however slow, and lay mines in its path when
   // it's within this range (tiles) (style).

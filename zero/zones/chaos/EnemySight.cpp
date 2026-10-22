@@ -45,7 +45,8 @@ void EnemySight::HandleEvent(const BotController::UpdateEvent& event) {
     bool cloaked = !xradar && (player.togglables & Status_Cloak);
     bool stealthed = !xradar && (player.togglables & Status_Stealth);
     bool on_screen = in_game && !cloaked && OnScreen(*self, player);
-    bool on_radar = in_game && !cloaked && !stealthed && game.radar.InRadarView(player.position);
+    // Cloak hides a ship on screen, stealth on radar (as zero's own radar and screen do).
+    bool on_radar = in_game && !stealthed && game.radar.InRadarView(player.position);
 
     if (on_radar || on_screen) {
       if (!track.on_radar_since) track.on_radar_since = now;

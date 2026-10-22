@@ -16,8 +16,8 @@ struct ZeroBot;
 namespace chaos {
 
 // Which enemies the bot can see, as a player in its seat would: on its screen at once, unless cloaked; on its radar
-// (Continuum's radar window around the bot) once it has noticed the dot, after `radar_notice_ticks`, unless stealthed
-// or cloaked. XRadar sees through stealth and cloak. An enemy out of sight is remembered where it was last seen.
+// (Continuum's radar window around the bot) once it has noticed the dot, after `radar_notice_ticks`, unless stealthed.
+// XRadar sees through stealth and cloak. An enemy out of sight is remembered where it was last seen.
 struct EnemySight : EventHandler<BotController::UpdateEvent>, EventHandler<PlayerLeaveEvent> {
   struct Sighting {
     u32 tick;

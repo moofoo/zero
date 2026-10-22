@@ -910,8 +910,19 @@ struct ShotValueNode : public behavior::BehaviorNode {
       value = BombDamageShare(distance, lead_skill) * (arena.BombDamageLevel / 1000.0f) * speed_factor * slow_factor *
               bomb_appetite;
       cost = ship_settings.BombFireEnergy + ship_settings.BombFireEnergyUpgrade * level;
-      // What it costs the bot itself: its own blast, close in (ticket 28).
-      self_damage = BombSelfDamageShare(distance) * (arena.BombDamageLevel / 1000.0f);
+      // What it costs the bot itself: its own blast, close in (ticket 28), judged at the distance the bot will be from
+      // the target when the bomb gets there, at the speed it's closing.
+      float at_impact = distance;
+      if (opt_player && *opt_player) {
+        Vector2f direction = Normalize(to_target);
+        float target_radial = (*opt_player)->velocity.Dot(direction);
+        float closing = self->velocity.Dot(direction) - target_radial;
+        float bomb_closing = speed - target_radial;
+        if (closing > 0.0f && bomb_closing > 0.1f) {
+          at_impact = std::max(0.0f, distance - closing * distance / bomb_closing);
+        }
+      }
+      self_damage = BombSelfDamageShare(at_impact) * (arena.BombDamageLevel / 1000.0f);
     } else {
       float guns = ship.guns > 0 ? (float)ship.guns : 1.0f;
       float chance = BulletHitChance(distance) * speed_factor * slow_factor;
@@ -994,6 +1005,9 @@ struct FlightPhaseNode : public behavior::BehaviorNode, EventHandler<WeaponFireE
   static constexpr float kShadowSlack = 4.0f;
   static constexpr u32 kMaxShadowAimTicks = 300;
   // Closing beyond shadowing range, the bot steers longer between aim phases and aims more briefly, so it gets there.
+  // While its own bomb is in flight, a committing bot keeps at least the bomb's blast radius plus this many tiles from
+  // its target, matching the target's velocity rather than closing, so it doesn't fly into its own blast (ticket 28).
+  static constexpr float kBlastMargin = 2.0f;
   static constexpr u32 kMinClosingSteerTicks = 75;
   static constexpr u32 kMaxClosingAimTicks = 40;
 
@@ -1022,6 +1036,7 @@ struct FlightPhaseNode : public behavior::BehaviorNode, EventHandler<WeaponFireE
     bool committing = !dodging && CurrentMode(ctx) == CombatMode::Commit;
     bool shadowing = committing && self->position.Distance(target.position) <= kShadowRange;
     Vector2f shadow_change = shadowing ? ShadowVelocity(*self, target) - self->velocity : Vector2f();
+    bool holding_back = committing && NearOwnBlast(game, *self, target);
     float shadow_off = shadow_change.Length();
 
     if (aiming) {
@@ -1046,8 +1061,10 @@ struct FlightPhaseNode : public behavior::BehaviorNode, EventHandler<WeaponFireE
 
     auto& steering = ctx.bot->bot_controller->steering;
     if (aiming) {
-      // Shadowing, the bot keeps matching the target as far as its facing allows while it shoots.
+      // Shadowing, the bot keeps matching the target as far as its facing allows while it shoots; holding back from its
+      // own bomb's blast, it matches the target's velocity.
       if (shadowing) steering.force = shadow_change;
+      if (holding_back) steering.force = target.velocity - self->velocity;
       steering.rotation = 0.0f;
       steering.Face(game, *opt_aimshot);
       return behavior::ExecuteResult::Success;
@@ -1072,7 +1089,9 @@ struct FlightPhaseNode : public behavior::BehaviorNode, EventHandler<WeaponFireE
       // The movement's force is its wanted velocity less the bot's; its wanted velocity towards the target is kept.
       float radial = (move + self->velocity).Dot(toward);
       Vector2f wanted = toward * radial + across * cruise_speed;
-      if (shadowing) {
+      if (holding_back) {
+        wanted = target.velocity;
+      } else if (shadowing) {
         wanted = ShadowVelocity(*self, target);
       } else if (committing) {
         wanted = target.velocity + toward * kClosingSpeed;
@@ -1120,6 +1139,30 @@ struct FlightPhaseNode : public behavior::BehaviorNode, EventHandler<WeaponFireE
     bool bullet = distance <= kShotRange && !TICK_GT(ship.next_bullet_tick, now);
     bool bomb = ship.bombs > 0 && distance >= bomb_min_range && !TICK_GT(ship.next_bomb_tick, now);
     return bullet || bomb;
+  }
+
+  // Whether the bot, at the speed it's closing on its target, would be within the blast (plus kBlastMargin) of one of
+  // its own bombs in flight when that bomb reaches the target.
+  static bool NearOwnBlast(Game& game, const Player& self, const Player& target) {
+    Vector2f to_target = target.position - self.position;
+    float distance = to_target.Length();
+    if (distance <= 0.0f) return false;
+    float closing = (self.velocity - target.velocity).Dot(to_target * (1.0f / distance));
+    WeaponManager& weapons = game.weapon_manager;
+    for (size_t i = 0; i < weapons.weapon_count; ++i) {
+      const Weapon& weapon = weapons.weapons[i];
+      bool bomb = weapon.data.type == WeaponType::Bomb || weapon.data.type == WeaponType::ProximityBomb;
+      if (weapon.player_id != self.id || !bomb || weapon.data.alternate) continue;
+      float radius = (float)game.connection.settings.BombExplodePixels * (weapon.data.level + 1) / 16.0f;
+      // Time until the bomb reaches the target, at the speed it's closing on it.
+      Vector2f bomb_to_target = target.position - weapon.position;
+      float gap = bomb_to_target.Length();
+      float bomb_closing = gap > 0.0f ? (weapon.velocity - target.velocity).Dot(bomb_to_target * (1.0f / gap)) : 0.0f;
+      float flight = bomb_closing > 0.1f ? gap / bomb_closing : 0.0f;
+      float at_impact = distance - std::max(0.0f, closing) * flight;
+      if (at_impact < radius + kBlastMargin) return true;
+    }
+    return false;
   }
 
   // Shadowing: the target's velocity, as much of it as the bot's Piloting matches, plus a correction toward a point

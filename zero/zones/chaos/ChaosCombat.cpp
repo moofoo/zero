@@ -91,6 +91,80 @@ static float ModeReserve(CombatMode mode) {
   }
 }
 
+// The mode whose energy reserve the bot's shots keep: its own, except that a bot turning on a pursuer (ticket 30)
+// fires as freely as when pressuring.
+static CombatMode ShootingMode(behavior::ExecuteContext& ctx) {
+  return ctx.blackboard.Has("turning") ? CombatMode::Pressure : CurrentMode(ctx);
+}
+
+// Turning on a pursuer (ticket 30): while backing off or recharging, a pursuer within kTurnRange tiles that has been
+// closing at kTurnClosing tiles/s or more for kTurnClosingTicks and has hit the bot within kTurnHitTicks makes the bot
+// face it and fire while it keeps backing off (reverse thrust), unless its energy is below kTurnMinEnergy of max. Sets
+// "turning" while it does; always succeeds.
+struct PursuerNode : public behavior::BehaviorNode, EventHandler<WeaponSelfDamageEvent> {
+  static constexpr float kTurnRange = 20.0f;
+  static constexpr float kTurnClosing = 2.0f;
+  static constexpr u32 kTurnClosingTicks = 100;
+  static constexpr u32 kTurnHitTicks = 200;
+  static constexpr float kTurnMinEnergy = 0.25f;
+
+  void HandleEvent(const WeaponSelfDamageEvent& event) override { last_hit[event.shooter.id] = GetCurrentTick(); }
+
+  behavior::ExecuteResult Execute(behavior::ExecuteContext& ctx) override {
+    ctx.blackboard.Erase("turning");
+    Player* self = ctx.bot->game->player_manager.GetSelf();
+    auto opt_target = ctx.blackboard.Value<Player*>("nearest_target");
+    CombatMode mode = CurrentMode(ctx);
+    u32 now = GetCurrentTick();
+    if (!self || !opt_target || !*opt_target || (mode != CombatMode::Disengage && mode != CombatMode::Recharge)) {
+      closing_since.reset();
+      return behavior::ExecuteResult::Success;
+    }
+    const Player& pursuer = **opt_target;
+    Vector2f from_pursuer = self->position - pursuer.position;
+    float distance = from_pursuer.Length();
+    float closing = distance > 0.0f ? (pursuer.velocity - self->velocity).Dot(from_pursuer * (1.0f / distance)) : 0.0f;
+    if (distance > kTurnRange || closing < kTurnClosing) {
+      closing_since.reset();
+      return behavior::ExecuteResult::Success;
+    }
+    if (!closing_since) closing_since = now;
+    auto hit = last_hit.find(pursuer.id);
+    bool hit_recently = hit != last_hit.end() && TICK_DIFF(now, hit->second) <= (s32)kTurnHitTicks;
+    bool energy = self->energy >= kTurnMinEnergy * ctx.bot->game->ship_controller.ship.energy;
+    if (TICK_DIFF(now, *closing_since) >= (s32)kTurnClosingTicks && hit_recently && energy) {
+      ctx.blackboard.Set("turning", true);
+      if (!turning && ctx.bot->combat_logger) ctx.bot->combat_logger->WriteTactic("turn", pursuer.name);
+      turning = true;
+    } else {
+      turning = false;
+    }
+    return behavior::ExecuteResult::Success;
+  }
+
+  std::unordered_map<u16, u32> last_hit;
+  std::optional<u32> closing_since;
+  bool turning = false;
+};
+
+// Recharging out of reach (ticket 30): beyond kOutOfReachShare of the retreat distance, the bot stops running and
+// recharges where it is, facing its enemy; a pursuer that keeps coming brings it back within reach or makes it turn.
+struct OutOfReachNode : public behavior::BehaviorNode {
+  static constexpr float kOutOfReachShare = 0.8f;
+  explicit OutOfReachNode(float retreat_distance) : retreat_distance(retreat_distance) {}
+
+  behavior::ExecuteResult Execute(behavior::ExecuteContext& ctx) override {
+    Player* self = ctx.bot->game->player_manager.GetSelf();
+    auto opt_target = ctx.blackboard.Value<Player*>("nearest_target");
+    if (!self || !opt_target || !*opt_target) return behavior::ExecuteResult::Failure;
+    float distance = self->position.Distance((*opt_target)->position);
+    float retreat = retreat_distance > 0.0f ? retreat_distance : ctx.blackboard.ValueOr<float>("leash_distance", 35.0f);
+    return distance >= kOutOfReachShare * retreat ? behavior::ExecuteResult::Success : behavior::ExecuteResult::Failure;
+  }
+
+  float retreat_distance;
+};
+
 // Writes a blackboard float multiplied by a constant to another key.
 struct ScaleNode : public behavior::BehaviorNode {
   ScaleNode(const char* input_key, float scale, const char* output_key)
@@ -936,7 +1010,7 @@ struct ShotValueNode : public behavior::BehaviorNode {
     value -= self_damage;
 
     // What energy is worth now, from how much the bot has over its mode's reserve.
-    float reserve = ModeReserve(CurrentMode(ctx)) * (bomb ? 1.0f : kBulletReserveShare);
+    float reserve = ModeReserve(ShootingMode(ctx)) * (bomb ? 1.0f : kBulletReserveShare);
     float spare = self->energy / (float)ship.energy - reserve;
     if (spare <= 0.0f) return behavior::ExecuteResult::Failure;
     float worth = spare >= kPlenty ? kCheapest : kDearest + (kCheapest - kDearest) * (spare / kPlenty);
@@ -998,7 +1072,7 @@ struct FlightPhaseNode : public behavior::BehaviorNode, EventHandler<WeaponFireE
   // tiles off to the side of its heading, correcting at kShadowGain per second. While shadowing it keeps aiming and
   // firing until the velocity it needs is more than kShadowSlack tiles/s off, then steers until within half that.
   static constexpr float kClosingSpeed = 12.0f;
-  static constexpr float kShadowRange = 10.0f;
+  static constexpr float kShadowRange = 15.0f;
   static constexpr float kShadowOffset = 6.0f;
   static constexpr float kShadowGain = 1.5f;
   static constexpr float kShadowMaxCorrection = 12.0f;
@@ -1033,6 +1107,15 @@ struct FlightPhaseNode : public behavior::BehaviorNode, EventHandler<WeaponFireE
     if (TICK_DIFF(now, last_run_tick) > (s32)kGapTicks) StartSteer(now);
     last_run_tick = now;
     bool dodging = ctx.blackboard.Has("dodging");
+    auto& steering_now = ctx.bot->bot_controller->steering;
+    if (!dodging && ctx.blackboard.Has("turning")) {
+      // Turning on a pursuer: face it to shoot while the backing-off force reverses away from it.
+      steering_now.rotation = 0.0f;
+      steering_now.Face(game, *opt_aimshot);
+      steering_now.thrust_threshold = kDodgeAlignedCos;
+      aiming = true;
+      return behavior::ExecuteResult::Success;
+    }
     bool committing = !dodging && CurrentMode(ctx) == CombatMode::Commit;
     bool shadowing = committing && self->position.Distance(target.position) <= kShadowRange;
     Vector2f shadow_change = shadowing ? ShadowVelocity(*self, target) - self->velocity : Vector2f();
@@ -1134,7 +1217,7 @@ struct FlightPhaseNode : public behavior::BehaviorNode, EventHandler<WeaponFireE
 
   bool ShotPossible(behavior::ExecuteContext& ctx, const Player& self, const Player& target, u32 now) {
     Ship& ship = ctx.bot->game->ship_controller.ship;
-    if (self.energy <= ModeReserve(CurrentMode(ctx)) * ship.energy) return false;
+    if (self.energy <= ModeReserve(ShootingMode(ctx)) * ship.energy) return false;
     float distance = self.position.Distance(target.position);
     bool bullet = distance <= kShotRange && !TICK_GT(ship.next_bullet_tick, now);
     bool bomb = ship.bombs > 0 && distance >= bomb_min_range && !TICK_GT(ship.next_bomb_tick, now);
@@ -1338,6 +1421,12 @@ static std::unique_ptr<behavior::BehaviorNode> CreateMovement(const CombatSettin
             .Child<CombatModeIsNode>(CombatMode::Commit)
             .Child<FaceNode>("aimshot")
             .Child<SeekNode>("aimshot", 0.0f, SeekNode::DistanceResolveType::Static)
+            .End()
+        .Sequence() // Recharging out of reach: stay put, facing the enemy.
+            .Child<CombatModeIsNode>(CombatMode::Recharge)
+            .InvertChild<BlackboardSetQueryNode>("turning")
+            .Child<OutOfReachNode>(settings.retreat_distance.value_or(0.0f))
+            .Child<FaceNode>("aimshot")
             .End()
         .Sequence()
             .Child<CombatModeIsNode>(CombatMode::Disengage, CombatMode::Recharge)
@@ -1595,6 +1684,9 @@ std::unique_ptr<behavior::BehaviorNode> CreateCombatTree(const CombatSettings& s
                     .Child<PlayerPositionQueryNode>("nearest_target", "nearest_target_position")
                     .Child<EnergyEstimateQueryNode>(&senses.estimate, "nearest_target", "nearest_target_energy", "nearest_target_energy_sd")
                     .Child<CommitDecisionNode>(&senses.decision, &senses.target_lock, "nearest_target")
+                    .Composite(settings.turns_on_pursuers
+                                   ? std::unique_ptr<BehaviorNode>(std::make_unique<PursuerNode>())
+                                   : std::unique_ptr<BehaviorNode>(std::make_unique<PassNode>()))
                     .End()
                 .Sequence(CompositeDecorator::Success) // If we have a portal but no location, lay one down.
                     .Child<ShipItemCountThresholdNode>(ShipItemType::Portal, 1)

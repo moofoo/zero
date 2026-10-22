@@ -64,6 +64,8 @@ struct CombatSettings {
   float judgement_noise = 0.0f;
   // From Judgement: while pursued, lay a mine only when the pursuer is on the bot's trail.
   bool mine_on_trail = false;
+  // From Judgement: backing off and being chased down, turn on the pursuer (ticket 30). Sound judgement does.
+  bool turns_on_pursuers = true;
 
   // While backing off and pursued: fire cover shots back at the pursuer however slow, and lay mines in its path when
   // it's within this range (tiles) (style).

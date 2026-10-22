@@ -58,7 +58,7 @@ struct DecisionSettings {
   u32 decision_ticks = 10;
   // Where a backing-off bot stops (tiles), and the fraction of max energy recharging stops at.
   float retreat_distance = 35.0f;
-  float recharge_to = 0.9f;
+  float recharge_to = 0.65f;
   // The bot's LeadSkill, for its own bombs' expected damage (BombDamageShare).
   float lead_skill = 1.0f;
 };

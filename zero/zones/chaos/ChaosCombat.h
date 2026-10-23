@@ -1,9 +1,11 @@
 #pragma once
 
 #include <zero/behavior/BehaviorTree.h>
+#include <zero/zones/chaos/Places.h>
 
 #include <memory>
 #include <optional>
+#include <vector>
 
 namespace zero {
 namespace chaos {
@@ -22,6 +24,8 @@ struct WeaponNotice;
 // style), then [Chaos], and a value set in none keeps the built-in number. A trait whose value is unset (dodge, the
 // weak-enemy switch, bomb overlap, shot spread) is left out.
 struct CombatSettings {
+  // Places on the map to roam between (ticket 09); without any, the bot patrols the Waypoints route.
+  std::vector<Place> places;
   // Back off to this distance from the enemy (tiles); without it, to the leash distance.
   std::optional<float> retreat_distance;
   // Switch to the weakest enemy on screen whose estimated energy is below this (the target lock), and stay on it.

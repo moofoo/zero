@@ -1690,10 +1690,129 @@ static std::unique_ptr<behavior::BehaviorNode> CreateAccept(const CombatSettings
                                       settings.damage_judgement, settings.judgement_noise);
 }
 
+// Roaming between places (ticket 09): the bot picks a place by its motive's tag weights, flies to a random open
+// point in it, lingers there kLingerMinTicks to kLingerMaxTicks moving to another point inside, then picks again. A
+// place visited recently is less likely (its draw recovers over kRecencyTicks), one far off a little less, and the
+// place it just left not at all; a place it can't reach within kGiveUpTicks is given up. Sets "roam_position"; fails
+// without places.
+struct PlaceRoamNode : public behavior::BehaviorNode {
+  static constexpr u32 kLingerMinTicks = 200;
+  static constexpr u32 kLingerMaxTicks = 600;
+  static constexpr float kRecencyTicks = 9000.0f;
+  static constexpr u32 kGiveUpTicks = 6000;
+  static constexpr float kArrival = 5.0f;
+  static constexpr float kFarTiles = 500.0f;
+  static constexpr float kPointShare = 0.6f;  // points are within this share of the place's radius
+
+  PlaceRoamNode(const std::vector<Place>* places, TagWeights weights)
+      : places(places), weights(std::move(weights)), random(std::random_device{}()) {}
+
+  behavior::ExecuteResult Execute(behavior::ExecuteContext& ctx) override {
+    Player* self = ctx.bot->game->player_manager.GetSelf();
+    if (!self || self->ship >= 8 || places->empty()) return behavior::ExecuteResult::Failure;
+    u32 now = GetCurrentTick();
+    if (last_visit.size() != places->size()) last_visit.assign(places->size(), 0);
+    // Respawned or back from a fight far off: pick afresh.
+    if (current >= 0 && (TICK_DIFF(now, last_run) > 300 || TICK_DIFF(now, chose_at) > (s32)kGiveUpTicks)) current = -1;
+    last_run = now;
+    if (current < 0) Choose(ctx, *self, now);
+    if (current < 0) return behavior::ExecuteResult::Failure;
+
+    if (self->position.Distance(point) <= kArrival) {
+      if (!lingering) {
+        lingering = true;
+        linger_until = now + std::uniform_int_distribution<u32>(kLingerMinTicks, kLingerMaxTicks)(random);
+        PickPoint(ctx, *self, (*places)[current]);
+      } else if (!TICK_GT(linger_until, now)) {
+        last_visit[current] = now;
+        Choose(ctx, *self, now);
+      } else {
+        PickPoint(ctx, *self, (*places)[current]);
+      }
+    }
+    if (current < 0) return behavior::ExecuteResult::Failure;
+    ctx.blackboard.Set("roam_position", point);
+    return behavior::ExecuteResult::Success;
+  }
+
+  void Choose(behavior::ExecuteContext& ctx, const Player& self, u32 now) {
+    std::vector<float> draws(places->size(), 0.0f);
+    float total = 0.0f;
+    for (size_t i = 0; i < places->size(); ++i) {
+      const Place& place = (*places)[i];
+      if ((int)i == current) continue;
+      float want = PlaceWant(place, weights);
+      if (want <= 0.0f) continue;
+      float recency = last_visit[i] == 0 ? 1.0f : 1.0f - expf(-(float)TICK_DIFF(now, last_visit[i]) / kRecencyTicks);
+      float distance = place.center.Distance(self.position);
+      float far = distance < place.radius ? 0.3f : 1.0f / (1.0f + distance / kFarTiles);
+      draws[i] = want * std::max(recency, 0.02f) * far;
+      total += draws[i];
+    }
+    lingering = false;
+    if (total <= 0.0f) {
+      current = -1;
+      return;
+    }
+    float pick = std::uniform_real_distribution<float>(0.0f, total)(random);
+    for (size_t i = 0; i < draws.size(); ++i) {
+      pick -= draws[i];
+      if (draws[i] > 0.0f && pick <= 0.0f) {
+        current = (int)i;
+        break;
+      }
+    }
+    chose_at = now;
+    PickPoint(ctx, self, (*places)[current]);
+    if (ctx.bot->combat_logger) ctx.bot->combat_logger->WriteTactic("roam", (*places)[current].name.c_str());
+  }
+
+  // A random open point in the place that the bot can get to, or its centre.
+  void PickPoint(behavior::ExecuteContext& ctx, const Player& self, const Place& place) {
+    auto& map = ctx.bot->game->GetMap();
+    auto& regions = *ctx.bot->bot_controller->region_registry;
+    std::uniform_real_distribution<float> unit(-1.0f, 1.0f);
+    for (int attempt = 0; attempt < 30; ++attempt) {
+      Vector2f offset(unit(random), unit(random));
+      if (offset.LengthSq() > 1.0f) continue;
+      Vector2f candidate = place.center + offset * (place.radius * kPointShare);
+      if (candidate.x < 1 || candidate.y < 1 || candidate.x > 1022 || candidate.y > 1022) continue;
+      if (map.IsSolid((u16)candidate.x, (u16)candidate.y, self.frequency)) continue;
+      if (!regions.IsConnected(self.position, candidate)) continue;
+      point = candidate;
+      return;
+    }
+    point = place.center;
+  }
+
+  const std::vector<Place>* places;
+  TagWeights weights;
+  std::mt19937 random;
+  std::vector<u32> last_visit;
+  int current = -1;
+  Vector2f point;
+  bool lingering = false;
+  u32 linger_until = 0;
+  u32 chose_at = 0;
+  u32 last_run = 0;
+};
+
 // Following the patrol route: today's way (face each waypoint, arrive, switch within 15 tiles), or a RouteNode style.
 static std::unique_ptr<behavior::BehaviorNode> CreatePatrol(const CombatSettings& settings) {
   using namespace behavior;
   BehaviorBuilder builder;
+
+  if (!settings.places.empty()) {
+    // clang-format off
+    builder
+      .Sequence() // Roam between places.
+          .Child<PlaceRoamNode>(&settings.places, RoamerWeights())
+          .Child<GoToNode>("roam_position")
+          .Child<RenderPathNode>(Vector3f(0.0f, 1.0f, 0.5f))
+          .End();
+    // clang-format on
+    return builder.Build();
+  }
 
   if (settings.navigation == (int)Navigation::Classic) {
     // clang-format off

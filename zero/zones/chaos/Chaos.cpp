@@ -300,6 +300,8 @@ struct ChaosBehavior : public behavior::Behavior {
     }
 
     ctx.blackboard.Set("waypoints", waypoints);
+    settings.places = ReadPlaces(*ctx.bot->config);
+    if (!settings.places.empty()) Log(LogLevel::Info, "Roaming %zu places", settings.places.size());
 
     // Chase greens like a player: anywhere while the ship still needs upgrades, then only nearby ones.
     float green_upgrade_target = lookup.GetFloat("GreenUpgradeTarget").value_or(kDefaultGreenUpgradeTarget);

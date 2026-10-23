@@ -17,6 +17,7 @@ struct ZeroBot;
 
 namespace chaos {
 
+struct DeathMemory;
 struct EnemySight;
 struct EnergyEstimate;
 struct Opportunities;
@@ -69,6 +70,9 @@ struct TargetLock : EventHandler<WeaponSelfDamageEvent>, EventHandler<WeaponHitE
 
   // Whether this bot stalks at all (a veteran's Judgement): set at start-up.
   bool stalker = true;
+  // What the bot remembers of its deaths, for a grudge against its killer (ticket 09); null without a motive that
+  // holds grudges.
+  DeathMemory* memory = nullptr;
 
   void HandleEvent(const WeaponSelfDamageEvent& event) override;
   void HandleEvent(const WeaponHitEvent& event) override;

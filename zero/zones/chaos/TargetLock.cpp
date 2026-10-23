@@ -1,6 +1,7 @@
 #include "TargetLock.h"
 
 #include "EnemySight.h"
+#include "Motives.h"
 #include "EnergyEstimate.h"
 #include "Opportunities.h"
 
@@ -235,6 +236,16 @@ Player* TargetLock::Choose(const std::vector<Player*>& candidates) {
     if (locked != committed) {
       locked = committed;
       Note("committed");
+    }
+    last_contact[locked] = now;
+    holding = true;
+  }
+  // A grudge (ticket 09): the killer in sight takes the lock, and keeps it as a commit does.
+  auto grudge = memory ? memory->Grudge() : std::nullopt;
+  if (!holding && grudge && !battling && find(*grudge)) {
+    if (locked != *grudge) {
+      locked = *grudge;
+      Note("grudge");
     }
     last_contact[locked] = now;
     holding = true;

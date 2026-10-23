@@ -11,6 +11,7 @@
 #include <zero/zones/chaos/ChaosCombat.h>
 #include <zero/zones/chaos/CommitDecision.h>
 #include <zero/zones/chaos/EnemySight.h>
+#include <zero/zones/chaos/Motives.h>
 #include <zero/zones/chaos/EnergyEstimate.h>
 #include <zero/zones/chaos/Opportunities.h>
 #include <zero/zones/chaos/PlayerHistory.h>
@@ -20,12 +21,43 @@
 #include <algorithm>
 #include <memory>
 #include <optional>
+#include <random>
 #include <string>
 #include <string_view>
 #include <vector>
 
 namespace zero {
 namespace chaos {
+
+// Draws a motive from weights written "grudge 0.3, roam 0.7"; unknown names and bad weights are skipped.
+static Motive DrawMotive(std::string_view text) {
+  std::vector<std::pair<Motive, float>> weights;
+  float total = 0.0f;
+  std::string list(text);
+  size_t start = 0;
+  while (start <= list.size()) {
+    size_t end = list.find(',', start);
+    std::string item = list.substr(start, end == std::string::npos ? std::string::npos : end - start);
+    char name[32] = {};
+    float weight = 0.0f;
+    if (sscanf(item.c_str(), " %31s %f", name, &weight) == 2 && weight > 0.0f) {
+      if (auto motive = ParseMotive(name)) {
+        weights.emplace_back(*motive, weight);
+        total += weight;
+      }
+    }
+    if (end == std::string::npos) break;
+    start = end + 1;
+  }
+  if (total <= 0.0f) return Motive::Roam;
+  static std::mt19937 random(std::random_device{}());
+  float pick = std::uniform_real_distribution<float>(0.0f, total)(random);
+  for (auto& [motive, weight] : weights) {
+    pick -= weight;
+    if (pick <= 0.0f) return motive;
+  }
+  return weights.back().first;
+}
 
 // Parses waypoints written as "{ x, y }; { x, y }; ...".
 static std::vector<Vector2f> ParseWaypoints(std::string_view text) {
@@ -301,6 +333,23 @@ struct ChaosBehavior : public behavior::Behavior {
 
     ctx.blackboard.Set("waypoints", waypoints);
     settings.places = ReadPlaces(*ctx.bot->config);
+
+    // The bot's motive (ticket 09): --motive, else drawn from the Motives weights ("grudge 0.3, roam 0.7") of its
+    // preset, ship or [Chaos], else roam.
+    Motive motive = Motive::Roam;
+    std::string_view motive_arg = ctx.bot->args->GetValue({"motive"});
+    if (!motive_arg.empty()) {
+      motive = ParseMotive(motive_arg).value_or(Motive::Roam);
+      if (!ParseMotive(motive_arg)) Log(LogLevel::Warning, "Unknown motive %.*s: roaming", (int)motive_arg.size(),
+                                        motive_arg.data());
+    } else if (auto weights = lookup.Get("Motives")) {
+      motive = DrawMotive(*weights);
+    }
+    memory = std::make_unique<DeathMemory>(*ctx.bot, motive);
+    target_lock->memory = memory.get();
+    decision->memory = memory.get();
+    Log(LogLevel::Info, "Motive: %s", to_string(motive));
+    if (ctx.bot->combat_logger) ctx.bot->combat_logger->WriteTactic("motive", to_string(motive));
     if (!settings.places.empty()) Log(LogLevel::Info, "Roaming %zu places", settings.places.size());
 
     // Chase greens like a player: anywhere while the ship still needs upgrades, then only nearby ones.
@@ -327,7 +376,7 @@ struct ChaosBehavior : public behavior::Behavior {
               .Child<PlayerChangeFrequencyNode>("request_freq")
               .End()
           .Composite(CreateCombatTree(settings, {*estimate, *history, *target_lock, *decision, *opportunities,
-                                                  weapon_notice.get(), *sight}))
+                                                  weapon_notice.get(), *sight, *memory}))
           .End();
     // clang-format on
 
@@ -339,6 +388,7 @@ struct ChaosBehavior : public behavior::Behavior {
   std::unique_ptr<PlayerHistory> history;
   std::unique_ptr<WeaponNotice> weapon_notice;
   std::unique_ptr<EnemySight> sight;
+  std::unique_ptr<DeathMemory> memory;
   std::unique_ptr<Opportunities> opportunities;
   std::unique_ptr<TargetLock> target_lock;
   std::unique_ptr<CommitDecision> decision;

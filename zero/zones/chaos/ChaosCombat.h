@@ -11,6 +11,7 @@ namespace zero {
 namespace chaos {
 
 struct CommitDecision;
+struct DeathMemory;
 struct EnemySight;
 struct EnergyEstimate;
 struct Opportunities;
@@ -107,6 +108,8 @@ struct CombatSenses {
   WeaponNotice* weapon_notice;
   // Which enemies the bot can see, on its screen or radar.
   EnemySight& sight;
+  // What the bot remembers of its deaths, for its motive (ticket 09).
+  DeathMemory& memory;
 };
 
 std::unique_ptr<behavior::BehaviorNode> CreateCombatTree(const CombatSettings& settings, CombatSenses senses);

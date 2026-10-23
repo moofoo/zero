@@ -15,6 +15,7 @@ struct ZeroBot;
 
 namespace chaos {
 
+struct DeathMemory;
 struct EnemySight;
 struct EnergyEstimate;
 struct Opportunities;
@@ -82,6 +83,10 @@ struct CommitDecision : EventHandler<WeaponHitEvent>, EventHandler<WeaponSelfDam
 
   // The mode for this tick, re-deciding when due.
   CombatMode Decide(Player& self, Player& target);
+  // What the bot remembers of its deaths: against an enemy it holds a grudge against, it commits more readily and
+  // backs off later (ticket 09). Null without a motive that holds grudges.
+  DeathMemory* memory = nullptr;
+
   // Commits now, against this target, whatever the odds: a stalking Spider's strike (ticket 29).
   CombatMode Strike(Player& self, Player& target);
 

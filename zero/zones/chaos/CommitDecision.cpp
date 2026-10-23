@@ -2,6 +2,7 @@
 
 #include "EnemySight.h"
 #include "EnergyEstimate.h"
+#include "Motives.h"
 #include "Opportunities.h"
 #include "WeaponNotice.h"
 
@@ -65,6 +66,10 @@ constexpr float kWonBlast = 1.5f;
 // still clear the commit threshold. A commit up close also holds unless the odds fall below the disengage threshold:
 // small drifts don't break a finish.
 constexpr float kCommitRange = 25.0f;
+// Against the enemy it holds a grudge against, the bot's commit and disengage thresholds are this much lower. Zero: a
+// grudge bot hunts its killer but fights it with its usual judgement (with 0.1 it died twice as often as a roamer and
+// settled few more grudges, ticket 09).
+constexpr float kGrudgeAppetite = 0.0f;
 // A stalking Spider's strike holds the commit this long (ticks), unless its own energy falls below kStrikeAbortEnergy
 // of max: time to close in and fire (ticket 29).
 constexpr u32 kStrikeTicks = 500;
@@ -263,6 +268,11 @@ float CommitDecision::WinChance(Player& self, Player& target, float self_energy)
 CombatMode CommitDecision::Choose(float chance, Player& self, Player& target) {
   float commit = settings.commit_confidence + settings.patience;
   float disengage = settings.disengage_confidence + settings.patience;
+  auto grudge = memory ? memory->Grudge() : std::nullopt;
+  if (grudge && *grudge == target.id) {
+    commit -= kGrudgeAppetite;
+    disengage -= kGrudgeAppetite;
+  }
   float middle = (commit + disengage) / 2.0f;
   float max_energy = (float)bot.game->ship_controller.ship.energy;
   bool can_commit = self.energy >= settings.commit_energy * max_energy;

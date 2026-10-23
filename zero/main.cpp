@@ -158,6 +158,7 @@ static void PrintUsage(std::string_view path) {
       "--events\t\t\twrites this bot's combat events (JSON lines) to the given file\n"
       "--events-interval\t\thow often (ticks) the combat events record position (default 50)\n"
       "--aggression\t\t\tChaos: plays the [Aggression.<name>] preset from the config\n"
+      "--motive\t\t\tChaos: the bot's motive (roam, grudge, coward)\n"
       "-l, --loglevel\t\t\toverrides log level\n"
       "\t\t\t\tvalues: j, d, i, w, e\n"
 #ifdef GLFW_AVAILABLE

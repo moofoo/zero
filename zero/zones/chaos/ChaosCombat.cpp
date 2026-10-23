@@ -2,6 +2,7 @@
 
 #include "CommitDecision.h"
 #include "EnemySight.h"
+#include "Motives.h"
 #include "EnergyEstimate.h"
 #include "Opportunities.h"
 #include "PlayerHistory.h"
@@ -1690,6 +1691,40 @@ static std::unique_ptr<behavior::BehaviorNode> CreateAccept(const CombatSettings
                                       settings.damage_judgement, settings.judgement_noise);
 }
 
+// Hunting (ticket 09, grudge): while the bot holds a grudge and has no target, it heads for where it last saw its
+// killer within kSeenTicks, else back to where it died, and once there roams from there (pulled toward it). Sets or
+// clears "hunt_position"; always succeeds.
+struct HuntNode : public behavior::BehaviorNode {
+  static constexpr u32 kSeenTicks = 6000;
+  static constexpr float kArrival = 10.0f;
+
+  HuntNode(DeathMemory* memory, EnemySight* sight) : memory(memory), sight(sight) {}
+
+  behavior::ExecuteResult Execute(behavior::ExecuteContext& ctx) override {
+    ctx.blackboard.Erase("hunt_position");
+    Player* self = ctx.bot->game->player_manager.GetSelf();
+    auto grudge = memory->Grudge();
+    if (!self || self->ship >= 8 || !grudge || !memory->Last()) return behavior::ExecuteResult::Success;
+    u32 now = GetCurrentTick();
+    auto seen = sight->LastSeen(*grudge);
+    if (seen && TICK_DIFF(now, seen->tick) <= (s32)kSeenTicks) {
+      ctx.blackboard.Set("hunt_position", seen->position);
+      return behavior::ExecuteResult::Success;
+    }
+    if (memory->returned) return behavior::ExecuteResult::Success;
+    Vector2f died = memory->Last()->position;
+    if (self->position.Distance(died) <= kArrival) {
+      memory->returned = true;
+      return behavior::ExecuteResult::Success;
+    }
+    ctx.blackboard.Set("hunt_position", died);
+    return behavior::ExecuteResult::Success;
+  }
+
+  DeathMemory* memory;
+  EnemySight* sight;
+};
+
 // Roaming between places (ticket 09): the bot picks a place by its motive's tag weights, flies to a random open
 // point in it, lingers there kLingerMinTicks to kLingerMaxTicks moving to another point inside, then picks again. A
 // place visited recently is less likely (its draw recovers over kRecencyTicks), one far off a little less, and the
@@ -1704,8 +1739,14 @@ struct PlaceRoamNode : public behavior::BehaviorNode {
   static constexpr float kFarTiles = 500.0f;
   static constexpr float kPointShare = 0.6f;  // points are within this share of the place's radius
 
-  PlaceRoamNode(const std::vector<Place>* places, TagWeights weights)
-      : places(places), weights(std::move(weights)), random(std::random_device{}()) {}
+  // Where the bot last died pulls (+) or pushes (-) its choice of place for kPullTicks after (ticket 09): a place's
+  // draw is scaled by 1 + 2 * pull * nearness, nearness falling off over kPullRadius tiles, at least kMinPull.
+  static constexpr u32 kPullTicks = 12000;
+  static constexpr float kPullRadius = 80.0f;
+  static constexpr float kMinPull = 0.05f;
+
+  PlaceRoamNode(const std::vector<Place>* places, TagWeights weights, const DeathMemory* memory, float pull)
+      : places(places), weights(std::move(weights)), memory(memory), pull(pull), random(std::random_device{}()) {}
 
   behavior::ExecuteResult Execute(behavior::ExecuteContext& ctx) override {
     Player* self = ctx.bot->game->player_manager.GetSelf();
@@ -1746,7 +1787,7 @@ struct PlaceRoamNode : public behavior::BehaviorNode {
       float recency = last_visit[i] == 0 ? 1.0f : 1.0f - expf(-(float)TICK_DIFF(now, last_visit[i]) / kRecencyTicks);
       float distance = place.center.Distance(self.position);
       float far = distance < place.radius ? 0.3f : 1.0f / (1.0f + distance / kFarTiles);
-      draws[i] = want * std::max(recency, 0.02f) * far;
+      draws[i] = want * std::max(recency, 0.02f) * far * DeathFactor(place, now);
       total += draws[i];
     }
     lingering = false;
@@ -1765,6 +1806,14 @@ struct PlaceRoamNode : public behavior::BehaviorNode {
     chose_at = now;
     PickPoint(ctx, self, (*places)[current]);
     if (ctx.bot->combat_logger) ctx.bot->combat_logger->WriteTactic("roam", (*places)[current].name.c_str());
+  }
+
+  float DeathFactor(const Place& place, u32 now) const {
+    const auto& death = memory ? memory->Last() : std::nullopt;
+    if (!death || TICK_DIFF(now, death->tick) > (s32)kPullTicks || pull == 0.0f) return 1.0f;
+    float d = place.center.Distance(death->position) / kPullRadius;
+    float nearness = expf(-0.5f * d * d);
+    return std::max(kMinPull, 1.0f + 2.0f * pull * nearness);
   }
 
   // A random open point in the place that the bot can get to, or its centre.
@@ -1787,6 +1836,8 @@ struct PlaceRoamNode : public behavior::BehaviorNode {
 
   const std::vector<Place>* places;
   TagWeights weights;
+  const DeathMemory* memory;
+  float pull;
   std::mt19937 random;
   std::vector<u32> last_visit;
   int current = -1;
@@ -1798,7 +1849,7 @@ struct PlaceRoamNode : public behavior::BehaviorNode {
 };
 
 // Following the patrol route: today's way (face each waypoint, arrive, switch within 15 tiles), or a RouteNode style.
-static std::unique_ptr<behavior::BehaviorNode> CreatePatrol(const CombatSettings& settings) {
+static std::unique_ptr<behavior::BehaviorNode> CreatePatrol(const CombatSettings& settings, DeathMemory* memory) {
   using namespace behavior;
   BehaviorBuilder builder;
 
@@ -1806,7 +1857,7 @@ static std::unique_ptr<behavior::BehaviorNode> CreatePatrol(const CombatSettings
     // clang-format off
     builder
       .Sequence() // Roam between places.
-          .Child<PlaceRoamNode>(&settings.places, RoamerWeights())
+          .Child<PlaceRoamNode>(&settings.places, RoamerWeights(), memory, DeathPull(memory->motive))
           .Child<GoToNode>("roam_position")
           .Child<RenderPathNode>(Vector3f(0.0f, 1.0f, 0.5f))
           .End();
@@ -1901,6 +1952,7 @@ std::unique_ptr<behavior::BehaviorNode> CreateCombatTree(const CombatSettings& s
             .Child<ShipRequestNode>("request_ship")
             .End()
         .InvertChild<CloakNode>(settings.manages_cloak) // Cloak and stealth, every tick; never ends the selector.
+        .InvertChild<HuntNode>(&senses.memory, &senses.sight) // Where a grudge sends the bot; never ends it.
         .Selector() // Choose to fight the player or follow waypoints.
             .Sequence() // Find nearest target and either path to them or seek them directly.
                 .Sequence()
@@ -2038,6 +2090,10 @@ std::unique_ptr<behavior::BehaviorNode> CreateCombatTree(const CombatSettings& s
                         .End()
                     .End()
                 .End()
+            .Sequence() // Hunting the enemy it holds a grudge against (ticket 09).
+                .Child<BlackboardSetQueryNode>("hunt_position")
+                .Child<GoToNode>("hunt_position")
+                .End()
             .Sequence() // Look for the enemy the bot lost sight of where it would be.
                 .Child<BlackboardSetQueryNode>("search_position")
                 .Child<GoToNode>("search_position")
@@ -2047,7 +2103,7 @@ std::unique_ptr<behavior::BehaviorNode> CreateCombatTree(const CombatSettings& s
                 .Child<GoToNode>("nearest_green_position")
                 .Child<RenderPathNode>(Vector3f(0.0f, 1.0f, 0.0f))
                 .End()
-            .Composite(CreatePatrol(settings))
+            .Composite(CreatePatrol(settings, &senses.memory))
             .End()
         .End();
   // clang-format on

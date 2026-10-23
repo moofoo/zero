@@ -65,6 +65,10 @@ constexpr float kWonBlast = 1.5f;
 // still clear the commit threshold. A commit up close also holds unless the odds fall below the disengage threshold:
 // small drifts don't break a finish.
 constexpr float kCommitRange = 25.0f;
+// A stalking Spider's strike holds the commit this long (ticks), unless its own energy falls below kStrikeAbortEnergy
+// of max: time to close in and fire (ticket 29).
+constexpr u32 kStrikeTicks = 500;
+constexpr float kStrikeAbortEnergy = 0.3f;
 constexpr u32 kWonTicks = 300;
 
 const char* to_string(CombatMode mode) {
@@ -336,9 +340,26 @@ void CommitDecision::HandleEvent(const WeaponHitEvent& event) {
   if (bot.combat_logger) bot.combat_logger->WriteTactic("won exchange", event.target->name);
 }
 
+CombatMode CommitDecision::Strike(Player& self, Player& target) {
+  u32 now = GetCurrentTick();
+  if (mode != CombatMode::Commit) {
+    commit_tick = now;
+    closing = self.position.Distance(target.position) > kCommitRange;
+  }
+  mode = CombatMode::Commit;
+  strike_until = now + kStrikeTicks;
+  next_decision_tick = now + settings.decision_ticks;
+  return mode;
+}
+
 CombatMode CommitDecision::Decide(Player& self, Player& target) {
   u32 now = GetCurrentTick();
   float distance = self.position.Distance(target.position);
+  // A strike holds unless the bot's own energy runs low.
+  if (mode == CombatMode::Commit && TICK_GT(strike_until, now) &&
+      self.energy >= kStrikeAbortEnergy * bot.game->ship_controller.ship.energy) {
+    return mode;
+  }
   // Arriving from a closing-in: judge the fight afresh now.
   if (mode == CombatMode::Commit && closing && distance <= kCommitRange) next_decision_tick = now;
   if (TICK_GT(next_decision_tick, now)) return mode;

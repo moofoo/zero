@@ -69,6 +69,8 @@ struct CombatSettings {
   // From Judgement: switch cloak and stealth off under pressure, for the regeneration (ticket 29). Sound judgement
   // does; a novice leaves them on in a fight.
   bool manages_cloak = true;
+  // From Judgement: a cloaked Spider stalks prey and strikes (ticket 29); veterans only.
+  bool stalks = true;
 
   // While backing off and pursued: fire cover shots back at the pursuer however slow, and lay mines in its path when
   // it's within this range (tiles) (style).

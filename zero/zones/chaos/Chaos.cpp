@@ -98,6 +98,8 @@ constexpr float kMineOnTrailJudgement = 0.5f;
 constexpr float kTurnOnPursuerJudgement = 0.5f;
 // From this Judgement up, a bot switches cloak and stealth off under pressure (novices leave them on).
 constexpr float kManageCloakJudgement = 0.5f;
+// From this Judgement up, a cloaked Spider stalks prey and strikes (veterans).
+constexpr float kStalkJudgement = 0.9f;
 
 // A float from the config, if the key is there.
 static std::optional<float> ReadOptionalFloat(Config& config, const std::string& group, const char* key) {
@@ -221,6 +223,7 @@ struct ChaosBehavior : public behavior::Behavior {
       settings.mine_on_trail = j >= kMineOnTrailJudgement;
       settings.turns_on_pursuers = j >= kTurnOnPursuerJudgement;
       settings.manages_cloak = j >= kManageCloakJudgement;
+      settings.stalks = j >= kStalkJudgement;
       decision_settings.patience = kPatience.At(j);
       decision_settings.judgement_noise = settings.judgement_noise;
       decision_settings.decision_ticks = (u32)(kDecisionMs.At(j) / kMsPerTick);
@@ -282,6 +285,7 @@ struct ChaosBehavior : public behavior::Behavior {
     target_lock = std::make_unique<TargetLock>(*ctx.bot, target_leash, (u32)(target_lock_seconds * kTicksPerSecond),
                                                *estimate, view_extent, settings.weak_enemy_energy, *opportunities,
                                                *sight);
+    target_lock->stalker = settings.stalks;
     Log(LogLevel::Info, "View %dx%d, awareness of shots and hits %.2f", view_width, view_height, shot_awareness);
 
     auto leash_distance = lookup.GetFloat("LeashDistance");

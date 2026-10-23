@@ -149,13 +149,13 @@ struct PursuerNode : public behavior::BehaviorNode, EventHandler<WeaponSelfDamag
 
 // Cloak (ticket 29): a Spider hides with cloak and stealth, as far as it has them (cloak hides it on screen, stealth
 // on radar), while not under pressure, and switches them off under pressure to regenerate faster for the fight, as
-// players do. Under pressure: damage has passed between it and an enemy within kPressureTicks, it's committing on a
-// target within kPressureRange tiles, or its energy is below kPressureEnergy of max. A bot that doesn't manage its
-// cloak (a novice) hides only with no enemy around and keeps it on until a shot drops it, without re-cloaking in a
-// fight. Toggles are at least kToggleTicks apart. Firing drops cloak by itself. Always succeeds.
+// players do. Under pressure: damage has passed between it and an enemy within kPressureTicks, or its energy is below
+// kPressureEnergy of max. Committing doesn't count until damage passes: the first shot of an ambush uncloaks it. A bot
+// that doesn't manage its cloak (a novice) hides only with no enemy around and keeps it on until a shot drops it,
+// without re-cloaking in a fight. Toggles are at least kToggleTicks apart. Firing drops cloak by itself. Always
+// succeeds.
 struct CloakNode : public behavior::BehaviorNode, EventHandler<WeaponSelfDamageEvent>, EventHandler<WeaponHitEvent> {
   static constexpr u32 kPressureTicks = 300;
-  static constexpr float kPressureRange = 20.0f;
   static constexpr float kPressureEnergy = 0.6f;
   static constexpr u32 kToggleTicks = 50;
   static constexpr u8 kSpiderShip = 2;  // 0 is the Warbird
@@ -189,10 +189,9 @@ struct CloakNode : public behavior::BehaviorNode, EventHandler<WeaponSelfDamageE
     bool stealthed = self->togglables & Status_Stealth;
     bool hide_cloak, hide_stealth;
     if (manages) {
-      bool closing = CurrentMode(ctx) == CombatMode::Commit && has_target &&
-                     (*opt_target)->position.Distance(self->position) <= kPressureRange;
+      // Committing doesn't count until damage passes: a cloaked bot closes in unseen and its first shot uncloaks it.
       bool low = self->energy < kPressureEnergy * ship.energy;
-      hide_cloak = hide_stealth = !(fighting || closing || low);
+      hide_cloak = hide_stealth = !(fighting || low);
     } else {
       // A novice hides only with no enemy around, and keeps each toggle on once it is (until a shot drops cloak): it
       // doesn't think to re-cloak in or after a fight, or to switch them off for the regeneration.
@@ -326,7 +325,12 @@ struct CommitDecisionNode : public behavior::BehaviorNode {
     auto opt_target = ctx.blackboard.Value<Player*>(target_key);
     if (!self || !opt_target || !*opt_target) return behavior::ExecuteResult::Failure;
 
-    CombatMode mode = decision->Decide(*self, **opt_target);
+    // A stalking Spider strikes when its prey is fighting someone else and weakened (ticket 29).
+    bool strike = ctx.blackboard.Has("stalking") && lock->StrikeReady(**opt_target);
+    if (strike && decision->Mode() != CombatMode::Commit && ctx.bot->combat_logger) {
+      ctx.bot->combat_logger->WriteTactic("strike", (*opt_target)->name);
+    }
+    CombatMode mode = strike ? decision->Strike(*self, **opt_target) : decision->Decide(*self, **opt_target);
     // Committed, the target lock holds on this enemy.
     lock->SetCommitted(mode == CombatMode::Commit ? (*opt_target)->id : TargetLock::kNone);
     if (mode != logged || !logged_once) {
@@ -579,6 +583,11 @@ struct LockedTargetNode : public behavior::BehaviorNode {
       ctx.blackboard.Set("battle", true);
     } else {
       ctx.blackboard.Erase("battle");
+    }
+    if (lock->Stalking()) {
+      ctx.blackboard.Set("stalking", true);
+    } else {
+      ctx.blackboard.Erase("stalking");
     }
     if (!target) return behavior::ExecuteResult::Failure;
 
@@ -1095,6 +1104,10 @@ struct ShotValueNode : public behavior::BehaviorNode {
 
     // Energy's price for this shot: a bomb's never below its least efficiency.
     float price = bomb && worth < kMinBombEfficiency ? kMinBombEfficiency : worth;
+    // Stalking (ticket 29), the bot holds fire until the commit decision strikes.
+    if (ctx.blackboard.Has("stalking") && CurrentMode(ctx) != CombatMode::Commit) {
+      return behavior::ExecuteResult::Failure;
+    }
     // Cloaked (ticket 29), the first shot gives the bot away: it opens only within kAmbushRange, or with a bomb worth
     // kAmbushBombFactor times the usual.
     if ((self->togglables & Status_Cloak) && distance > kAmbushRange &&
@@ -1441,6 +1454,9 @@ static std::unique_ptr<behavior::BehaviorNode> CreateDodge(const CombatSettings&
 
 static std::unique_ptr<behavior::BehaviorNode> CreateEngage(const CombatSettings& settings);
 
+// How far a stalking Spider keeps from its prey (tiles), unseen (ticket 29).
+constexpr float kStalkDistance = 25.0f;
+
 // How far a bot bombing two other enemies' fight keeps from its target (tiles).
 constexpr float kBattleDistance = 40.0f;
 
@@ -1505,6 +1521,11 @@ static std::unique_ptr<behavior::BehaviorNode> CreateMovement(const CombatSettin
             .Child<CombatModeIsNode>(CombatMode::Commit)
             .Child<FaceNode>("aimshot")
             .Child<SeekNode>("aimshot", 0.0f, SeekNode::DistanceResolveType::Static)
+            .End()
+        .Sequence() // Stalking (ticket 29): shadow the prey unseen until the commit decision strikes.
+            .Child<BlackboardSetQueryNode>("stalking")
+            .Child<FaceNode>("aimshot")
+            .Child<SeekNode>("aimshot", kStalkDistance, SeekNode::DistanceResolveType::Dynamic)
             .End()
         .Sequence() // Recharging out of reach: stay put, facing the enemy.
             .Child<CombatModeIsNode>(CombatMode::Recharge)

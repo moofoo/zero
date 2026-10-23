@@ -82,6 +82,8 @@ struct CommitDecision : EventHandler<WeaponHitEvent>, EventHandler<WeaponSelfDam
 
   // The mode for this tick, re-deciding when due.
   CombatMode Decide(Player& self, Player& target);
+  // Commits now, against this target, whatever the odds: a stalking Spider's strike (ticket 29).
+  CombatMode Strike(Player& self, Player& target);
 
   // The chance of winning if the bot first takes this much damage (for accepting a hit).
   float WinChanceAfter(Player& self, Player& target, float damage);
@@ -115,6 +117,8 @@ struct CommitDecision : EventHandler<WeaponHitEvent>, EventHandler<WeaponSelfDam
   u32 commit_tick = 0;
   // Whether the commit is still closing in from beyond kCommitRange.
   bool closing = false;
+  // Until when a stalking Spider's strike holds the commit.
+  u32 strike_until = 0;
 
   // The chance the target runs out of energy before the bot does, if both fight on at fighting range, with the bot
   // at this energy.

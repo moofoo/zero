@@ -60,6 +60,15 @@ struct TargetLock : EventHandler<WeaponSelfDamageEvent>, EventHandler<WeaponHitE
 
   // Whether the bot is bombing two other enemies' fight.
   bool Battling() const { return battling; }
+  // Whether the bot, a cloaked Spider, is stalking its target: shadowing it unseen until the commit decision strikes
+  // (ticket 29).
+  bool Stalking() const { return stalking; }
+  // Whether the stalked prey is ready to strike: trading hits with another enemy and, by the estimate, below half its
+  // maximum energy (ticket 29).
+  bool StrikeReady(Player& prey);
+
+  // Whether this bot stalks at all (a veteran's Judgement): set at start-up.
+  bool stalker = true;
 
   void HandleEvent(const WeaponSelfDamageEvent& event) override;
   void HandleEvent(const WeaponHitEvent& event) override;
@@ -82,6 +91,10 @@ struct TargetLock : EventHandler<WeaponSelfDamageEvent>, EventHandler<WeaponHitE
 
   // The enemy the bot is committed against, set by the commit decision each tick.
   u16 committed = kNone;
+  // Stalking (ticket 29): a cloaked Spider locks onto an enemy fighting someone else or low on energy.
+  bool stalking = false;
+  // Starts, keeps or ends stalking, moving the lock when it starts.
+  void UpdateStalk(const std::vector<Player*>& candidates, const Player& self, u32 now);
   // Searching for the locked enemy out of sight: where it would be.
   std::optional<Vector2f> search_position;
 

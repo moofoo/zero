@@ -36,6 +36,17 @@ constexpr u32 kBattleGapTicks = 300;
 constexpr u32 kSearchTicks = 300;
 constexpr u32 kSearchLeadTicks = 100;
 constexpr float kSearchArrival = 4.0f;
+// Stalking (ticket 29): a cloaked Spider's prey is an enemy within kStalkRange tiles that it has seen fighting another
+// enemy within kStalkFightTicks, or whose estimated energy is below kStalkWeakShare of its ship's maximum; the
+// weakest such, by the estimate.
+constexpr float kStalkRange = 60.0f;
+constexpr u32 kStalkFightTicks = 300;
+constexpr float kStalkWeakShare = 0.6f;
+constexpr u8 kSpiderShip = 2;
+// The strike: the prey has traded hits with another enemy within kStrikeFightTicks and its estimated energy is below
+// kStrikeShare of its ship's maximum.
+constexpr u32 kStrikeFightTicks = 100;
+constexpr float kStrikeShare = 0.5f;
 
 TargetLock::TargetLock(ZeroBot& bot, float leash_distance, u32 lock_ticks, EnergyEstimate& estimate,
                        Vector2f view_extent, std::optional<float> weak_enemy_energy, Opportunities& opportunities,
@@ -108,6 +119,49 @@ bool TargetLock::Search(const Player& self, bool others_in_sight, u32 now) {
   return true;
 }
 
+void TargetLock::UpdateStalk(const std::vector<Player*>& candidates, const Player& self, u32 now) {
+  bool cloaked = stalker && self.ship == kSpiderShip && (self.togglables & Status_Cloak);
+  if (!cloaked || battling || committed != kNone) {
+    if (stalking && !cloaked) Note("stalk over");
+    stalking = false;
+    return;
+  }
+  auto& arena = bot.game->connection.settings;
+  // Still on the same prey while it's in sight.
+  if (stalking) {
+    for (Player* player : candidates) {
+      if (player->id == locked) return;
+    }
+    stalking = false;
+  }
+  Player* prey = nullptr;
+  float prey_share = 0.0f;
+  for (Player* player : candidates) {
+    if (Ignored(player->id, now) || player->position.Distance(self.position) > kStalkRange) continue;
+    float max_energy = (float)arena.ShipSettings[player->ship].MaximumEnergy;
+    float share = max_energy > 0.0f ? estimate.Get(*player).energy / max_energy : 1.0f;
+    if (!opportunities.FightingOthers(player->id, kStalkFightTicks) && share >= kStalkWeakShare) continue;
+    if (!prey || share < prey_share) {
+      prey = player;
+      prey_share = share;
+    }
+  }
+  if (!prey) return;
+  stalking = true;
+  if (locked != prey->id) {
+    locked = prey->id;
+    last_contact[locked] = now;
+    Note("stalk");
+    if (bot.combat_logger) bot.combat_logger->WriteTactic("stalk", prey->name);
+  }
+}
+
+bool TargetLock::StrikeReady(Player& prey) {
+  if (!stalking || prey.id != locked || !opportunities.FightingOthers(prey.id, kStrikeFightTicks)) return false;
+  float max_energy = (float)bot.game->connection.settings.ShipSettings[prey.ship].MaximumEnergy;
+  return max_energy > 0.0f && estimate.Get(prey).energy < kStrikeShare * max_energy;
+}
+
 void TargetLock::UpdateBattle(const std::vector<Player*>& candidates, const Player& self, u32 now) {
   auto find = [&](u16 id) -> Player* {
     for (Player* player : candidates) {
@@ -172,6 +226,8 @@ Player* TargetLock::Choose(const std::vector<Player*>& candidates) {
   };
 
   UpdateBattle(candidates, *self, now);
+
+  UpdateStalk(candidates, *self, now);
 
   // Committed against an enemy in sight: the lock is on it.
   bool holding = false;
@@ -243,7 +299,11 @@ Player* TargetLock::Choose(const std::vector<Player*>& candidates) {
       Release("too far");
     } else {
       auto contact = last_contact.find(locked);
-      if (contact == last_contact.end() || TICK_DIFF(now, contact->second) > (s32)lock_ticks) Release("quiet");
+      if (stalking) {
+        last_contact[locked] = now;
+      } else if (contact == last_contact.end() || TICK_DIFF(now, contact->second) > (s32)lock_ticks) {
+        Release("quiet");
+      }
     }
   }
 

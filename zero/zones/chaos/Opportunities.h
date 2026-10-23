@@ -48,6 +48,8 @@ struct Opportunities : EventHandler<WeaponFireEvent>, EventHandler<WeaponSelfDam
   std::optional<std::pair<u16, u16>> FindBattle(const std::vector<Player*>& candidates, const Player& self);
   // Whether two enemies are still trading hits: either has hit the other recently.
   bool BattleGoing(u16 a, u16 b) const;
+  // Whether the bot has noticed this enemy hit, or be hit by, another enemy within this many ticks (ticket 29).
+  bool FightingOthers(u16 id, u32 ticks) const;
 
   void HandleEvent(const WeaponFireEvent& event) override;
   void HandleEvent(const WeaponSelfDamageEvent& event) override;

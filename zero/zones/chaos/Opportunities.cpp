@@ -111,6 +111,16 @@ std::optional<std::pair<u16, u16>> Opportunities::FindBattle(const std::vector<P
   return {};
 }
 
+bool Opportunities::FightingOthers(u16 id, u32 ticks) const {
+  u32 now = GetCurrentTick();
+  for (const auto& [key, tick] : enemy_hits) {
+    u16 shooter = (u16)(key >> 16);
+    u16 target = (u16)(key & 0xFFFF);
+    if ((shooter == id || target == id) && shooter != target && TICK_DIFF(now, tick) <= (s32)ticks) return true;
+  }
+  return false;
+}
+
 void Opportunities::HandleEvent(const WeaponHitEvent& event) {
   Player* self = bot.game ? bot.game->player_manager.GetSelf() : nullptr;
   if (!self || !event.target) return;

@@ -34,6 +34,8 @@ constexpr u32 kMaxBattleTicks = 1000;
 constexpr u32 kBattleGapTicks = 300;
 // Searching for a locked enemy out of sight: for at most this long after last seeing it, flying to where it was then,
 // carried on by its velocity for up to kSearchLeadTicks; arriving within kSearchArrival tiles ends the search.
+// An enemy that has traded damage with the bot within this long is always taken on, whatever the bot's motive.
+constexpr u32 kEngagedTicks = 300;
 constexpr u32 kSearchTicks = 300;
 constexpr u32 kSearchLeadTicks = 100;
 constexpr float kSearchArrival = 4.0f;
@@ -208,10 +210,24 @@ void TargetLock::UpdateBattle(const std::vector<Player*>& candidates, const Play
   if (bot.combat_logger) bot.combat_logger->WriteTactic("battle", weaker->name);
 }
 
-Player* TargetLock::Choose(const std::vector<Player*>& candidates) {
+Player* TargetLock::Choose(const std::vector<Player*>& all_candidates) {
   Player* self = bot.game->player_manager.GetSelf();
   if (!self) return nullptr;
   u32 now = GetCurrentTick();
+
+  // Engagement by motive (ticket 09, Q14): only enemies the bot's motive takes on count, beyond its engage range
+  // only the one it's locked or committed on, one it has just traded damage with, and a grudge's killer.
+  std::vector<Player*> candidates;
+  float range = memory ? EngageRange(memory->motive) : 1e6f;
+  auto grudge = memory ? memory->Grudge() : std::nullopt;
+  for (Player* player : all_candidates) {
+    auto contact = last_contact.find(player->id);
+    bool fighting = contact != last_contact.end() && TICK_DIFF(now, contact->second) <= (s32)kEngagedTicks;
+    if (player->id == locked || player->id == committed || fighting || (grudge && *grudge == player->id) ||
+        player->position.Distance(self->position) <= range) {
+      candidates.push_back(player);
+    }
+  }
 
   auto find = [&](u16 id) -> Player* {
     for (Player* player : candidates) {
@@ -241,7 +257,6 @@ Player* TargetLock::Choose(const std::vector<Player*>& candidates) {
     holding = true;
   }
   // A grudge (ticket 09): the killer in sight takes the lock, and keeps it as a commit does.
-  auto grudge = memory ? memory->Grudge() : std::nullopt;
   if (!holding && grudge && !battling && find(*grudge)) {
     if (locked != *grudge) {
       locked = *grudge;

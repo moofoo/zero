@@ -21,13 +21,27 @@ namespace chaos {
 //   onto it in sight and committing against it more readily, until the bot kills it or kGrudgeTicks pass (every
 //   death to the same killer renews it).
 // - Coward: after dying, keep away from where it died for a while.
-enum class Motive { Roam, Grudge, Coward };
+// - Brawler: go where the fighting is (center places), and take on anyone in sight.
+// Each motive engages only some enemies (EngageRange) and wants some places more than others (MotiveWeights).
+enum class Motive { Roam, Grudge, Coward, Brawler };
 
 const char* to_string(Motive motive);
 std::optional<Motive> ParseMotive(std::string_view name);
 
 // How strongly a motive pulls a bot toward (+1) or pushes it away from (-1) where it last died, while roaming.
 float DeathPull(Motive motive);
+
+// How close (tiles) an enemy must be for a bot with this motive to take it on (ticket 09, Q14): beyond it the bot
+// carries on with what it was doing. An enemy that has just traded damage with the bot, and a grudge's killer, are
+// always taken on. Brawlers take on anyone in sight.
+float EngageRange(Motive motive);
+
+// How much a motive wants each kind of place (Q16; "center" is where the danger and fighting are).
+TagWeights MotiveWeights(Motive motive);
+
+// How long (ticks, min and max) a bot lingers at a place it came for this tag (Q15): long where it came to fight or
+// rest, none passing through a corridor.
+std::pair<u32, u32> TagLinger(const std::string& tag);
 
 // What a bot remembers of its last death and the grudge it holds.
 struct DeathMemory : EventHandler<PlayerDeathEvent> {

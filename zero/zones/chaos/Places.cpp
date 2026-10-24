@@ -53,9 +53,17 @@ float PlaceWant(const Place& place, const TagWeights& weights) {
   return place.weight * best;
 }
 
-TagWeights RoamerWeights() {
-  return {{"quiet", 1.5f}, {"greens", 1.3f}, {"corridor", 1.2f}, {"chokepoint", 1.0f}, {"base", 0.8f},
-          {"center", 0.7f}};
+std::string WantedTag(const Place& place, const TagWeights& weights) {
+  std::string best;
+  float best_weight = 0.0f;
+  for (const std::string& tag : place.tags) {
+    auto it = weights.find(tag);
+    if (it != weights.end() && it->second > best_weight) {
+      best = tag;
+      best_weight = it->second;
+    }
+  }
+  return best;
 }
 
 }  // namespace chaos

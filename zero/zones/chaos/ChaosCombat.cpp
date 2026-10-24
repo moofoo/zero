@@ -1726,13 +1726,12 @@ struct HuntNode : public behavior::BehaviorNode {
 };
 
 // Roaming between places (ticket 09): the bot picks a place by its motive's tag weights, flies to a random open
-// point in it, lingers there kLingerMinTicks to kLingerMaxTicks moving to another point inside, then picks again. A
+// point in it, lingers there for as long as the tag it came for says (TagLinger), moving to another point inside,
+// then picks again. A
 // place visited recently is less likely (its draw recovers over kRecencyTicks), one far off a little less, and the
 // place it just left not at all; a place it can't reach within kGiveUpTicks is given up. Sets "roam_position"; fails
 // without places.
 struct PlaceRoamNode : public behavior::BehaviorNode {
-  static constexpr u32 kLingerMinTicks = 200;
-  static constexpr u32 kLingerMaxTicks = 600;
   static constexpr float kRecencyTicks = 9000.0f;
   static constexpr u32 kGiveUpTicks = 6000;
   static constexpr float kArrival = 5.0f;
@@ -1762,7 +1761,8 @@ struct PlaceRoamNode : public behavior::BehaviorNode {
     if (self->position.Distance(point) <= kArrival) {
       if (!lingering) {
         lingering = true;
-        linger_until = now + std::uniform_int_distribution<u32>(kLingerMinTicks, kLingerMaxTicks)(random);
+        auto [low, high] = TagLinger(WantedTag((*places)[current], weights));
+        linger_until = now + std::uniform_int_distribution<u32>(low, high)(random);
         PickPoint(ctx, *self, (*places)[current]);
       } else if (!TICK_GT(linger_until, now)) {
         last_visit[current] = now;
@@ -1857,7 +1857,7 @@ static std::unique_ptr<behavior::BehaviorNode> CreatePatrol(const CombatSettings
     // clang-format off
     builder
       .Sequence() // Roam between places.
-          .Child<PlaceRoamNode>(&settings.places, RoamerWeights(), memory, DeathPull(memory->motive))
+          .Child<PlaceRoamNode>(&settings.places, MotiveWeights(memory->motive), memory, DeathPull(memory->motive))
           .Child<GoToNode>("roam_position")
           .Child<RenderPathNode>(Vector3f(0.0f, 1.0f, 0.5f))
           .End();

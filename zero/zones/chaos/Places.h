@@ -33,8 +33,8 @@ std::vector<Place> ReadPlaces(Config& config);
 // A place's draw for a motive: its weight times its most wanted tag's weight.
 float PlaceWant(const Place& place, const TagWeights& weights);
 
-// A roamer's tag weights (ticket 09's slice 1): quieter places and the ways between them before the centre.
-TagWeights RoamerWeights();
+// The tag a motive came to a place for: the place's tag it wants most, or "" for none.
+std::string WantedTag(const Place& place, const TagWeights& weights);
 
 }  // namespace chaos
 }  // namespace zero

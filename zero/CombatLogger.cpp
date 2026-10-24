@@ -205,6 +205,15 @@ void CombatLogger::WriteTactic(const char* name, const char* target) {
   fflush(file);
 }
 
+void CombatLogger::WriteGreen(const char* what, Vector2f position, const char* why, float detour, int prize) {
+  if (!file) return;
+
+  fprintf(file, "{\"e\":\"green\",\"tick\":%u,\"what\":\"%s\",\"x\":%.1f,\"y\":%.1f,\"why\":\"%s\","
+          "\"detour\":%.1f,\"prize\":%d}\n",
+          ServerTick(), what, position.x, position.y, why, detour, prize);
+  fflush(file);
+}
+
 void CombatLogger::WriteDodge(WeaponData weapon, float distance, int age_ticks, int noticed_ticks, bool wrong_side) {
   if (!file) return;
 

@@ -46,6 +46,10 @@ struct CombatLogger : EventHandler<WeaponFireEvent>,
   // and how long ago the bot noticed it, -1 if it doesn't keep track), and whether it went the wrong way.
   void WriteDodge(WeaponData weapon, float distance, int age_ticks, int noticed_ticks, bool wrong_side);
 
+  // A green the bot went for, picked up or passed up (ticket 32): `what` is "detour" (off its way, by `detour` tiles),
+  // "pickup" (prize id; `why` is "detour", "need" or "incidental") or "passed" (`why` is the danger it avoided).
+  void WriteGreen(const char* what, Vector2f position, const char* why, float detour, int prize);
+
   void HandleEvent(const WeaponFireEvent& event) override;
   void HandleEvent(const WeaponSelfDamageEvent& event) override;
   void HandleEvent(const WeaponHitEvent& event) override;

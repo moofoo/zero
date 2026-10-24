@@ -14,6 +14,7 @@ struct CommitDecision;
 struct DeathMemory;
 struct EnemySight;
 struct EnergyEstimate;
+struct GreenSight;
 struct Opportunities;
 struct PlayerHistory;
 struct TargetLock;
@@ -27,6 +28,11 @@ struct WeaponNotice;
 struct CombatSettings {
   // Places on the map to roam between (ticket 09); without any, the bot patrols the Waypoints route.
   std::vector<Place> places;
+  // Greens on the way (ticket 32): the bot goes for a noticed green off its way by at most this much (tiles), when no
+  // enemy or weapon makes it unsafe; 0 turns it off.
+  float green_detour = 8.0f;
+  // ... and goes for no green with a seen enemy within this many tiles of it (or nearer to it than the bot).
+  float green_safe_radius = 25.0f;
   // Back off to this distance from the enemy (tiles); without it, to the leash distance.
   std::optional<float> retreat_distance;
   // Switch to the weakest enemy on screen whose estimated energy is below this (the target lock), and stay on it.
@@ -110,6 +116,8 @@ struct CombatSenses {
   EnemySight& sight;
   // What the bot remembers of its deaths, for its motive (ticket 09).
   DeathMemory& memory;
+  // Which greens the bot has noticed (ticket 32).
+  GreenSight& greens;
 };
 
 std::unique_ptr<behavior::BehaviorNode> CreateCombatTree(const CombatSettings& settings, CombatSenses senses);

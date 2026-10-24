@@ -4,6 +4,7 @@
 #include "EnemySight.h"
 #include "Motives.h"
 #include "EnergyEstimate.h"
+#include "GreenSight.h"
 #include "Opportunities.h"
 #include "PlayerHistory.h"
 #include "TargetLock.h"
@@ -35,6 +36,7 @@
 #include <math.h>
 
 #include <random>
+#include <unordered_set>
 #include <string>
 
 namespace zero {
@@ -1849,7 +1851,205 @@ struct PlaceRoamNode : public behavior::BehaviorNode {
 };
 
 // Following the patrol route: today's way (face each waypoint, arrive, switch within 15 tiles), or a RouteNode style.
-static std::unique_ptr<behavior::BehaviorNode> CreatePatrol(const CombatSettings& settings, DeathMemory* memory) {
+// What makes a green unsafe to go for (ticket 32), or null: a seen enemy within `safe_radius` of it or nearer to it
+// than the bot, or an enemy weapon the bot has noticed (any on screen, without a skill level) within kWeaponRadius and
+// coming its way.
+static const char* GreenDanger(behavior::ExecuteContext& ctx, const Player& self, Vector2f green, const EnemySight& sight,
+                               const WeaponNotice* weapon_notice, float safe_radius) {
+  constexpr float kWeaponRadius = 20.0f;
+  Game& game = *ctx.bot->game;
+  float self_distance = self.position.Distance(green);
+  for (size_t i = 0; i < game.player_manager.player_count; ++i) {
+    const Player& player = game.player_manager.players[i];
+    if (player.ship >= 8 || player.frequency == self.frequency || !sight.Sees(player)) continue;
+    float distance = player.position.Distance(green);
+    if (distance < safe_radius || distance < self_distance) return "enemy";
+  }
+  WeaponManager& weapons = game.weapon_manager;
+  for (size_t i = 0; i < weapons.weapon_count; ++i) {
+    const Weapon& weapon = weapons.weapons[i];
+    if (weapon.frequency == self.frequency) continue;
+    Vector2f to_self = self.position - weapon.position;
+    if (to_self.LengthSq() > kWeaponRadius * kWeaponRadius || weapon.velocity.Dot(to_self) <= 0.0f) continue;
+    if (weapon_notice && !weapon_notice->NoticedAt(weapon)) continue;
+    return "weapon";
+  }
+  return nullptr;
+}
+
+// Greens on the way (ticket 32): writes to `output_key` where the bot should fly instead of `destination_key`. That's
+// a green the bot has noticed, off its way by at most `detour` tiles, in clear line from the bot and to its way, and
+// safe (GreenDanger); otherwise the destination itself. The detour is the extra distance flown: to the green and on to
+// the point kLookAhead tiles along the bot's path, against going straight there, both from where the bot's momentum
+// carries it in kMomentumSeconds, so a green behind a fast bot costs the turn back and one beside a slow bot little.
+// With `only_green`, the node fails instead of writing the destination when there's no green to go for. `why` labels
+// its detours and pickups in the logs ("detour" travelling, "target" on the way to a target). The bot keeps to a green it went for
+// until it's gone, unsafe or kGiveUpTicks have passed.
+struct GreenDetourNode : public behavior::BehaviorNode {
+  static constexpr float kLookAhead = 30.0f;
+  static constexpr float kMaxReach = 40.0f;
+  static constexpr float kMomentumSeconds = 0.5f;
+  static constexpr u32 kGiveUpTicks = 300;
+
+  GreenDetourNode(const char* destination_key, const char* output_key, GreenSight* greens, const EnemySight* sight,
+                  const WeaponNotice* weapon_notice, float detour, float safe_radius, bool only_green = false,
+                  const char* why = "detour")
+      : destination_key(destination_key), output_key(output_key), greens(greens), sight(sight),
+        weapon_notice(weapon_notice), detour(detour), safe_radius(safe_radius), only_green(only_green), why(why) {}
+
+  behavior::ExecuteResult Execute(behavior::ExecuteContext& ctx) override {
+    Player* self = ctx.bot->game->player_manager.GetSelf();
+    if (!self || self->ship >= 8) return behavior::ExecuteResult::Failure;
+    auto destination = ctx.blackboard.Value<Vector2f>(destination_key);
+    if (!destination) return behavior::ExecuteResult::Failure;
+    u32 now = GetCurrentTick();
+
+    if (committed) {
+      bool there = false;
+      for (const PrizeGreen& green : greens->Noticed()) there |= green.position.DistanceSq(*committed) < 0.25f;
+      if (there && TICK_DIFF(now, committed_at) <= (s32)kGiveUpTicks &&
+          !GreenDanger(ctx, *self, *committed, *sight, weapon_notice, safe_radius)) {
+        greens->Aim(*committed, why);
+        ctx.blackboard.Set(output_key, *committed);
+        return behavior::ExecuteResult::Success;
+      }
+      committed.reset();
+    }
+
+    const auto none = only_green ? behavior::ExecuteResult::Failure : behavior::ExecuteResult::Success;
+    if (!only_green) ctx.blackboard.Set(output_key, *destination);
+    if (detour <= 0.0f) return none;
+
+    Vector2f ahead = LookAhead(ctx, *self, *destination);
+    Vector2f carried = self->position + self->velocity * kMomentumSeconds;
+    float straight = carried.Distance(ahead);
+    auto& map = ctx.bot->game->GetMap();
+
+    std::optional<Vector2f> best;
+    float best_detour = detour;
+    for (const PrizeGreen& green : greens->Noticed()) {
+      Vector2f to_green = green.position - self->position;
+      float reach = to_green.Length();
+      if (reach > kMaxReach) continue;
+      float extra = carried.Distance(green.position) + green.position.Distance(ahead) - straight;
+      if (extra > best_detour) continue;
+      if (map.CastTo(self->position, green.position, self->frequency).hit) continue;
+      if (map.CastTo(green.position, ahead, self->frequency).hit) continue;
+      if (const char* danger = GreenDanger(ctx, *self, green.position, *sight, weapon_notice, safe_radius)) {
+        u32 key = ((u32)green.position.x << 16) | (u32)green.position.y;
+        if (passed.insert(key).second && ctx.bot->combat_logger) {
+          ctx.bot->combat_logger->WriteGreen("passed", green.position, danger, extra, green.prize_id);
+        }
+        continue;
+      }
+      best = green.position;
+      best_detour = extra;
+    }
+    if (passed.size() > 256) passed.clear();
+    if (!best) return none;
+
+    committed = best;
+    committed_at = now;
+    greens->Aim(*best, why);
+    if (ctx.bot->combat_logger) ctx.bot->combat_logger->WriteGreen("detour", *best, why, best_detour, 0);
+    ctx.blackboard.Set(output_key, *best);
+    return behavior::ExecuteResult::Success;
+  }
+
+  // The point kLookAhead tiles along the bot's path to the destination, or toward it when the path goes elsewhere.
+  Vector2f LookAhead(behavior::ExecuteContext& ctx, const Player& self, Vector2f destination) const {
+    const path::Path& path = ctx.bot->bot_controller->current_path;
+    if (!path.Empty() && path.GetGoal().DistanceSq(destination) <= 3.0f * 3.0f) {
+      Vector2f previous = self.position;
+      float left = kLookAhead;
+      for (size_t i = path.index; i < path.points.size(); ++i) {
+        float step = previous.Distance(path.points[i]);
+        if (step >= left) return previous + Normalize(path.points[i] - previous) * left;
+        left -= step;
+        previous = path.points[i];
+      }
+      return previous;
+    }
+    Vector2f to = destination - self.position;
+    float distance = to.Length();
+    if (distance <= kLookAhead || distance < 0.01f) return destination;
+    return self.position + to * (kLookAhead / distance);
+  }
+
+  const char* destination_key;
+  const char* output_key;
+  GreenSight* greens;
+  const EnemySight* sight;
+  const WeaponNotice* weapon_notice;
+  float detour;
+  float safe_radius;
+  bool only_green;
+  const char* why;
+  std::optional<Vector2f> committed;
+  u32 committed_at = 0;
+  std::unordered_set<u32> passed;
+};
+
+// Whether a bot holding a target may take a green on the way to it (ticket 32): the target is further than kFarTiles,
+// isn't coming at the bot, and the bot isn't backing off or accepting a bomb.
+struct TargetGreenWindowNode : public behavior::BehaviorNode {
+  static constexpr float kFarTiles = 30.0f;
+  static constexpr float kComingSpeed = 2.0f;  // tiles/s toward the bot
+
+  behavior::ExecuteResult Execute(behavior::ExecuteContext& ctx) override {
+    Player* self = ctx.bot->game->player_manager.GetSelf();
+    auto opt_target = ctx.blackboard.Value<Player*>("nearest_target");
+    if (!self || !opt_target || !*opt_target) return behavior::ExecuteResult::Failure;
+    const Player& target = **opt_target;
+    float distance = target.position.Distance(self->position);
+    if (distance <= kFarTiles) return behavior::ExecuteResult::Failure;
+    Vector2f toward_self = (self->position - target.position) * (1.0f / distance);
+    if (target.velocity.Dot(toward_self) >= kComingSpeed) return behavior::ExecuteResult::Failure;
+    CombatMode mode = CurrentMode(ctx);
+    if (mode == CombatMode::Disengage || mode == CombatMode::Recharge) return behavior::ExecuteResult::Failure;
+    if (ctx.blackboard.ValueOr<bool>("accepting", false)) return behavior::ExecuteResult::Failure;
+    return behavior::ExecuteResult::Success;
+  }
+};
+
+// Greening for upgrades (replacing SVS's FindNearestGreenNode, ticket 32): while the ship's upgrade progress is below
+// `green_upgrade_target`, the nearest green the bot has noticed that's safe to go for. Above it, greens only on the
+// way (GreenDetourNode).
+struct NeededGreenNode : public behavior::BehaviorNode {
+  NeededGreenNode(const char* output_key, GreenSight* greens, const EnemySight* sight, const WeaponNotice* weapon_notice,
+                  float safe_radius)
+      : output_key(output_key), greens(greens), sight(sight), weapon_notice(weapon_notice), safe_radius(safe_radius) {}
+
+  behavior::ExecuteResult Execute(behavior::ExecuteContext& ctx) override {
+    Player* self = ctx.bot->game->player_manager.GetSelf();
+    if (!self || self->ship >= 8) return behavior::ExecuteResult::Failure;
+    auto target = ctx.blackboard.Value<float>("green_upgrade_target");
+    if (!target || svs::GetShipUpgradeProgress(*ctx.bot->game, *self) >= *target) return behavior::ExecuteResult::Failure;
+
+    const PrizeGreen* nearest = nullptr;
+    float nearest_sq = 0.0f;
+    for (const PrizeGreen& green : greens->Noticed()) {
+      float sq = green.position.DistanceSq(self->position);
+      if (nearest && sq >= nearest_sq) continue;
+      if (GreenDanger(ctx, *self, green.position, *sight, weapon_notice, safe_radius)) continue;
+      nearest = &green;
+      nearest_sq = sq;
+    }
+    if (!nearest) return behavior::ExecuteResult::Failure;
+    greens->Aim(nearest->position, "need");
+    ctx.blackboard.Set(output_key, nearest->position);
+    return behavior::ExecuteResult::Success;
+  }
+
+  const char* output_key;
+  GreenSight* greens;
+  const EnemySight* sight;
+  const WeaponNotice* weapon_notice;
+  float safe_radius;
+};
+
+static std::unique_ptr<behavior::BehaviorNode> CreatePatrol(const CombatSettings& settings, CombatSenses& senses) {
+  DeathMemory* memory = &senses.memory;
   using namespace behavior;
   BehaviorBuilder builder;
 
@@ -1858,7 +2058,9 @@ static std::unique_ptr<behavior::BehaviorNode> CreatePatrol(const CombatSettings
     builder
       .Sequence() // Roam between places.
           .Child<PlaceRoamNode>(&settings.places, MotiveWeights(memory->motive), memory, DeathPull(memory->motive))
-          .Child<GoToNode>("roam_position")
+          .Child<GreenDetourNode>("roam_position", "travel_position", &senses.greens, &senses.sight,
+                                  senses.weapon_notice, settings.green_detour, settings.green_safe_radius)
+          .Child<GoToNode>("travel_position")
           .Child<RenderPathNode>(Vector3f(0.0f, 1.0f, 0.5f))
           .End();
     // clang-format on
@@ -2025,6 +2227,19 @@ std::unique_ptr<behavior::BehaviorNode> CreateCombatTree(const CombatSettings& s
                         .End()
                     .End()
                 .Selector()
+                    .Sequence() // A green on the way to a target still far off (ticket 32), dodging on the way.
+                        .Child<TargetGreenWindowNode>()
+                        .Child<GreenDetourNode>("nearest_target_position", "travel_position", &senses.greens,
+                                                &senses.sight, senses.weapon_notice, settings.green_detour,
+                                                settings.green_safe_radius, true, "target")
+                        .Selector()
+                            .Composite(CreateDodge(settings, false, senses.weapon_notice))
+                            .Sequence()
+                                .Child<GoToNode>("travel_position")
+                                .Child<RenderPathNode>(Vector3f(0.0f, 1.0f, 0.0f))
+                                .End()
+                            .End()
+                        .End()
                     .Sequence() // Path to target if they aren't immediately visible, dodging on the way.
                         .InvertChild<VisibilityQueryNode>("nearest_target_position")
                         .Selector()
@@ -2092,18 +2307,25 @@ std::unique_ptr<behavior::BehaviorNode> CreateCombatTree(const CombatSettings& s
                 .End()
             .Sequence() // Hunting the enemy it holds a grudge against (ticket 09).
                 .Child<BlackboardSetQueryNode>("hunt_position")
-                .Child<GoToNode>("hunt_position")
+                .Child<GreenDetourNode>("hunt_position", "travel_position", &senses.greens, &senses.sight,
+                                        senses.weapon_notice, settings.green_detour, settings.green_safe_radius)
+                .Child<GoToNode>("travel_position")
                 .End()
             .Sequence() // Look for the enemy the bot lost sight of where it would be.
                 .Child<BlackboardSetQueryNode>("search_position")
-                .Child<GoToNode>("search_position")
+                .Child<GreenDetourNode>("search_position", "travel_position", &senses.greens, &senses.sight,
+                                        senses.weapon_notice, settings.green_detour, settings.green_safe_radius)
+                .Child<GoToNode>("travel_position")
                 .End()
-            .Sequence()
-                .Child<FindNearestGreenNode>("nearest_green_position")
-                .Child<GoToNode>("nearest_green_position")
+            .Sequence() // Greening for upgrades, taking greens on the way to the nearest (ticket 32).
+                .Child<NeededGreenNode>("nearest_green_position", &senses.greens, &senses.sight, senses.weapon_notice,
+                                        settings.green_safe_radius)
+                .Child<GreenDetourNode>("nearest_green_position", "travel_position", &senses.greens, &senses.sight,
+                                        senses.weapon_notice, settings.green_detour, settings.green_safe_radius)
+                .Child<GoToNode>("travel_position")
                 .Child<RenderPathNode>(Vector3f(0.0f, 1.0f, 0.0f))
                 .End()
-            .Composite(CreatePatrol(settings, &senses.memory))
+            .Composite(CreatePatrol(settings, senses))
             .End()
         .End();
   // clang-format on

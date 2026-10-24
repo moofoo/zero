@@ -13,6 +13,7 @@
 #include <zero/zones/chaos/EnemySight.h>
 #include <zero/zones/chaos/Motives.h>
 #include <zero/zones/chaos/EnergyEstimate.h>
+#include <zero/zones/chaos/GreenSight.h>
 #include <zero/zones/chaos/Opportunities.h>
 #include <zero/zones/chaos/PlayerHistory.h>
 #include <zero/zones/chaos/TargetLock.h>
@@ -83,7 +84,8 @@ static std::vector<Vector2f> ParseWaypoints(std::string_view text) {
 }
 
 constexpr float kDefaultGreenUpgradeTarget = 0.75f;
-constexpr float kDefaultGreenMaxDistance = 25.0f;
+constexpr float kDefaultGreenDetour = 8.0f;
+constexpr float kDefaultGreenSafeRadius = 25.0f;
 // How likely a bot with no Awareness is to notice a shot or hit on its screen, for its estimate of enemy energy.
 constexpr float kDefaultShotAwareness = 0.7f;
 // The bot's screen, in pixels: what it can see of weapons, shots and hits.
@@ -352,11 +354,15 @@ struct ChaosBehavior : public behavior::Behavior {
     if (ctx.bot->combat_logger) ctx.bot->combat_logger->WriteTactic("motive", to_string(motive));
     if (!settings.places.empty()) Log(LogLevel::Info, "Roaming %zu places", settings.places.size());
 
-    // Chase greens like a player: anywhere while the ship still needs upgrades, then only nearby ones.
+    // Greens like a player (ticket 32): the nearest the bot has noticed while the ship still needs upgrades, and
+    // always those on its way, off it by at most GreenDetour tiles, when safe.
     float green_upgrade_target = lookup.GetFloat("GreenUpgradeTarget").value_or(kDefaultGreenUpgradeTarget);
-    float green_max_distance = lookup.GetFloat("GreenMaxDistance").value_or(kDefaultGreenMaxDistance);
     ctx.blackboard.Set("green_upgrade_target", green_upgrade_target);
-    ctx.blackboard.Set("green_max_distance", green_max_distance);
+    settings.green_detour = std::max(0.0f, lookup.GetFloat("GreenDetour").value_or(kDefaultGreenDetour));
+    settings.green_safe_radius = std::max(0.0f, lookup.GetFloat("GreenSafeRadius").value_or(kDefaultGreenSafeRadius));
+    greens = std::make_unique<GreenSight>(*ctx.bot, awareness.value_or(1.0f), !awareness.has_value(), view_extent);
+    Log(LogLevel::Info, "Greens on the way: off it by up to %.0f tiles, no enemy within %.0f", settings.green_detour,
+        settings.green_safe_radius);
   }
 
   std::unique_ptr<behavior::BehaviorNode> CreateTree(behavior::ExecuteContext& ctx) override {
@@ -376,7 +382,7 @@ struct ChaosBehavior : public behavior::Behavior {
               .Child<PlayerChangeFrequencyNode>("request_freq")
               .End()
           .Composite(CreateCombatTree(settings, {*estimate, *history, *target_lock, *decision, *opportunities,
-                                                  weapon_notice.get(), *sight, *memory}))
+                                                  weapon_notice.get(), *sight, *memory, *greens}))
           .End();
     // clang-format on
 
@@ -389,6 +395,7 @@ struct ChaosBehavior : public behavior::Behavior {
   std::unique_ptr<WeaponNotice> weapon_notice;
   std::unique_ptr<EnemySight> sight;
   std::unique_ptr<DeathMemory> memory;
+  std::unique_ptr<GreenSight> greens;
   std::unique_ptr<Opportunities> opportunities;
   std::unique_ptr<TargetLock> target_lock;
   std::unique_ptr<CommitDecision> decision;

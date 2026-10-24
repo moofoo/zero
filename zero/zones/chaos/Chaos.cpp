@@ -161,7 +161,9 @@ static int GetRequestedShip(ZeroBot& bot) {
 }
 
 // Looks a setting up in the bot's skill level, then its aggression preset, then its ship's section, then [Chaos]
-// (every bot's). A skill level can so override any style key, e.g. a veteran's own RetreatDistance.
+// (every bot's). A skill level can so override any style key, e.g. a veteran's own RetreatDistance. It can also shift
+// one (ticket 33): Offset.<key> in the skill section is added to whatever value the bot would otherwise have, from its
+// preset, ship, [Chaos] or the built-in default, so a level plays better without losing its preset's style.
 struct SettingLookup {
   Config& config;
   std::string skill_group;
@@ -177,10 +179,24 @@ struct SettingLookup {
     return value;
   }
 
+  // The skill level's Offset.<key>, or 0.
+  float Offset(const char* key) const {
+    if (skill_group.empty()) return 0.0f;
+    auto value = config.GetString(skill_group, (std::string("Offset.") + key).c_str());
+    return value ? (float)atof(*value) : 0.0f;
+  }
+
+  // A float setting with the level's offset, if the setting is set anywhere.
   std::optional<float> GetFloat(const char* key) const {
     auto value = Get(key);
     if (!value) return {};
-    return (float)atof(*value);
+    return (float)atof(*value) + Offset(key);
+  }
+
+  // A float setting with the level's offset, or the built-in default with it.
+  float Value(const char* key, float fallback) const {
+    auto value = GetFloat(key);
+    return value ? *value : fallback + Offset(key);
   }
 };
 
@@ -217,12 +233,13 @@ struct ChaosBehavior : public behavior::Behavior {
     settings.retreat_distance = lookup.GetFloat("RetreatDistance");
     settings.weak_enemy_energy = lookup.GetFloat("WeakEnemyEnergy");
     settings.bomb_min_range = lookup.GetFloat("BombMinRange");
+    if (!settings.bomb_min_range && lookup.Offset("BombMinRange") != 0.0f) settings.bomb_min_range = lookup.Offset("BombMinRange");
     settings.dodge_threshold = lookup.GetFloat("DodgeThreshold");
     settings.repel_trigger = lookup.GetFloat("RepelTrigger");
     settings.antiwarp_energy = lookup.GetFloat("AntiwarpEnergy");
     settings.bomb_overlap_damage = lookup.GetFloat("BombOverlapDamage");
     settings.shot_spread_range = lookup.GetFloat("ShotSpreadRange");
-    settings.bomb_appetite = lookup.GetFloat("BombAppetite").value_or(settings.bomb_appetite);
+    settings.bomb_appetite = lookup.Value("BombAppetite", settings.bomb_appetite);
     auto engage = lookup.Get("Engage");
     settings.engage_close = engage && std::string_view(*engage) == "close";
     settings.reaction_ticks = (int)(skill_float("ReactionMs").value_or(0.0f) / kMsPerTick);
@@ -234,8 +251,8 @@ struct ChaosBehavior : public behavior::Behavior {
     settings.piloting = std::clamp(skill_float("Piloting").value_or(1.0f), 0.0f, 1.0f);
     settings.cover_fire = lookup.GetFloat("CoverFire").value_or(1.0f) > 0.5f;
     settings.mine_cover = lookup.GetFloat("MineCover").value_or(1.0f) > 0.5f;
-    settings.mine_cover_range = lookup.GetFloat("MineCoverRange").value_or(settings.mine_cover_range);
-    settings.accept_confidence = lookup.GetFloat("AcceptConfidence").value_or(settings.accept_confidence);
+    settings.mine_cover_range = lookup.Value("MineCoverRange", settings.mine_cover_range);
+    settings.accept_confidence = lookup.Value("AcceptConfidence", settings.accept_confidence);
     auto navigation = lookup.Get("Navigation");
     if (navigation) {
       std::string_view style(*navigation);
@@ -298,17 +315,17 @@ struct ChaosBehavior : public behavior::Behavior {
     float shot_awareness = awareness.value_or(kDefaultShotAwareness);
     estimate = std::make_unique<EnergyEstimate>(*ctx.bot, shot_awareness, view_extent);
     history = std::make_unique<PlayerHistory>(*ctx.bot);
-    float target_leash = lookup.GetFloat("TargetLeashDistance").value_or(kDefaultTargetLeashDistance);
-    float target_lock_seconds = lookup.GetFloat("TargetLockSeconds").value_or(kDefaultTargetLockSeconds);
+    float target_leash = lookup.Value("TargetLeashDistance", kDefaultTargetLeashDistance);
+    float target_lock_seconds = lookup.Value("TargetLockSeconds", kDefaultTargetLockSeconds);
     // The commit decision: risk appetite from the style keys, judgement from Judgement above.
     decision_settings.commit_confidence =
-        lookup.GetFloat("CommitConfidence").value_or(decision_settings.commit_confidence);
+        lookup.Value("CommitConfidence", decision_settings.commit_confidence);
     decision_settings.disengage_confidence =
-        lookup.GetFloat("DisengageConfidence").value_or(decision_settings.disengage_confidence);
-    decision_settings.commit_energy = lookup.GetFloat("CommitEnergy").value_or(decision_settings.commit_energy);
+        lookup.Value("DisengageConfidence", decision_settings.disengage_confidence);
+    decision_settings.commit_energy = lookup.Value("CommitEnergy", decision_settings.commit_energy);
     decision_settings.lead_skill = settings.lead_skill;
-    auto leash = lookup.GetFloat("LeashDistance");
-    decision_settings.retreat_distance = settings.retreat_distance.value_or(leash.value_or(kDefaultLeashDistance));
+    float leash = lookup.Value("LeashDistance", kDefaultLeashDistance);
+    decision_settings.retreat_distance = settings.retreat_distance.value_or(leash);
     // Spotting opponents' mistakes: as likely as the bot's Judgement (without one, always), noticing their bombs as it
     // notices any weapon.
     opportunities = std::make_unique<Opportunities>(*ctx.bot, judgement ? std::clamp(*judgement, 0.0f, 1.0f) : 1.0f,
@@ -324,8 +341,7 @@ struct ChaosBehavior : public behavior::Behavior {
     target_lock->stalker = settings.stalks;
     Log(LogLevel::Info, "View %dx%d, awareness of shots and hits %.2f", view_width, view_height, shot_awareness);
 
-    auto leash_distance = lookup.GetFloat("LeashDistance");
-    if (leash_distance) ctx.blackboard.Set("leash_distance", *leash_distance);
+    ctx.blackboard.Set("leash_distance", lookup.Value("LeashDistance", kDefaultLeashDistance));
 
     // Without configured waypoints the list is empty, so the bot holds position when there's nothing to fight
     // rather than flying at SVS map coordinates that land in Chaos walls.

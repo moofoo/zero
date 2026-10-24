@@ -31,6 +31,8 @@ struct WeaponNotice : behavior::WeaponNoticer, EventHandler<BotController::Updat
   std::optional<u32> NoticedAt(const Weapon& weapon) const;
   // When the bot last saw a player fire a bomb (from the bombs it noticed, and how old each was then), if ever.
   std::optional<u32> LastBombSeen(u16 player_id) const;
+  // ... and fire bullets (ticket 33, reading when its guns are ready again).
+  std::optional<u32> LastBulletSeen(u16 player_id) const;
 
   void HandleEvent(const BotController::UpdateEvent& event) override;
 
@@ -50,6 +52,7 @@ struct WeaponNotice : behavior::WeaponNoticer, EventHandler<BotController::Updat
   };
   std::unordered_map<u64, Noticed> noticed;
   std::unordered_map<u16, u32> last_bomb;
+  std::unordered_map<u16, u32> last_bullet;
   u32 next_roll_tick = 0;
   std::mt19937 random;
 };

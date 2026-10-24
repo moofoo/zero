@@ -65,6 +65,12 @@ struct CombatSettings {
   float lead_skill = 1.0f;
   // How often a sideways dodge goes the wrong way.
   float dodge_error = 0.0f;
+  // Reading the shooter (ticket 33), 0-1: the chance each 0.1 s of seeing an enemy's shot coming before it's fired,
+  // and how early; 0 is none.
+  float anticipation = 0.0f;
+  // Dodge paths (ticket 33), 0-1: 0 pushes sideways from the incoming weapons; above, the dodge weighs escape
+  // directions against more of the noticed weapons and walls, and from 0.5 other enemies' lines of fire.
+  float dodge_planning = 0.0f;
   // How well the bot times its thrust in a fight, 0-1: 0 thrusts whenever it wants to move, however its ship faces;
   // 1 thrusts only when its heading helps, by the commit decision's mode (ticket 19).
   float piloting = 1.0f;

@@ -50,6 +50,12 @@ std::optional<u32> WeaponNotice::LastBombSeen(u16 player_id) const {
   return it->second;
 }
 
+std::optional<u32> WeaponNotice::LastBulletSeen(u16 player_id) const {
+  auto it = last_bullet.find(player_id);
+  if (it == last_bullet.end()) return {};
+  return it->second;
+}
+
 float WeaponNotice::Chance(const Weapon& weapon, Vector2f self_position, size_t on_screen) const {
   Vector2f delta = weapon.position - self_position;
   float edge = fmaxf(fabsf(delta.x) / view_extent.x, fabsf(delta.y) / view_extent.y);
@@ -95,12 +101,14 @@ void WeaponNotice::HandleEvent(const BotController::UpdateEvent& event) {
 
     noticed[key] = {now, weapon->end_tick};
     bool bomb = weapon->data.type == WeaponType::Bomb || weapon->data.type == WeaponType::ProximityBomb;
-    if (bomb && !weapon->data.alternate) {
+    bool bullet = weapon->data.type == WeaponType::Bullet || weapon->data.type == WeaponType::BouncingBullet;
+    if ((bomb && !weapon->data.alternate) || bullet) {
       // When it was fired: its age, from its lifetime and when it ends.
       s32 alive = weapons.GetWeaponTotalAliveTime(weapon->data.type, weapon->data.alternate);
       u32 fired = now - (u32)std::max(0, alive - (s32)TICK_DIFF(weapon->end_tick, now));
-      auto it = last_bomb.find(weapon->player_id);
-      if (it == last_bomb.end() || TICK_GT(fired, it->second)) last_bomb[weapon->player_id] = fired;
+      auto& last = bomb ? last_bomb : last_bullet;
+      auto it = last.find(weapon->player_id);
+      if (it == last.end() || TICK_GT(fired, it->second)) last[weapon->player_id] = fired;
     }
   }
 }

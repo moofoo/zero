@@ -11,25 +11,46 @@
     python3 -m venv .venv && .venv/bin/pip install torch --index-url https://download.pytorch.org/whl/cpu numpy
     nice -n 19 .venv/bin/python train.py --envs 16 --steps 1500000 --run check1
 
-## On the P15 (Windows 11, RTX A5000): one-time setup
+## On the P15 (Windows 11, RTX A5000)
 
-1. In an administrator PowerShell, install WSL with Ubuntu (`wsl --install -d Ubuntu`), then restart and create the
-   Ubuntu user. The NVIDIA Windows driver already gives WSL the GPU; don't install a Linux driver inside it.
-   Check from Ubuntu with `nvidia-smi`.
-2. In Ubuntu:
+### What has to be done at the P15 itself
 
-       sudo apt update && sudo apt install -y build-essential cmake git python3-venv openssh-server
-       git clone -b duel-sim https://github.com/moofoo/zero.git ~/zero
-       cmake -S ~/zero -B ~/zero/build -DCMAKE_BUILD_TYPE=Release && cmake --build ~/zero/build -j --target duelsim_lib
-       cd ~/zero/sim && python3 -m venv .venv && .venv/bin/pip install torch numpy   # the CUDA build
-       .venv/bin/python -c "import torch; print(torch.cuda.is_available())"
+1. In an administrator PowerShell: `wsl --install -d Ubuntu`, restart, and create the Ubuntu user when it asks. The
+   NVIDIA Windows driver already gives WSL the GPU; don't install a Linux driver inside Ubuntu.
+2. Mirrored networking, so the laptop can reach Ubuntu at the P15's own address: create `%UserProfile%\.wslconfig`
+   with
 
-3. The map: copy `chaos-offline/work/bots/zones/Chaos/*.lvl` from this laptop to `~/chaos/zones/Chaos/` on the P15,
-   and pass `--map-dir ~/chaos` to `train.py`.
-4. SSH from this laptop: in Ubuntu run `sudo service ssh start`. On Windows, forward a port to WSL
-   (`netsh interface portproxy add v4tov4 listenport=2222 connectport=22 connectaddress=<WSL ip>`) and allow it
-   through the firewall, or set WSL's networking to mirrored (`networkingMode=mirrored` in `%UserProfile%\.wslconfig`)
-   so that `ssh -p 22 <user>@<P15>` reaches Ubuntu directly. Put this laptop's public key in `~/.ssh/authorized_keys`.
-5. Training: `cd ~/zero/sim && nohup .venv/bin/python train.py --device cuda --envs 64 --steps 30000000 --run p15a --map-dir ~/chaos &`.
-   The environments step one after another on one CPU core (about 900 steps a second here), so 30 million steps
-   take most of a night; stepping them in worker processes is the next speed-up if that's too slow.
+       [wsl2]
+       networkingMode=mirrored
+
+   then `wsl --shutdown` in PowerShell and open Ubuntu again.
+3. In Ubuntu, an SSH server that the laptop's key can log in to:
+
+       sudo apt update && sudo apt install -y openssh-server
+       sudo sed -i 's/^#\?Port .*/Port 2222/' /etc/ssh/sshd_config && sudo service ssh start
+       mkdir -p ~/.ssh && nano ~/.ssh/authorized_keys     # paste the laptop's ~/.ssh/id_ed25519.pub
+
+   and in an administrator PowerShell, open the port:
+   `New-NetFirewallRule -DisplayName "WSL ssh" -Direction Inbound -Protocol TCP -LocalPort 2222 -Action Allow`.
+   (Port 2222 keeps clear of any SSH server on Windows itself.) `sudo service ssh start` is needed again after the
+   P15 restarts.
+4. Check from the laptop: `ssh -p 2222 <ubuntu user>@<P15 name or address> nvidia-smi`.
+
+### The rest, over SSH from the laptop
+
+    sudo apt install -y build-essential cmake git python3-venv
+    git clone -b duel-sim https://github.com/moofoo/zero.git ~/zero
+    cmake -S ~/zero -B ~/zero/build -DCMAKE_BUILD_TYPE=Release && cmake --build ~/zero/build -j --target duelsim_lib
+    cd ~/zero/sim && python3 -m venv .venv && .venv/bin/pip install torch numpy   # the CUDA build
+    .venv/bin/python -c "import torch; print(torch.cuda.is_available())"
+    mkdir -p ~/chaos/zones/Chaos    # then from the laptop:
+    # scp -P 2222 ~/newcode/chaos-offline/work/bots/zones/Chaos/*.lvl <user>@<P15>:chaos/zones/Chaos/
+
+Training, detached so it survives the SSH session:
+
+    cd ~/zero/sim && nohup .venv/bin/python train.py --device cuda --envs 64 --steps 30000000 --run p15a \
+        --map-dir ~/chaos > runs/p15a.out 2>&1 &
+
+The environments step one after another on one CPU core (about 1,000 steps a second on the laptop), so 30 million
+steps take about 8 hours, and the network is small enough that the GPU may not beat the CPU (`--device cpu`; worth a
+short timing of both). Stepping the environments in worker processes, one a core, is the speed-up if that's too slow.

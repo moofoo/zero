@@ -155,7 +155,9 @@ class DuelEnv:
             angle = self.random.uniform(0, 2 * math.pi)
             gap = self.random.uniform(*self.spawn_gap)
             bx, by = ax + gap * math.cos(angle), ay + gap * math.sin(angle)
-            if self._open(ax, ay) and self._open(bx, by):
+            # Both inside the spawn square, so a walled area (the duel box) keeps both ships in.
+            inside = abs(bx - cx) <= self.spawn_radius and abs(by - cy) <= self.spawn_radius
+            if inside and self._open(ax, ay) and self._open(bx, by):
                 return (ax, ay, self.random.random()), (bx, by, self.random.random())
         raise RuntimeError("no open spawn spots found")
 

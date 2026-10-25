@@ -593,11 +593,13 @@ int Replay(char** argv) {
 namespace {
 
 // The fair observation (ticket 42): what a player in the seat could see, kFairSize floats, scaled to about -1..1.
-// Own ship (8): vx, vy (/20 tiles/s), heading cos, sin, energy share, ticks until bullet (/100) and bomb (/150) are
-// ready, alive. Opponent (8): on screen (the 1920x1080 screen: 60 x 33.75 tiles either side), only on radar, dx, dy
-// (/60), and on screen only, dvx, dvy (/20) and its heading cos, sin. Enemy weapons on screen, the nearest
-// kFairWeapons (8 each): dx, dy (/60), dvx, dvy (/40), bullet, bomb, other, present. Walls: kFairRays rays from the
-// ship, the distance to the first wall (/kRayLength), 1 for none.
+// Positions and velocities are in the ship's frame, as (ahead, right) of its heading, so "the enemy is to the right"
+// is one number. Own ship (8): velocity ahead, right (/20 tiles/s), heading x, y (on the map), energy share, ticks
+// until bullet (/100) and bomb (/150) are ready, alive. Opponent (8): on screen (the 1920x1080 screen: 60 x 33.75
+// tiles either side), only on radar, offset ahead, right (/60), and on screen only, relative velocity ahead, right
+// (/20) and its heading ahead, right. Enemy weapons on screen, the nearest kFairWeapons (8 each): offset ahead, right
+// (/60), relative velocity ahead, right (/40), bullet, bomb, other, present. Walls: kFairRays rays from the ship, the
+// first straight ahead and then clockwise, the distance to the first wall (/kRayLength), 1 for none.
 constexpr int kFairWeapons = 16;
 constexpr int kFairRays = 16;
 constexpr float kRayLength = 30.0f;
@@ -614,8 +616,11 @@ void FairObserve(Side& side, u16 other_pid, u32 tick, float* out) {
   Ship& ship = g.ship_controller.ship;
   int n = 0;
   Vector2f heading = self->GetHeading();
+  Vector2f right(-heading.y, heading.x);  // y grows down the map, so this is clockwise of the heading
+  auto ahead_of = [&](Vector2f v) { return v.x * heading.x + v.y * heading.y; };
+  auto right_of = [&](Vector2f v) { return v.x * right.x + v.y * right.y; };
   bool alive = self->ship < 8 && self->enter_delay <= 0.0f;
-  out[n++] = self->velocity.x / 20.0f, out[n++] = self->velocity.y / 20.0f;
+  out[n++] = ahead_of(self->velocity) / 20.0f, out[n++] = right_of(self->velocity) / 20.0f;
   out[n++] = heading.x, out[n++] = heading.y;
   out[n++] = ship.energy > 0 ? self->energy / (float)ship.energy : 0.0f;
   out[n++] = std::max<s32>(0, TICK_DIFF(ship.next_bullet_tick, tick)) / 100.0f;
@@ -628,11 +633,12 @@ void FairObserve(Side& side, u16 other_pid, u32 tick, float* out) {
     bool on_radar = !on_screen && g.radar.InRadarView(them->position);
     if (on_screen || on_radar) {
       out[n] = on_screen ? 1.0f : 0.0f, out[n + 1] = on_radar ? 1.0f : 0.0f;
-      out[n + 2] = d.x / 60.0f, out[n + 3] = d.y / 60.0f;
+      out[n + 2] = ahead_of(d) / 60.0f, out[n + 3] = right_of(d) / 60.0f;
       if (on_screen) {
         Vector2f dv = them->velocity - self->velocity;
         Vector2f h = them->GetHeading();
-        out[n + 4] = dv.x / 20.0f, out[n + 5] = dv.y / 20.0f, out[n + 6] = h.x, out[n + 7] = h.y;
+        out[n + 4] = ahead_of(dv) / 20.0f, out[n + 5] = right_of(dv) / 20.0f;
+        out[n + 6] = ahead_of(h), out[n + 7] = right_of(h);
       }
     }
   }
@@ -652,13 +658,14 @@ void FairObserve(Side& side, u16 other_pid, u32 tick, float* out) {
     const Weapon& w = *near[k].second;
     Vector2f d = w.position - self->position, dv = w.velocity - self->velocity;
     int c = WeaponClass(w.data);
-    out[n] = d.x / 60.0f, out[n + 1] = d.y / 60.0f, out[n + 2] = dv.x / 40.0f, out[n + 3] = dv.y / 40.0f;
+    out[n] = ahead_of(d) / 60.0f, out[n + 1] = right_of(d) / 60.0f;
+    out[n + 2] = ahead_of(dv) / 40.0f, out[n + 3] = right_of(dv) / 40.0f;
     out[n + 4] = c == 0, out[n + 5] = c == 1, out[n + 6] = c == 2, out[n + 7] = 1.0f;
   }
   auto& map = g.GetMap();
   for (int r = 0; r < kFairRays; ++r) {
     float angle = r * 2.0f * 3.14159265f / kFairRays;
-    Vector2f dir(cosf(angle), sinf(angle));
+    Vector2f dir = heading * cosf(angle) + right * sinf(angle);
     CastResult cast = map.Cast(self->position, dir, kRayLength, self->frequency);
     out[n++] = cast.hit ? cast.distance / kRayLength : 1.0f;
   }

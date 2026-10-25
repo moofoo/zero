@@ -104,20 +104,27 @@ class DuelEnv:
                 mask |= 1 << ACTIONS[name]
         return mask
 
-    # The policy's actions (ticket 42): three choices each step, no afterburner.
-    TURNS = ({"left": True}, {}, {"right": True})
+    # The policy's actions (ticket 42): three choices each step, no afterburner. A turn is held for the whole step
+    # (about 2.9 of the ship's 40 headings) or tapped for TAP_TICKS of it (about one heading), as a player taps the
+    # key to line up a shot.
+    TURNS = ({"left": True}, {"left": True}, {}, {"right": True}, {"right": True})
+    TAPPED = (False, True, False, True, False)
+    TAP_TICKS = 3
     THRUSTS = ({"forward": True}, {}, {"backward": True})
     FIRES = ({}, {"bullet": True}, {"bomb": True})
 
     @classmethod
     def choice(cls, turn, thrust, fire):
-        """Held inputs from the three choices: turn 0 left / 1 none / 2 right, thrust 0 forward / 1 none / 2 reverse,
-        fire 0 none / 1 bullet / 2 bomb."""
-        held = {}
-        held.update(cls.TURNS[turn])
-        held.update(cls.THRUSTS[thrust])
-        held.update(cls.FIRES[fire])
-        return cls.action(**held)
+        """A step's inputs from the three choices: turn 0 left / 1 tap left / 2 none / 3 tap right / 4 right, thrust
+        0 forward / 1 none / 2 reverse, fire 0 none / 1 bullet / 2 bomb. A tuple for step(): the held inputs, the
+        inputs after the tap, and the tap's ticks (None for no tap)."""
+        rest = {}
+        rest.update(cls.THRUSTS[thrust])
+        rest.update(cls.FIRES[fire])
+        first = dict(rest, **cls.TURNS[turn])
+        if cls.TAPPED[turn]:
+            return cls.action(**first), cls.action(**rest), cls.TAP_TICKS
+        return cls.action(**first), cls.action(**first), None
 
     def fair(self, side):
         """The side's fair observation, 150 ms old (ds_fair_observe): a list of fair_size floats."""
@@ -164,7 +171,14 @@ class DuelEnv:
                 "weapons": weapons}
 
     def step(self, action_a, action_b):
-        self.lib.ds_step(self.handle, action_a, action_b, self.frame_skip)
+        """Each action is a bitmask held for the step, or a tuple from choice() (inputs, inputs after a tap, ticks)."""
+        a = action_a if isinstance(action_a, tuple) else (action_a, action_a, None)
+        b = action_b if isinstance(action_b, tuple) else (action_b, action_b, None)
+        cuts = sorted({0, self.frame_skip} | {x[2] for x in (a, b) if x[2] is not None and x[2] < self.frame_skip})
+        for start, end in zip(cuts, cuts[1:]):
+            ma = a[0] if a[2] is None or start < a[2] else a[1]
+            mb = b[0] if b[2] is None or start < b[2] else b[1]
+            self.lib.ds_step(self.handle, ma, mb, end - start)
         self.ticks += self.frame_skip
         n = self.lib.ds_happenings(self.handle, self._events, 256)
         rewards = [0.0, 0.0]

@@ -3,7 +3,9 @@
     .venv/bin/python train.py --envs 16 --steps 2000000 --run local1
 
 The learner flies side 0 of every environment. Each episode's opponent (side 1) is, by turns: a frozen copy of the
-latest learner, a random earlier checkpoint (the league), or, until checkpoints exist, a scripted aimer. The policy
+latest learner (40%), a random earlier checkpoint (the league, 35%), or a scripted aimer (25%, --scripted-share; all
+of them until checkpoints exist), which keeps self-play honest against close-range aimed fire. Before the league come
+the aiming drills (DRILLS): a still target, a drifting one, then the aimer, each until it wins 80% (--no-drills skips). The policy
 sees only the fair observation (duelsim.DuelEnv.fair: 150 ms old, what a player could see) and chooses turn, thrust
 and fire ten times a second. The network: two layers of 256, a 256-unit GRU, a value head and three action heads.
 Every --eval-every iterations it plays the scripted aimer for a score that doesn't drift with the league.
@@ -28,7 +30,7 @@ class Policy(nn.Module):
         super().__init__()
         self.body = nn.Sequential(nn.Linear(obs_size, hidden), nn.Tanh(), nn.Linear(hidden, hidden), nn.Tanh())
         self.gru = nn.GRU(hidden, hidden, batch_first=True)
-        self.heads = nn.ModuleList([nn.Linear(hidden, 3) for _ in range(3)])  # turn, thrust, fire
+        self.heads = nn.ModuleList([nn.Linear(hidden, k) for k in (5, 3, 3)])  # turn, thrust, fire (DuelEnv.choice)
         self.value = nn.Linear(hidden, 1)
         self.hidden = hidden
 
@@ -52,28 +54,29 @@ class Policy(nn.Module):
 class ScriptedAimer:
     """Turns toward the enemy it sees, holds about 12 tiles (braking when closing fast), and fires when lined up;
     otherwise wanders. Uses only the fair observation's own and opponent fields. It sees its own heading 1.5 steps
-    late, so it allows for the turns it has made since, as a player allows for lag (a step turns about 0.45 rad), and it
-    leads its shots."""
+    late, so it allows for the turns it has made since, as a player allows for lag (a step turns about 0.45 rad, a tap
+    about 0.14), and it leads its shots."""
     TURN_RATE = 0.45
+    TURN_AMOUNT = (-1.0, -0.3, 0.0, 0.3, 1.0)  # each turn choice's share of a full step's turn
     BULLET_SPEED = 12.5  # tiles a second, the Warbird's in the duel profile
 
     def __init__(self, rng):
         self.rng = rng
-        self.turns = [0, 0]  # the last two steps' turns, latest last: -1 left, 0 none, 1 right
+        self.turns = [0.0, 0.0]  # the last two steps' turns (TURN_AMOUNT), latest last
 
     def reset(self):
-        self.turns = [0, 0]
+        self.turns = [0.0, 0.0]
 
     def __call__(self, obs):
         turn, thrust, fire = self.choose(obs)
-        self.turns = [self.turns[1], turn - 1]
+        self.turns = [self.turns[1], self.TURN_AMOUNT[turn]]
         return turn, thrust, fire
 
     def choose(self, obs):
         rng = self.rng
-        hx, hy = obs[2], obs[3]
         if not (obs[8] > 0.5 or obs[9] > 0.5):
-            return 2 if rng.random() < 0.5 else 1, 0 if rng.random() < 0.5 else 1, 0
+            return 4 if rng.random() < 0.5 else 2, 0 if rng.random() < 0.5 else 1, 0
+        # In the ship's frame: x ahead, y to the right.
         dx, dy = obs[10] * 60.0, obs[11] * 60.0
         dvx, dvy = obs[12] * 20.0, obs[13] * 20.0
         dist = math.hypot(dx, dy) or 1.0
@@ -87,9 +90,15 @@ class ScriptedAimer:
         if a < 0 and disc >= 0:
             t = (-b - math.sqrt(disc)) / (2.0 * a)
             px, py = px + dvx * t, py + dvy * t
-        angle = math.atan2(hx * py - hy * px, hx * px + hy * py)
+        angle = math.atan2(py, px)
         angle -= self.TURN_RATE * (self.turns[1] + 0.5 * self.turns[0])
-        turn = 1 if abs(angle) < 0.25 else (2 if angle > 0 else 0)
+        # Hold the turn when far off, tap it when close (a tap is about 0.14 rad), and leave it within half a tap.
+        if abs(angle) < 0.07:
+            turn = 2
+        elif abs(angle) < 0.3:
+            turn = 3 if angle > 0 else 1
+        else:
+            turn = 4 if angle > 0 else 0
         closing = -(dx * obs[12] + dy * obs[13]) * 20.0 / dist
         if dist > 18:
             thrust = 0 if closing < 8 else 1
@@ -98,9 +107,33 @@ class ScriptedAimer:
         else:
             thrust = 1
         fire = 0
-        if abs(angle) < 0.3:
+        if abs(angle) < 0.15:
             fire = 2 if dist > 10 and rng.random() < 0.25 else 1
         return turn, thrust, fire
+
+
+class Drifter:
+    """A drill target that flies about without firing: it holds a random turn and thrust for 0.5 to 2 seconds."""
+
+    def __init__(self, rng):
+        self.rng = rng
+        self.held, self.left = (2, 1, 0), 0
+
+    def reset(self):
+        self.left = 0
+
+    def __call__(self, obs):
+        if self.left <= 0:
+            self.held = (self.rng.choice((0, 2, 2, 4)), self.rng.choice((0, 0, 1, 2)), 0)
+            self.left = self.rng.randint(5, 20)
+        self.left -= 1
+        return self.held
+
+
+# The aiming drills, in order: a ship that sits still, one that drifts, then the scripted aimer. The learner moves to
+# the next when it wins --drill-pass of its last --drill-window episodes against the current one, and after the last
+# to the league.
+DRILLS = ("still", "drift", "scripted")
 
 
 def act(policy, obs, h, starts, greedy=False):
@@ -166,6 +199,11 @@ def main():
     p.add_argument("--eval-every", type=int, default=20)
     p.add_argument("--eval-episodes", type=int, default=32)
     p.add_argument("--max-seconds", type=float, default=60.0)
+    p.add_argument("--no-drills", action="store_true", help="start in the league, without the aiming drills")
+    p.add_argument("--drill-pass", type=float, default=0.8)
+    p.add_argument("--drill-window", type=int, default=100)
+    p.add_argument("--scripted-share", type=float, default=0.25, help="the share of episodes against the aimer")
+    p.add_argument("--spawn-gap", type=float, nargs=2, default=(20.0, 40.0), help="tiles between the ships at spawn")
     p.add_argument("--run", default="local")
     p.add_argument("--device", default="cpu")
     p.add_argument("--map-dir", default=None, help="the folder holding zones/Chaos/<map>.lvl")
@@ -178,7 +216,7 @@ def main():
     out.mkdir(parents=True, exist_ok=True)
     device = torch.device(args.device)
     torch.set_default_device(device)  # every tensor below, and the networks, live on the device
-    envs = [DuelEnv(map_dir=args.map_dir, seed=args.seed * 1000 + i, max_seconds=args.max_seconds) for i in range(args.envs)]
+    envs = [DuelEnv(map_dir=args.map_dir, spawn_gap=tuple(args.spawn_gap), seed=args.seed * 1000 + i, max_seconds=args.max_seconds) for i in range(args.envs)]
     eval_envs = [DuelEnv(map_dir=args.map_dir, seed=args.seed * 1000 + 500 + i, max_seconds=args.max_seconds) for i in range(8)]
     size = envs[0].fair_size
     policy = Policy(size).to(device)
@@ -189,6 +227,9 @@ def main():
 
     n = args.envs
     aimers = [ScriptedAimer(rng) for _ in range(n)]
+    drifters = [Drifter(rng) for _ in range(n)]
+    stage = len(DRILLS) if args.no_drills else 0
+    stage_results = []
     for e in envs:
         e.reset()
     obs = torch.tensor([e.fair(0) for e in envs])
@@ -196,14 +237,19 @@ def main():
     h = policy.initial(n)
     opp_h = opponent.initial(n)
     starts = torch.ones(n)
-    # Each environment's opponent for its current episode: "latest", a checkpoint path, or "scripted".
-    kinds = ["scripted"] * n
     league_nets = {}
 
     def pick_opponent():
-        if not league:
+        if stage < len(DRILLS):
+            return DRILLS[stage]
+        r = rng.random()
+        if not league or r < args.scripted_share:
             return "scripted"
-        return "latest" if rng.random() < 0.5 else rng.choice(league)
+        # The rest: a bit over half against the latest, the others against a random checkpoint.
+        return "latest" if r < args.scripted_share + 0.55 * (1 - args.scripted_share) else rng.choice(league)
+
+    # Each environment's opponent for its current episode: a drill, "scripted", "latest" or a checkpoint path.
+    kinds = [pick_opponent() for _ in range(n)]
 
     def opponent_net(kind):
         if kind == "latest":
@@ -232,7 +278,13 @@ def main():
             for i, k in enumerate(kinds):
                 groups.setdefault(k, []).append(i)
             for k, idx in groups.items():
-                if k == "scripted":
+                if k == "still":
+                    for i in idx:
+                        opp_choice[i] = (2, 1, 0)
+                elif k == "drift":
+                    for i in idx:
+                        opp_choice[i] = drifters[i](None)
+                elif k == "scripted":
                     for i in idx:
                         opp_choice[i] = aimers[i](opp_obs[i].tolist())
                 else:
@@ -254,7 +306,17 @@ def main():
                 if done:
                     dones[i] = 1.0
                     dead = {d["side"] for d in info["deaths"]}
-                    results.append((kinds[i], 1 in dead and 0 not in dead, 0 in dead and 1 not in dead))
+                    won = 1 in dead and 0 not in dead
+                    results.append((kinds[i], won, 0 in dead and 1 not in dead))
+                    if stage < len(DRILLS) and kinds[i] == DRILLS[stage]:
+                        stage_results.append(won)
+                        recent = stage_results[-args.drill_window:]
+                        if len(recent) >= args.drill_window and sum(recent) / len(recent) >= args.drill_pass:
+                            print(json.dumps({"passed": DRILLS[stage], "iteration": iteration, "steps": total}),
+                                  flush=True)
+                            log.write(json.dumps({"passed": DRILLS[stage], "iteration": iteration, "steps": total}) + "\n")
+                            stage += 1
+                            stage_results = []
                     episode_rewards.append(running[i])
                     running[i] = 0.0
                     e.reset()
@@ -262,6 +324,7 @@ def main():
                     kinds[i] = pick_opponent()
                     opp_h[:, i] = 0.0
                     aimers[i].reset()
+                    drifters[i].reset()
                 new_obs.append(e.fair(0))
                 new_opp.append(e.fair(1))
             buf_obs.append(obs)
@@ -325,8 +388,10 @@ def main():
             league.append(str(path))
         record = {"iteration": iteration, "steps": total, "seconds": round(time.time() - started),
                   "episode_reward": round(sum(episode_rewards[-100:]) / max(len(episode_rewards[-100:]), 1), 3)}
-        for kind in ("scripted", "latest", "league"):
-            rs = [r for r in results[-300:] if (r[0] == kind if kind != "league" else r[0] not in ("scripted", "latest"))]
+        record["stage"] = DRILLS[stage] if stage < len(DRILLS) else "league"
+        for kind in ("still", "drift", "scripted", "latest", "league"):
+            rs = [r for r in results[-300:]
+                  if (r[0] == kind if kind != "league" else r[0] not in DRILLS + ("latest",))]
             if rs:
                 record[f"vs_{kind}"] = {"episodes": len(rs), "won": round(sum(r[1] for r in rs) / len(rs), 2),
                                         "lost": round(sum(r[2] for r in rs) / len(rs), 2)}

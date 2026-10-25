@@ -63,13 +63,18 @@ class ScriptedAimer:
     BULLET_SPEED = 12.5  # tiles a second, the Warbird's in the duel profile
     DODGE_SECONDS, DODGE_TILES = 3.0, 7.0  # with dodge, bombs passing this near this soon are dodged
 
-    def __init__(self, rng, dodge=False):
+    # Styles: "hold" keeps about 12 tiles; "rush" closes to point-blank and fires bullets, as Veteran does when it
+    # commits; "retreat" holds but, below half energy, turns and flies off until it has recharged, then comes back.
+    def __init__(self, rng, dodge=False, style="hold"):
         self.rng = rng
         self.dodge = dodge
+        self.style = style
+        self.fleeing = False
         self.turns = [0.0, 0.0]  # the last two steps' turns (TURN_AMOUNT), latest last
 
     def reset(self):
         self.turns = [0.0, 0.0]
+        self.fleeing = False
 
     def __call__(self, obs):
         turn, thrust, fire = self.choose(obs)
@@ -125,6 +130,13 @@ class ScriptedAimer:
             t = (-b - math.sqrt(disc)) / (2.0 * a)
             px, py = px + dvx * t, py + dvy * t
         angle = math.atan2(py, px)
+        if self.style == "retreat":
+            if obs[4] < 0.5:
+                self.fleeing = True
+            elif obs[4] > 0.9:
+                self.fleeing = False
+        if self.fleeing:  # face away from the enemy and go
+            angle = math.atan2(-dy, -dx)
         angle -= self.TURN_RATE * (self.turns[1] + 0.5 * self.turns[0])
         # Hold the turn when far off, tap it when close (a tap is about 0.14 rad), and leave it within half a tap.
         if abs(angle) < 0.07:
@@ -134,7 +146,11 @@ class ScriptedAimer:
         else:
             turn = 4 if angle > 0 else 0
         closing = -(dx * obs[12] + dy * obs[13]) * 20.0 / dist
-        if dist > 18:
+        if self.fleeing:
+            return turn, (0 if abs(angle) < 1.0 else 1), 0
+        if self.style == "rush":
+            thrust = 2 if dist < 2 else (0 if dist > 4 and closing < 12 else 1)
+        elif dist > 18:
             thrust = 0 if closing < 8 else 1
         elif dist < 8 or closing > 4:
             thrust = 2
@@ -168,6 +184,8 @@ class Drifter:
 # the next when it wins --drill-pass of its last --drill-window episodes against the current one, and after the last
 # to the league.
 DRILLS = ("still", "drift", "scripted")
+# The scripted opponents a run can include (--scripted-kinds), by their ScriptedAimer style.
+SCRIPTED = {"scripted": "hold", "rusher": "rush", "retreater": "retreat"}
 
 
 def batch(arrays):
@@ -187,7 +205,7 @@ def act(policy, obs, h, starts, greedy=False):
     return torch.stack(choices, -1), logp, value[:, 0], h
 
 
-def evaluate(policy, envs, episodes, rng, dodge=False):
+def evaluate(policy, envs, episodes, rng, dodge=False, style="hold"):
     """Greedy learner against the scripted aimer (one that dodges bombs, with dodge): wins, losses, draws over
     `episodes`."""
     wins = losses = draws = 0
@@ -196,7 +214,7 @@ def evaluate(policy, envs, episodes, rng, dodge=False):
     obs = batch(fair_a)
     h = policy.initial(n)
     starts = torch.ones(n)
-    aimers = [ScriptedAimer(rng, dodge) for _ in range(n)]
+    aimers = [ScriptedAimer(rng, dodge, style) for _ in range(n)]
     done_count = 0
     while done_count < episodes:
         choice, _, _, h = act(policy, obs, h, starts, greedy=True)
@@ -236,7 +254,9 @@ def main():
     p.add_argument("--eval-episodes", type=int, default=32)
     p.add_argument("--max-seconds", type=float, default=60.0)
     p.add_argument("--init", default=None, help="a checkpoint to start from")
-    p.add_argument("--dodge", action="store_true", help="the scripted aimer dodges bombs")
+    p.add_argument("--dodge", action="store_true", help="the scripted opponents dodge bombs")
+    p.add_argument("--scripted-kinds", default="scripted", help="the scripted opponents in the league's scripted "
+                   "share, by turns: scripted (holds about 12 tiles), rusher, retreater (SCRIPTED)")
     p.add_argument("--time-cost", type=float, default=0.0, help="taken from the learner's reward each step")
     p.add_argument("--draw-penalty", type=float, default=0.0, help="taken from the learner's reward at a timeout")
     p.add_argument("--no-drills", action="store_true", help="start in the league, without the aiming drills")
@@ -270,7 +290,9 @@ def main():
     league = []  # checkpoint paths
 
     n = args.envs
-    aimers = [ScriptedAimer(rng, args.dodge) for _ in range(n)]
+    kinds_scripted = args.scripted_kinds.split(",")
+    scripted = {k: [ScriptedAimer(rng, args.dodge, SCRIPTED[k]) for _ in range(n)] for k in SCRIPTED}
+    aimers = scripted["scripted"]
     drifters = [Drifter(rng) for _ in range(n)]
     stage = len(DRILLS) if args.no_drills else 0
     stage_results = []
@@ -287,7 +309,7 @@ def main():
             return DRILLS[stage]
         r = rng.random()
         if not league or r < args.scripted_share:
-            return "scripted"
+            return rng.choice(kinds_scripted)
         # The rest: a bit over half against the latest, the others against a random checkpoint.
         return "latest" if r < args.scripted_share + 0.55 * (1 - args.scripted_share) else rng.choice(league)
 
@@ -327,9 +349,9 @@ def main():
                 elif k == "drift":
                     for i in idx:
                         opp_choice[i] = drifters[i](None)
-                elif k == "scripted":
+                elif k in SCRIPTED:
                     for i in idx:
-                        opp_choice[i] = aimers[i](opp_rows[i])
+                        opp_choice[i] = scripted[k][i](opp_rows[i])
                 else:
                     net = opponent_net(k)
                     c, _, _, nh = act(net, opp_obs[idx], opp_h[:, idx], starts[idx])
@@ -368,7 +390,8 @@ def main():
                     starts[i] = 1.0
                     kinds[i] = pick_opponent()
                     opp_h[:, i] = 0.0
-                    aimers[i].reset()
+                    for k in SCRIPTED:
+                        scripted[k][i].reset()
                     drifters[i].reset()
                 new_obs.append(fair_a)
                 new_opp.append(fair_b)
@@ -435,9 +458,9 @@ def main():
         record = {"iteration": iteration, "steps": total, "seconds": round(time.time() - started),
                   "episode_reward": round(sum(episode_rewards[-100:]) / max(len(episode_rewards[-100:]), 1), 3)}
         record["stage"] = DRILLS[stage] if stage < len(DRILLS) else "league"
-        for kind in ("still", "drift", "scripted", "latest", "league"):
+        for kind in ("still", "drift") + tuple(SCRIPTED) + ("latest", "league"):
             rs = [r for r in results[-300:]
-                  if (r[0] == kind if kind != "league" else r[0] not in DRILLS + ("latest",))]
+                  if (r[0] == kind if kind != "league" else r[0] not in DRILLS + tuple(SCRIPTED) + ("latest",))]
             if rs:
                 record[f"vs_{kind}"] = {"episodes": len(rs), "won": round(sum(r[1] for r in rs) / len(rs), 2),
                                         "lost": round(sum(r[2] for r in rs) / len(rs), 2)}
@@ -445,6 +468,10 @@ def main():
             w, l, d = evaluate(policy, eval_envs, args.eval_episodes, rng)
             wd, ld, dd = evaluate(policy, eval_envs, args.eval_episodes, rng, dodge=True)
             record["eval_vs_dodger"] = {"won": wd, "lost": ld, "draw": dd}
+            for k in kinds_scripted:
+                if k != "scripted":
+                    wk, lk, dk = evaluate(policy, eval_envs, args.eval_episodes, rng, style=SCRIPTED[k])
+                    record[f"eval_vs_{k}"] = {"won": wk, "lost": lk, "draw": dk}
             record["eval_vs_aimer"] = {"won": w, "lost": l, "draw": d}
         log.write(json.dumps(record) + "\n")
         log.flush()

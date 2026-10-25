@@ -54,6 +54,9 @@ class _Lib:
             lib.ds_happenings.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_float), ctypes.c_int]
             lib.ds_solid.restype = ctypes.c_int
             lib.ds_solid.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_int]
+            lib.ds_fair_size.restype = ctypes.c_int
+            lib.ds_fair_observe.restype = ctypes.c_int
+            lib.ds_fair_observe.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.POINTER(ctypes.c_float)]
             cls._instance = lib
         return cls._instance
 
@@ -88,6 +91,8 @@ class DuelEnv:
         size = len(SELF_FIELDS) + len(OTHER_FIELDS) + 5 * max_weapons
         self._obs = (ctypes.c_float * size)()
         self._events = (ctypes.c_float * (4 * 256))()
+        self.fair_size = self.lib.ds_fair_size()
+        self._fair = (ctypes.c_float * self.fair_size)()
         self.ticks = 0
 
     @staticmethod
@@ -98,6 +103,27 @@ class DuelEnv:
             if on:
                 mask |= 1 << ACTIONS[name]
         return mask
+
+    # The policy's actions (ticket 42): three choices each step, no afterburner.
+    TURNS = ({"left": True}, {}, {"right": True})
+    THRUSTS = ({"forward": True}, {}, {"backward": True})
+    FIRES = ({}, {"bullet": True}, {"bomb": True})
+
+    @classmethod
+    def choice(cls, turn, thrust, fire):
+        """Held inputs from the three choices: turn 0 left / 1 none / 2 right, thrust 0 forward / 1 none / 2 reverse,
+        fire 0 none / 1 bullet / 2 bomb."""
+        held = {}
+        held.update(cls.TURNS[turn])
+        held.update(cls.THRUSTS[thrust])
+        held.update(cls.FIRES[fire])
+        return cls.action(**held)
+
+    def fair(self, side):
+        """The side's fair observation, 150 ms old (ds_fair_observe): a list of fair_size floats."""
+        if not self.lib.ds_fair_observe(self.handle, side, self._fair):
+            return [0.0] * self.fair_size
+        return list(self._fair)
 
     def solid(self, x, y):
         return bool(self.lib.ds_solid(self.handle, 0, int(x), int(y)))
@@ -120,7 +146,7 @@ class DuelEnv:
     def reset(self, spawns=None):
         (ax, ay, ao), (bx, by, bo) = spawns or self._spawns()
         self.lib.ds_reset(self.handle, ax, ay, ao, bx, by, bo)
-        self.lib.ds_step(self.handle, 0, 0, 2)  # let each client hear where the other now is
+        self.lib.ds_step(self.handle, 0, 0, 20)  # let each client hear where the other is, and fill the delay
         self.lib.ds_happenings(self.handle, self._events, 256)  # drop what the respawn caused
         self.ticks = 0
         return self.observe(0), self.observe(1)

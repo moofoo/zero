@@ -42,3 +42,6 @@ graphics
 *.cfg
 *.log
 wsl
+sim/.venv/
+sim/runs/
+sim/__pycache__/

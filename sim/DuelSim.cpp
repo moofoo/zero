@@ -592,10 +592,84 @@ int Replay(char** argv) {
 
 namespace {
 
+// The fair observation (ticket 42): what a player in the seat could see, kFairSize floats, scaled to about -1..1.
+// Own ship (8): vx, vy (/20 tiles/s), heading cos, sin, energy share, ticks until bullet (/100) and bomb (/150) are
+// ready, alive. Opponent (8): on screen (the 1920x1080 screen: 60 x 33.75 tiles either side), only on radar, dx, dy
+// (/60), and on screen only, dvx, dvy (/20) and its heading cos, sin. Enemy weapons on screen, the nearest
+// kFairWeapons (8 each): dx, dy (/60), dvx, dvy (/40), bullet, bomb, other, present. Walls: kFairRays rays from the
+// ship, the distance to the first wall (/kRayLength), 1 for none.
+constexpr int kFairWeapons = 16;
+constexpr int kFairRays = 16;
+constexpr float kRayLength = 30.0f;
+constexpr int kFairSize = 8 + 8 + 8 * kFairWeapons + kFairRays;
+constexpr u32 kObsEvery = 5;
+constexpr u32 kObsDelayTicks = 15;
+constexpr float kScreenX = 60.0f, kScreenY = 33.75f;
+
+void FairObserve(Side& side, u16 other_pid, u32 tick, float* out) {
+  Game& g = *side.game;
+  Player* self = g.player_manager.GetSelf();
+  for (int k = 0; k < kFairSize; ++k) out[k] = 0.0f;
+  if (!self) return;
+  Ship& ship = g.ship_controller.ship;
+  int n = 0;
+  Vector2f heading = self->GetHeading();
+  bool alive = self->ship < 8 && self->enter_delay <= 0.0f;
+  out[n++] = self->velocity.x / 20.0f, out[n++] = self->velocity.y / 20.0f;
+  out[n++] = heading.x, out[n++] = heading.y;
+  out[n++] = ship.energy > 0 ? self->energy / (float)ship.energy : 0.0f;
+  out[n++] = std::max<s32>(0, TICK_DIFF(ship.next_bullet_tick, tick)) / 100.0f;
+  out[n++] = std::max<s32>(0, TICK_DIFF(ship.next_bomb_tick, tick)) / 150.0f;
+  out[n++] = alive ? 1.0f : 0.0f;
+  Player* them = g.player_manager.GetPlayerById(other_pid);
+  if (them && them->ship < 8 && them->enter_delay <= 0.0f) {
+    Vector2f d = them->position - self->position;
+    bool on_screen = fabsf(d.x) <= kScreenX && fabsf(d.y) <= kScreenY;
+    bool on_radar = !on_screen && g.radar.InRadarView(them->position);
+    if (on_screen || on_radar) {
+      out[n] = on_screen ? 1.0f : 0.0f, out[n + 1] = on_radar ? 1.0f : 0.0f;
+      out[n + 2] = d.x / 60.0f, out[n + 3] = d.y / 60.0f;
+      if (on_screen) {
+        Vector2f dv = them->velocity - self->velocity;
+        Vector2f h = them->GetHeading();
+        out[n + 4] = dv.x / 20.0f, out[n + 5] = dv.y / 20.0f, out[n + 6] = h.x, out[n + 7] = h.y;
+      }
+    }
+  }
+  n += 8;
+  std::vector<std::pair<float, const Weapon*>> near;
+  WeaponManager& wm = g.weapon_manager;
+  for (size_t k = 0; k < wm.weapon_count; ++k) {
+    const Weapon& w = wm.weapons[k];
+    if (w.frequency == self->frequency) continue;
+    Vector2f d = w.position - self->position;
+    if (fabsf(d.x) > kScreenX || fabsf(d.y) > kScreenY) continue;
+    near.push_back({d.LengthSq(), &w});
+  }
+  std::sort(near.begin(), near.end(), [](auto& x, auto& y) { return x.first < y.first; });
+  for (int k = 0; k < kFairWeapons; ++k, n += 8) {
+    if (k >= (int)near.size()) continue;
+    const Weapon& w = *near[k].second;
+    Vector2f d = w.position - self->position, dv = w.velocity - self->velocity;
+    int c = WeaponClass(w.data);
+    out[n] = d.x / 60.0f, out[n + 1] = d.y / 60.0f, out[n + 2] = dv.x / 40.0f, out[n + 3] = dv.y / 40.0f;
+    out[n + 4] = c == 0, out[n + 5] = c == 1, out[n + 6] = c == 2, out[n + 7] = 1.0f;
+  }
+  auto& map = g.GetMap();
+  for (int r = 0; r < kFairRays; ++r) {
+    float angle = r * 2.0f * 3.14159265f / kFairRays;
+    Vector2f dir(cosf(angle), sinf(angle));
+    CastResult cast = map.Cast(self->position, dir, kRayLength, self->frequency);
+    out[n++] = cast.hit ? cast.distance / kRayLength : 1.0f;
+  }
+}
+
 struct Env {
   Relay relay;
   Side sides[2];
   u32 tick = 0;
+  // Fair observations kept every kObsEvery ticks, per side: (tick, observation), the latest last.
+  std::deque<std::pair<u32, std::vector<float>>> fair[2];
   struct Happening {
     int kind;  // 0 a hit taken, 1 a death
     int side;  // the side hit, or that died
@@ -652,6 +726,7 @@ void* ds_create(const char* capture_a, const char* capture_b) {
   auto a = ReadCapture(capture_a), b = ReadCapture(capture_b);
   if (a.empty() || b.empty()) return nullptr;
   if (!env_watcher) env_watcher = new EnvWatcher();
+  g_LogPrintLevel = LogLevel::Error;  // the clients' packet chatter would swamp a training run
   Env* env = new Env();
   env->tick = 100000;
   SetVirtualTick(env->tick);
@@ -682,6 +757,8 @@ void ds_reset(void* handle, float ax, float ay, float a_orientation, float bx, f
     self->energy = (float)g.ship_controller.ship.energy;
   }
   env.happenings.clear();
+  env.fair[0].clear();
+  env.fair[1].clear();
 }
 
 // Steps `ticks` ticks (10 ms each) with each side's held actions (InputAction bits).
@@ -698,7 +775,31 @@ void ds_step(void* handle, unsigned int actions_a, unsigned int actions_b, int t
       side.trans.Revert(side.scratch);
     }
     Deliver(env);
+    if (env.tick % kObsEvery == 0) {
+      for (int i = 0; i < 2; ++i) {
+        std::vector<float> o(kFairSize);
+        FairObserve(env.sides[i], env.sides[1 - i].pid, env.tick, o.data());
+        env.fair[i].push_back({env.tick, std::move(o)});
+        while (env.fair[i].size() > 16) env.fair[i].pop_front();
+      }
+    }
   }
+}
+
+int ds_fair_size() { return kFairSize; }
+
+// A side's fair observation as it was kObsDelayTicks ago (the reaction delay): kFairSize floats (ds_fair_size).
+// Returns 0 until there's one that old.
+int ds_fair_observe(void* handle, int side_index, float* out) {
+  Env& env = *(Env*)handle;
+  const auto& history = env.fair[side_index];
+  for (auto it = history.rbegin(); it != history.rend(); ++it) {
+    if (TICK_DIFF(env.tick, it->first) >= (s32)kObsDelayTicks) {
+      std::copy(it->second.begin(), it->second.end(), out);
+      return 1;
+    }
+  }
+  return 0;
 }
 
 // One side's view, as 18 + 5 x max_weapons floats: own x, y, vx, vy, orientation, energy, max energy, enter delay

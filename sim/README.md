@@ -4,6 +4,7 @@
   `libduelsim` (the C API used by Python).
 - `duelsim.py`: `DuelEnv`, the ctypes environment. `python duelsim.py` runs a smoke test and prints the speed.
 - `train.py`: PPO self-play on fair observations (ticket 42). Runs go to `runs/<name>/` (`log.jsonl`, checkpoints).
+- `vecenv.py`: many environments stepped together, in worker processes (`train.py --workers`, one a core).
 
 ## On this laptop
 
@@ -46,11 +47,8 @@
     mkdir -p ~/chaos/zones/Chaos    # then from the laptop:
     # scp -P 2222 ~/newcode/chaos-offline/work/bots/zones/Chaos/*.lvl <user>@<P15>:chaos/zones/Chaos/
 
-Training, detached so it survives the SSH session:
+Training, detached so it survives the SSH session, on the CPU (faster than the GPU for a network this small) with
+the environments stepped in worker processes:
 
-    cd ~/zero/sim && nohup .venv/bin/python train.py --device cuda --envs 64 --steps 30000000 --run p15a \
-        --map-dir ~/chaos > runs/p15a.out 2>&1 &
-
-The environments step one after another on one CPU core (about 1,000 steps a second on the laptop), so 30 million
-steps take about 8 hours, and the network is small enough that the GPU may not beat the CPU (`--device cpu`; worth a
-short timing of both). Stepping the environments in worker processes, one a core, is the speed-up if that's too slow.
+    cd ~/zero/sim && nohup nice -n 19 .venv/bin/python train.py --device cpu --workers 8 --envs 64 --steps 30000000 \
+        --run p15a --map-dir ~/chaos > runs/p15a.out 2>&1 < /dev/null &

@@ -54,6 +54,7 @@ class _Lib:
             lib.ds_happenings.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_float), ctypes.c_int]
             lib.ds_solid.restype = ctypes.c_int
             lib.ds_solid.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_int]
+            lib.ds_seed.argtypes = [ctypes.c_void_p, ctypes.c_uint]
             lib.ds_fair_size.restype = ctypes.c_int
             lib.ds_fair_observe.restype = ctypes.c_int
             lib.ds_fair_observe.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.POINTER(ctypes.c_float)]
@@ -91,6 +92,7 @@ class DuelEnv:
         size = len(SELF_FIELDS) + len(OTHER_FIELDS) + 5 * max_weapons
         self._obs = (ctypes.c_float * size)()
         self._events = (ctypes.c_float * (4 * 256))()
+        self.lib.ds_seed(self.handle, (seed if seed is not None else random.getrandbits(32)) & 0xFFFFFFFF)
         self.fair_size = self.lib.ds_fair_size()
         self._fair = (ctypes.c_float * self.fair_size)()
         self.ticks = 0

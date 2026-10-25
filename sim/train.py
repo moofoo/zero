@@ -21,6 +21,7 @@ import torch
 import torch.nn as nn
 
 from duelsim import DuelEnv
+from vecenv import VecEnv
 
 HERE = Path(__file__).parent
 
@@ -151,41 +152,36 @@ def act(policy, obs, h, starts, greedy=False):
 def evaluate(policy, envs, episodes, rng):
     """Greedy learner against the scripted aimer: wins, losses, draws over `episodes`."""
     wins = losses = draws = 0
-    n = len(envs)
-    for e in envs:
-        e.reset()
-    obs = torch.tensor([e.fair(0) for e in envs])
-    opp = [e.fair(1) for e in envs]
+    n = envs.count
+    fair_a, opp = envs.reset()
+    obs = torch.tensor(fair_a)
     h = policy.initial(n)
     starts = torch.ones(n)
-    aimers = [ScriptedAimer(rng) for _ in envs]
+    aimers = [ScriptedAimer(rng) for _ in range(n)]
     done_count = 0
     while done_count < episodes:
         choice, _, _, h = act(policy, obs, h, starts, greedy=True)
         starts = torch.zeros(n)
-        new_obs, new_opp = [], []
-        for i, e in enumerate(envs):
-            a = DuelEnv.choice(*[int(x) for x in choice[i]])
-            b = DuelEnv.choice(*aimers[i](opp[i]))
-            _, _, _, done, info = e.step(a, b)
+        actions_a = [DuelEnv.choice(*[int(x) for x in choice[i]]) for i in range(n)]
+        actions_b = [DuelEnv.choice(*aimers[i](opp[i])) for i in range(n)]
+        steps = envs.step(actions_a, actions_b)
+        for i, (_, done, info, _, _) in enumerate(steps):
             if done:
                 done_count += 1
                 dead = {d["side"] for d in info["deaths"]}
                 wins += 1 in dead and 0 not in dead
                 losses += 0 in dead and 1 not in dead
                 draws += not dead or len(dead) == 2
-                e.reset()
                 aimers[i].reset()
                 starts[i] = 1.0
-            new_obs.append(e.fair(0))
-            new_opp.append(e.fair(1))
-        obs, opp = torch.tensor(new_obs), new_opp
+        obs, opp = torch.tensor([r[3] for r in steps]), [r[4] for r in steps]
     return wins, losses, draws
 
 
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--envs", type=int, default=16)
+    p.add_argument("--workers", type=int, default=1, help="processes stepping the environments (one a core)")
     p.add_argument("--steps", type=int, default=2_000_000)
     p.add_argument("--rollout", type=int, default=128)
     p.add_argument("--chunk", type=int, default=32)
@@ -216,9 +212,10 @@ def main():
     out.mkdir(parents=True, exist_ok=True)
     device = torch.device(args.device)
     torch.set_default_device(device)  # every tensor below, and the networks, live on the device
-    envs = [DuelEnv(map_dir=args.map_dir, spawn_gap=tuple(args.spawn_gap), seed=args.seed * 1000 + i, max_seconds=args.max_seconds) for i in range(args.envs)]
-    eval_envs = [DuelEnv(map_dir=args.map_dir, seed=args.seed * 1000 + 500 + i, max_seconds=args.max_seconds) for i in range(8)]
-    size = envs[0].fair_size
+    envs = VecEnv(args.envs, workers=args.workers, seed=args.seed * 1000, map_dir=args.map_dir,
+                  spawn_gap=tuple(args.spawn_gap), max_seconds=args.max_seconds)
+    eval_envs = VecEnv(8, seed=args.seed * 1000 + 500, map_dir=args.map_dir, max_seconds=args.max_seconds)
+    size = envs.fair_size
     policy = Policy(size).to(device)
     opponent = Policy(size).to(device)
     opponent.load_state_dict(policy.state_dict())
@@ -230,10 +227,8 @@ def main():
     drifters = [Drifter(rng) for _ in range(n)]
     stage = len(DRILLS) if args.no_drills else 0
     stage_results = []
-    for e in envs:
-        e.reset()
-    obs = torch.tensor([e.fair(0) for e in envs])
-    opp_obs = torch.tensor([e.fair(1) for e in envs])
+    fair_a, fair_b = envs.reset()
+    obs, opp_obs = torch.tensor(fair_a), torch.tensor(fair_b)
     h = policy.initial(n)
     opp_h = opponent.initial(n)
     starts = torch.ones(n)
@@ -297,10 +292,9 @@ def main():
             new_obs, new_opp = [], []
             buf_start.append(starts.clone())
             starts = torch.zeros(n)
-            for i, e in enumerate(envs):
-                a = DuelEnv.choice(*[int(x) for x in choice[i]])
-                b = DuelEnv.choice(*opp_choice[i])
-                _, _, (ra, rb), done, info = e.step(a, b)
+            steps = envs.step([DuelEnv.choice(*[int(x) for x in choice[i]]) for i in range(n)],
+                              [DuelEnv.choice(*opp_choice[i]) for i in range(n)])
+            for i, (ra, done, info, fair_a, fair_b) in enumerate(steps):
                 rewards[i] = ra
                 running[i] += ra
                 if done:
@@ -319,14 +313,13 @@ def main():
                             stage_results = []
                     episode_rewards.append(running[i])
                     running[i] = 0.0
-                    e.reset()
                     starts[i] = 1.0
                     kinds[i] = pick_opponent()
                     opp_h[:, i] = 0.0
                     aimers[i].reset()
                     drifters[i].reset()
-                new_obs.append(e.fair(0))
-                new_opp.append(e.fair(1))
+                new_obs.append(fair_a)
+                new_opp.append(fair_b)
             buf_obs.append(obs)
             buf_act.append(choice)
             buf_logp.append(logp)
@@ -402,6 +395,7 @@ def main():
         log.flush()
         print(json.dumps(record), flush=True)
     torch.save(policy.state_dict(), out / "final.pt")
+    envs.close()
 
 
 if __name__ == "__main__":

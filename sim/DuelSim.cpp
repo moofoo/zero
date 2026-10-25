@@ -675,6 +675,9 @@ struct Env {
   Relay relay;
   Side sides[2];
   u32 tick = 0;
+  // zero draws hit outcomes (a prize lost to damage) from the C library's rand(), one sequence for the process. Each
+  // tick reseeds it from this and the tick, so an environment plays the same whatever else shares its process.
+  u32 seed = 0;
   // Fair observations kept every kObsEvery ticks, per side: (tick, observation), the latest last.
   std::deque<std::pair<u32, std::vector<float>>> fair[2];
   struct Happening {
@@ -763,6 +766,11 @@ void ds_reset(void* handle, float ax, float ay, float a_orientation, float bx, f
     self->enter_delay = 0.0f;
     self->energy = (float)g.ship_controller.ship.energy;
   }
+  // The last episode's weapons still in flight, in both clients' views.
+  for (int i = 0; i < 2; ++i) {
+    PlayerManager& pm = env.sides[i].game->player_manager;
+    for (size_t k = 0; k < pm.player_count; ++k) env.sides[i].game->weapon_manager.ClearWeapons(pm.players[k]);
+  }
   env.happenings.clear();
   env.fair[0].clear();
   env.fair[1].clear();
@@ -773,6 +781,7 @@ void ds_step(void* handle, unsigned int actions_a, unsigned int actions_b, int t
   Env& env = *(Env*)handle;
   for (int t = 0; t < ticks; ++t) {
     SetVirtualTick(++env.tick);
+    srand(env.seed * 2654435761u + env.tick);
     const u32 actions[2] = {actions_a, actions_b};
     for (int i = 0; i < 2; ++i) {
       Side& side = env.sides[i];
@@ -792,6 +801,8 @@ void ds_step(void* handle, unsigned int actions_a, unsigned int actions_b, int t
     }
   }
 }
+
+void ds_seed(void* handle, unsigned int seed) { ((Env*)handle)->seed = seed; }
 
 int ds_fair_size() { return kFairSize; }
 

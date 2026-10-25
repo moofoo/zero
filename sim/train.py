@@ -61,9 +61,11 @@ class ScriptedAimer:
     TURN_RATE = 0.45
     TURN_AMOUNT = (-1.0, -0.3, 0.0, 0.3, 1.0)  # each turn choice's share of a full step's turn
     BULLET_SPEED = 12.5  # tiles a second, the Warbird's in the duel profile
+    DODGE_SECONDS, DODGE_TILES = 3.0, 7.0  # with dodge, bombs passing this near this soon are dodged
 
-    def __init__(self, rng):
+    def __init__(self, rng, dodge=False):
         self.rng = rng
+        self.dodge = dodge
         self.turns = [0.0, 0.0]  # the last two steps' turns (TURN_AMOUNT), latest last
 
     def reset(self):
@@ -71,8 +73,38 @@ class ScriptedAimer:
 
     def __call__(self, obs):
         turn, thrust, fire = self.choose(obs)
+        if self.dodge:
+            turn, thrust = self.dodge_bombs(obs, turn, thrust)
         self.turns = [self.turns[1], self.TURN_AMOUNT[turn]]
         return turn, thrust, fire
+
+    def dodge_bombs(self, obs, turn, thrust):
+        """With dodge set: the soonest enemy bomb to pass within DODGE_TILES in the next DODGE_SECONDS is dodged.
+        A ship thrusts only along its heading, so it thrusts to move its closest approach away along that axis; a bomb
+        coming along the axis can't be dodged that way, so it turns side-on first."""
+        worst = None
+        for k in range(16):
+            w = obs[16 + 8 * k:24 + 8 * k]
+            if w[7] < 0.5 or w[5] < 0.5:  # not present, or not a bomb
+                continue
+            px, py, vx, vy = w[0] * 60.0, w[1] * 60.0, w[2] * 40.0, w[3] * 40.0
+            speed2 = vx * vx + vy * vy
+            if speed2 < 1e-6:
+                continue
+            t = -(px * vx + py * vy) / speed2
+            if not 0.0 < t < self.DODGE_SECONDS:
+                continue
+            cx, cy = px + vx * t, py + vy * t
+            miss = math.hypot(cx, cy)
+            if miss < self.DODGE_TILES and (worst is None or t < worst[0]):
+                worst = (t, cx, cy, vx, vy)
+        if worst is None:
+            return turn, thrust
+        _, cx, cy, vx, vy = worst
+        if abs(vx) > 2.0 * abs(vy):  # along the ship's axis: turn side-on and go
+            return (0 if cy >= 0 else 4), 0
+        # Moving the ship back pushes the bomb's closest approach ahead, and the other way.
+        return turn, (2 if cx >= 0 else 0)
 
     def choose(self, obs):
         rng = self.rng
@@ -155,15 +187,16 @@ def act(policy, obs, h, starts, greedy=False):
     return torch.stack(choices, -1), logp, value[:, 0], h
 
 
-def evaluate(policy, envs, episodes, rng):
-    """Greedy learner against the scripted aimer: wins, losses, draws over `episodes`."""
+def evaluate(policy, envs, episodes, rng, dodge=False):
+    """Greedy learner against the scripted aimer (one that dodges bombs, with dodge): wins, losses, draws over
+    `episodes`."""
     wins = losses = draws = 0
     n = envs.count
     fair_a, opp = envs.reset()
     obs = batch(fair_a)
     h = policy.initial(n)
     starts = torch.ones(n)
-    aimers = [ScriptedAimer(rng) for _ in range(n)]
+    aimers = [ScriptedAimer(rng, dodge) for _ in range(n)]
     done_count = 0
     while done_count < episodes:
         choice, _, _, h = act(policy, obs, h, starts, greedy=True)
@@ -202,6 +235,10 @@ def main():
     p.add_argument("--eval-every", type=int, default=20)
     p.add_argument("--eval-episodes", type=int, default=32)
     p.add_argument("--max-seconds", type=float, default=60.0)
+    p.add_argument("--init", default=None, help="a checkpoint to start from")
+    p.add_argument("--dodge", action="store_true", help="the scripted aimer dodges bombs")
+    p.add_argument("--time-cost", type=float, default=0.0, help="taken from the learner's reward each step")
+    p.add_argument("--draw-penalty", type=float, default=0.0, help="taken from the learner's reward at a timeout")
     p.add_argument("--no-drills", action="store_true", help="start in the league, without the aiming drills")
     p.add_argument("--drill-pass", type=float, default=0.8)
     p.add_argument("--drill-window", type=int, default=100)
@@ -225,13 +262,15 @@ def main():
     eval_envs = VecEnv(8, seed=args.seed * 1000 + 500, map_dir=args.map_dir, max_seconds=args.max_seconds)
     size = envs.fair_size
     policy = Policy(size).to(device)
+    if args.init:
+        policy.load_state_dict(torch.load(args.init, map_location=device, weights_only=True))
     opponent = Policy(size).to(device)
     opponent.load_state_dict(policy.state_dict())
     optimizer = torch.optim.Adam(policy.parameters(), lr=args.lr)
     league = []  # checkpoint paths
 
     n = args.envs
-    aimers = [ScriptedAimer(rng) for _ in range(n)]
+    aimers = [ScriptedAimer(rng, args.dodge) for _ in range(n)]
     drifters = [Drifter(rng) for _ in range(n)]
     stage = len(DRILLS) if args.no_drills else 0
     stage_results = []
@@ -305,6 +344,9 @@ def main():
             steps = envs.step([DuelEnv.choice(*chosen[i]) for i in range(n)],
                               [DuelEnv.choice(*opp_choice[i]) for i in range(n)])
             for i, (ra, done, info, fair_a, fair_b) in enumerate(steps):
+                ra -= args.time_cost
+                if done and not info["deaths"]:
+                    ra -= args.draw_penalty
                 rewards[i] = ra
                 running[i] += ra
                 if done:
@@ -401,6 +443,8 @@ def main():
                                         "lost": round(sum(r[2] for r in rs) / len(rs), 2)}
         if iteration % args.eval_every == 0:
             w, l, d = evaluate(policy, eval_envs, args.eval_episodes, rng)
+            wd, ld, dd = evaluate(policy, eval_envs, args.eval_episodes, rng, dodge=True)
+            record["eval_vs_dodger"] = {"won": wd, "lost": ld, "draw": dd}
             record["eval_vs_aimer"] = {"won": w, "lost": l, "draw": d}
         log.write(json.dumps(record) + "\n")
         log.flush()

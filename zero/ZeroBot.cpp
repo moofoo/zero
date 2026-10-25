@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <zero/BotController.h>
 #include <zero/game/Game.h>
+#include <zero/game/InputLog.h>
 #include <zero/game/Logger.h>
 #include <zero/game/Settings.h>
 #include <zero/game/WorkQueue.h>
@@ -173,6 +174,7 @@ void ZeroBot::UpdateRelaxed(size_t update_count) {
       game->Cleanup();
       break;
     }
+    if (Player* self = game->player_manager.GetSelf()) InputLogUpdate(GetCurrentTick(), input.actions, *self, game->ship_controller.ship);
 
     if (combat_logger) combat_logger->Update();
 
@@ -210,6 +212,7 @@ void ZeroBot::Update(size_t update_count) {
       game->Cleanup();
       break;
     }
+    if (Player* self = game->player_manager.GetSelf()) InputLogUpdate(GetCurrentTick(), input.actions, *self, game->ship_controller.ship);
 
     if (combat_logger) combat_logger->Update();
 

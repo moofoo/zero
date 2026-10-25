@@ -5,12 +5,20 @@
 //
 // duelsim <capture A> <capture B> <seconds>   (run from a bots folder holding zones/Chaos/<map>.lvl)
 #include <zero/game/Clock.h>
+#include <zero/game/Settings.h>
 #include <zero/game/Game.h>
 #include <zero/game/InputState.h>
 #include <zero/game/Logger.h>
 #include <zero/game/Memory.h>
 #include <zero/game/WorkQueue.h>
 #include <zero/game/net/Connection.h>
+#include <zero/game/GameEvent.h>
+#include <zero/game/InputLog.h>
+#include <zero/game/ShipController.h>
+
+#include <algorithm>
+#include <cmath>
+#include <map>
 
 #include <chrono>
 #include <cstdio>
@@ -25,7 +33,9 @@ using namespace zero;
 namespace zero {
 // Globals the client expects: the bot's name (ZeroBot.cpp), and the server name, whose folder (zones/<name>) holds the
 // cached map, and the security service address (normally defined with the bot's main).
-extern const char* kPlayerName;
+const char* kPlayerName = "sim";
+const char* kPlayerPassword = "none";
+GameSettings g_Settings;
 const char* kServerName = "Chaos";
 const char* kSecurityServiceIp = "127.0.0.1";
 }  // namespace zero
@@ -72,6 +82,10 @@ struct Side {
   Worker* worker = nullptr;
   Game* game = nullptr;
   InputState input;
+  ArenaSnapshot scratch;  // the transient arena after setup: reverted to after every update
+  // Later security packets (door and prize seeds), delivered at their own time in a replay: (server tick, packet).
+  std::vector<std::pair<u32, std::vector<u8>>> deferred;
+  size_t next_deferred = 0;
 };
 
 void Loopback(void* user, u8* data, size_t size) {
@@ -150,7 +164,7 @@ void Relay::FromClient(int from, u8* data, size_t size) {
   }
 }
 
-bool SetupSide(Side& side, const std::vector<Packet>& capture, Tick start) {
+bool SetupSide(Side& side, const std::vector<Packet>& capture, Tick start, s32 offset = 0, bool defer = false) {
   constexpr size_t kPermanentSize = Megabytes(64), kTransientSize = Megabytes(32), kWorkSize = Megabytes(4);
   side.perm = MemoryArena((u8*)malloc(kPermanentSize), kPermanentSize);
   side.trans = MemoryArena((u8*)malloc(kTransientSize), kTransientSize);
@@ -165,22 +179,414 @@ bool SetupSide(Side& side, const std::vector<Packet>& capture, Tick start) {
   c.loopback_user = &side;
   c.connected = true;
   // Replay the arena setup: every server packet but positions, kills, chat and keep-alives.
+  bool seen_security = false;
   for (const Packet& p : capture) {
     if (p.direction != 0 || p.data.empty()) continue;
     u8 type = p.data[0];
     if (type == 0x00 || type == 0x05 || type == 0x28 || type == 0x06 || type == 0x07 || type == 0x27) continue;
     if (type == 0x01 && p.data.size() >= 3) side.pid = Read16(p.data.data() + 1);
+    // A security packet after the first re-seeds the doors from its own timestamp: replaying it now would freeze them.
+    if (type == 0x18 && defer && seen_security) {
+      side.deferred.push_back({(u32)((s32)p.tick + offset) & 0x7fffffff, p.data});
+      continue;
+    }
+    if (type == 0x18) seen_security = true;
     SetVirtualTick(start);
     std::vector<u8> copy = p.data;
     c.ProcessPacket(copy.data(), copy.size());
   }
   c.time_diff = 0;
+  side.scratch = side.trans.GetSnapshot();
   return side.pid != 0xFFFF;
 }
 
+
+// --- Replay: drive both clients with a real game's logged inputs and compare -------------------------------------
+
+struct LoggedUpdate {
+  u32 tick;  // server tick
+  u32 actions;
+  std::vector<u8> one_shots;  // one-shot actions just before this update
+  float x, y, vx, vy, orientation, energy, enter_delay;
+  u8 ship;
+  u32 fields[kShipFields];  // the ship's upgrades (InputLog.h)
+};
+
+std::vector<LoggedUpdate> ReadInputLog(const char* path, s32 offset) {
+  std::vector<LoggedUpdate> updates;
+  std::vector<u8> pending;
+  FILE* f = fopen(path, "rb");
+  if (!f) return updates;
+  while (true) {
+    u8 type;
+    u32 tick;
+    if (fread(&type, 1, 1, f) != 1 || fread(&tick, 4, 1, f) != 1) break;
+    if (type == 2) {
+      u8 action;
+      if (fread(&action, 1, 1, f) != 1) break;
+      pending.push_back(action);
+    } else if (type == 1) {
+      LoggedUpdate u;
+      float v[6];
+      if (fread(&u.actions, 4, 1, f) != 1 || fread(v, 4, 6, f) != 6 || fread(&u.ship, 1, 1, f) != 1 ||
+          fread(&u.enter_delay, 4, 1, f) != 1 || fread(u.fields, 4, kShipFields, f) != (size_t)kShipFields)
+        break;
+      u.tick = (u32)((s32)tick + offset) & 0x7fffffff;
+      u.x = v[0], u.y = v[1], u.vx = v[2], u.vy = v[3], u.orientation = v[4], u.energy = v[5];
+      u.one_shots.swap(pending);
+      updates.push_back(u);
+    } else {
+      break;
+    }
+  }
+  fclose(f);
+  return updates;
+}
+
+// A client's server-time offset: from its captured position packets, the server timestamp it sent less the local tick
+// it was sent at.
+// The median over every position packet: the first ones can go out before the client has synced its clock.
+s32 ServerOffset(const std::vector<Packet>& capture) {
+  std::vector<s32> offsets;
+  for (const Packet& p : capture) {
+    if (p.direction == 1 && !p.data.empty() && p.data[0] == 0x03 && p.data.size() >= 6) {
+      offsets.push_back((s32)Read32(p.data.data() + 2) - (s32)p.tick);
+    }
+  }
+  if (offsets.empty()) return 0;
+  std::sort(offsets.begin(), offsets.end());
+  if (getenv("SIM_DEBUG")) fprintf(stderr, "offsets: first %d, median %d, last %d\n", offsets.front(), offsets[offsets.size() / 2], offsets.back());
+  return offsets[offsets.size() / 2];
+}
+
+struct HitRecord {
+  u32 tick;
+  int victim;  // side
+  int weapon;  // class: 0 bullet (either kind), 1 bomb (bomb, proximity bomb, thor), 2 anything else
+};
+
+// As the combat log names weapons: shrapnel is a bullet carrying its bomb's shrapnel count, a mine a bomb laid.
+int WeaponClass(const WeaponData& data) {
+  WeaponType type = data.type;
+  if (type == WeaponType::Bullet || type == WeaponType::BouncingBullet) return data.shrap > 0 ? 2 : 0;
+  if (type == WeaponType::Bomb || type == WeaponType::ProximityBomb) return data.alternate ? 2 : 1;
+  if (type == WeaponType::Thor) return 1;
+  return 2;
+}
+
+std::vector<HitRecord>* sim_hits = nullptr;
+Side* replay_sides = nullptr;
+
+std::vector<std::pair<u32, int>> sim_fires[2];  // (tick, weapon type) per side
+
+struct FireWatcher : EventHandler<WeaponFireEvent> {
+  void HandleEvent(const WeaponFireEvent& event) override {
+    if (!replay_sides) return;
+    for (int i = 0; i < 2; ++i) {
+      if (replay_sides[i].game->player_manager.GetSelf() == &event.player) {
+        sim_fires[i].push_back({GetCurrentTick(), (int)event.data.type});
+        return;
+      }
+    }
+  }
+};
+
+struct HitWatcher : EventHandler<WeaponSelfDamageEvent> {
+  void HandleEvent(const WeaponSelfDamageEvent& event) override {
+    if (!sim_hits || !replay_sides) return;
+    for (int i = 0; i < 2; ++i) {
+      PlayerManager& pm = replay_sides[i].game->player_manager;
+      if (&event.shooter >= pm.players && &event.shooter < pm.players + pm.player_count) {
+        sim_hits->push_back({GetCurrentTick(), i, WeaponClass(event.weapon.data)});
+        return;
+      }
+    }
+  }
+};
+
+// Real hits from a bot's events log (its own "hit" events: hits taken, in server ticks).
+std::vector<HitRecord> ReadRealHits(const char* path, int victim) {
+  std::vector<HitRecord> hits;
+  FILE* f = fopen(path, "r");
+  if (!f) return hits;
+  char line[4096];
+  while (fgets(line, sizeof(line), f)) {
+    if (!strstr(line, "\"e\":\"hit\"")) continue;
+    const char* t = strstr(line, "\"tick\":");
+    const char* w = strstr(line, "\"weapon\":\"");
+    if (!t || !w) continue;
+    u32 tick = (u32)strtoul(t + 7, nullptr, 10);
+    w += 10;
+    int weapon = strncmp(w, "bullet", 6) == 0 || strncmp(w, "bounce", 6) == 0 ? 0
+                 : strncmp(w, "bomb", 4) == 0 || strncmp(w, "prox", 4) == 0 || strncmp(w, "thor", 4) == 0 ? 1
+                                                                                               : 2;
+    hits.push_back({tick, victim, weapon});
+  }
+  fclose(f);
+  return hits;
+}
+
+int Replay(char** argv) {
+  // replay <capA> <inpA> <eventsA> <capB> <inpB> <eventsB>
+  std::vector<Packet> caps[2] = {ReadCapture(argv[2]), ReadCapture(argv[5])};
+  s32 offsets[2] = {ServerOffset(caps[0]), ServerOffset(caps[1])};
+  std::vector<LoggedUpdate> logs[2] = {ReadInputLog(argv[3], offsets[0]), ReadInputLog(argv[6], offsets[1])};
+  if (logs[0].empty() || logs[1].empty()) {
+    fprintf(stderr, "can't read the input logs\n");
+    return 1;
+  }
+  kPlayerName = "sim";
+  u32 start = std::min(logs[0].front().tick, logs[1].front().tick);
+  if (getenv("SIM_DEBUG")) {
+    for (int k = 0; k < 2; ++k) {
+      u32 alive = 0;
+      for (auto& u : logs[k]) if (u.ship < 8 && u.enter_delay <= 0.0f) { alive = u.tick; break; }
+      fprintf(stderr, "side %d: log from %u, first alive %u\n", k, logs[k].front().tick, alive);
+    }
+  }
+  SetVirtualTick(start);
+  Relay relay;
+  static Side sides[2];
+  for (int i = 0; i < 2; ++i) {
+    sides[i].index = i;
+    sides[i].relay = &relay;
+    relay.sides[i] = &sides[i];
+  }
+  if (!SetupSide(sides[0], caps[0], start, offsets[0], true) || !SetupSide(sides[1], caps[1], start, offsets[1], true)) {
+    fprintf(stderr, "setup failed\n");
+    return 1;
+  }
+  relay.outbox.clear();
+  std::vector<HitRecord> hits;
+  sim_hits = &hits;
+  replay_sides = sides;
+  HitWatcher watcher;
+  FireWatcher fire_watcher;
+
+  std::vector<HitRecord> real_hits = ReadRealHits(argv[4], 0), real_hits_b = ReadRealHits(argv[7], 1);
+  real_hits.insert(real_hits.end(), real_hits_b.begin(), real_hits_b.end());
+  std::sort(real_hits.begin(), real_hits.end(), [](const HitRecord& x, const HitRecord& y) { return x.tick < y.tick; });
+  size_t probe = 0;
+  // Errors by time since the last re-sync (start or respawn), per side.
+  std::map<int, std::vector<float>> position_error, energy_error;  // keyed by seconds since re-sync (1, 5)
+  size_t next[2] = {0, 0};
+  u32 synced_at[2] = {0, 0};
+  bool synced[2] = {false, false};
+  bool was_dead[2] = {true, true};
+  int sim_deaths[2] = {0, 0}, real_deaths[2] = {0, 0};
+  int upgrade_syncs[2] = {0, 0};
+  int teleports[2] = {0, 0};
+  bool sim_dead[2] = {false, false};
+  float worst5[2] = {0, 0};
+  while (next[0] < logs[0].size() || next[1] < logs[1].size()) {
+    int i = next[1] >= logs[1].size() || (next[0] < logs[0].size() && logs[0][next[0]].tick <= logs[1][next[1]].tick)
+                ? 0 : 1;
+    const LoggedUpdate& u = logs[i][next[i]++];
+    SetVirtualTick(u.tick);
+    Side& side = sides[i];
+    Player* self = side.game->player_manager.GetSelf();
+    if (!self) continue;
+    while (side.next_deferred < side.deferred.size() && side.deferred[side.next_deferred].first <= u.tick) {
+      auto& pkt = side.deferred[side.next_deferred++].second;
+      side.game->connection.ProcessPacket(pkt.data(), pkt.size());
+    }
+    for (u8 a : u.one_shots) {
+      if (side.input.action_callback) side.input.action_callback(side.input.user, (InputAction)a);
+    }
+    side.input.actions = u.actions;
+    // The ship's upgrades come from the arena's prize rolls at each spawn (randomness, not physics): kept as logged.
+    {
+      u32 now_fields[kShipFields];
+      ShipFields(side.game->ship_controller.ship, now_fields);
+      if (memcmp(now_fields, u.fields, sizeof(now_fields)) != 0 && u.ship < 8) {
+        if (getenv("SIM_DEBUG") && upgrade_syncs[i] < 6) {
+          fprintf(stderr, "sync side %d at %u:", i, u.tick);
+          for (int k = 0; k < kShipFields; ++k)
+            if (now_fields[k] != u.fields[k]) fprintf(stderr, " [%d] %u->%u", k, now_fields[k], u.fields[k]);
+          fprintf(stderr, "\n");
+        }
+        SetShipFields(side.game->ship_controller.ship, u.fields);
+        ++upgrade_syncs[i];
+      }
+    }
+    side.game->Update(side.input, 0.01f);
+    side.game->player_manager.kdtree = nullptr;
+    side.trans.Revert(side.scratch);
+    while (!relay.outbox.empty()) {
+      auto [to, pkt] = relay.outbox.front();
+      relay.outbox.pop_front();
+      sides[to].game->connection.ProcessPacket(pkt.data(), pkt.size());
+    }
+    if (getenv("SIM_DEBUG") && u.tick % 500 == 0) {
+      WeaponManager& wm = side.game->weapon_manager;
+      int own = 0, other = 0;
+      for (size_t k = 0; k < wm.weapon_count; ++k) (wm.weapons[k].player_id == side.pid ? own : other)++;
+      Player* them = side.game->player_manager.GetPlayerById(sides[1 - i].pid);
+      // The incoming weapon nearest this ship, and the shooter's own copy nearest to it.
+      WeaponManager& theirs = sides[1 - i].game->weapon_manager;
+      float best = 1e9f, match = 1e9f;
+      Vector2f bp;
+      for (size_t k = 0; k < wm.weapon_count; ++k) {
+        if (wm.weapons[k].player_id == side.pid) continue;
+        float d = wm.weapons[k].position.Distance(self->position);
+        if (d < best) best = d, bp = wm.weapons[k].position;
+      }
+      for (size_t k = 0; k < theirs.weapon_count; ++k) match = std::min(match, theirs.weapons[k].position.Distance(bp));
+      fprintf(stderr, "dbg   freqs: self %d, other %d\n", self->frequency, them ? them->frequency : -1);
+      if (best < 1e9f) fprintf(stderr, "dbg   nearest incoming %.1f tiles from self; shooter's nearest own weapon %.1f tiles from it\n", best, match);
+      fprintf(stderr, "dbg t=%u side %d: weapons own %d other %d | other at (%.1f,%.1f) ship %d delay %.2f | connection weapons received %u\n",
+              u.tick, i, own, other, them ? them->position.x : -1.f, them ? them->position.y : -1.f, them ? them->ship : -1,
+              them ? them->enter_delay : -1.f, side.game->connection.weapons_received);
+    }
+    if (getenv("SIM_DEBUG") && probe < 10 && probe < real_hits.size() && real_hits[probe].victim == i &&
+        u.tick >= real_hits[probe].tick) {
+      WeaponManager& wm = side.game->weapon_manager;
+      float best = 1e9f;
+      for (size_t k = 0; k < wm.weapon_count; ++k) {
+        if (wm.weapons[k].player_id == side.pid) continue;
+        best = std::min(best, wm.weapons[k].position.Distance(self->position));
+      }
+      fprintf(stderr, "probe real hit %zu at %u (weapon %d) on side %d: nearest incoming %.2f tiles; self vs logged %.2f tiles; energy sim %.0f real %.0f\n",
+              probe, real_hits[probe].tick, real_hits[probe].weapon, i, best,
+              std::hypot(self->position.x - u.x, self->position.y - u.y), self->energy, u.energy);
+      ++probe;
+    }
+    while (probe < real_hits.size() && real_hits[probe].tick < u.tick && real_hits[probe].victim != i && probe < 10 && false) ++probe;
+    if (getenv("SIM_DEBUG")) {
+      static int overlaps[2] = {0, 0};
+      static u32 last_overlap[2] = {0, 0};
+      WeaponManager& wm = side.game->weapon_manager;
+      for (size_t k = 0; k < wm.weapon_count; ++k) {
+        if (wm.weapons[k].player_id == side.pid) continue;
+        if (wm.weapons[k].position.Distance(self->position) < 0.9f && u.tick - last_overlap[i] > 5) {
+          ++overlaps[i];
+          last_overlap[i] = u.tick;
+          if (overlaps[i] <= 3)
+            fprintf(stderr, "overlap side %d at %u: weapon type %d, self ship %d delay %.2f freq %d, weapon freq %d, kdtree %p\n", i,
+                    u.tick, (int)wm.weapons[k].data.type, self->ship, self->enter_delay, self->frequency,
+                    wm.weapons[k].frequency, (void*)side.game->player_manager.kdtree);
+        }
+      }
+      if (next[0] >= logs[0].size() - 1 && next[1] >= logs[1].size() - 1)
+        fprintf(stderr, "overlaps: side 0 %d, side 1 %d\n", overlaps[0], overlaps[1]);
+    }
+    bool real_dead = u.ship >= 8 || u.enter_delay > 0.0f;
+    if (real_dead && !was_dead[i] && synced[i]) {
+      ++real_deaths[i];
+      if (getenv("SIM_DEBUG")) fprintf(stderr, "real death side %d at %u\n", i, u.tick);
+    }
+    bool now_sim_dead = self->ship >= 8 || self->enter_delay > 0.0f;
+    if (now_sim_dead && !sim_dead[i] && synced[i]) {
+      ++sim_deaths[i];
+      if (getenv("SIM_DEBUG")) fprintf(stderr, "sim death side %d at %u (energy real %.0f)\n", i, u.tick, u.energy);
+    }
+    sim_dead[i] = now_sim_dead;
+    // Re-sync at the start, whenever the real ship comes back from a death, and when it jumps (a warp to a random spot,
+    // which is the arena's randomness, not physics): put the simulated ship where it was.
+    bool jumped = false;
+    if (next[i] >= 2) {
+      const LoggedUpdate& before = logs[i][next[i] - 2];
+      jumped = !real_dead && before.ship < 8 && before.enter_delay <= 0.0f && std::hypot(u.x - before.x, u.y - before.y) > 3.0f;
+    }
+    if (jumped) ++teleports[i];
+    if (!real_dead && (was_dead[i] || !synced[i] || jumped)) {
+      self->position = Vector2f(u.x, u.y);
+      self->velocity = Vector2f(u.vx, u.vy);
+      self->orientation = u.orientation;
+      self->energy = u.energy;
+      self->enter_delay = 0.0f;
+      side.game->ship_controller.ship.energy = side.game->ship_controller.ship.energy;
+      synced[i] = true;
+      synced_at[i] = u.tick;
+    }
+    was_dead[i] = real_dead;
+    if (!synced[i] || real_dead || now_sim_dead) continue;
+    s32 since = (s32)(u.tick - synced_at[i]);
+    {
+      static bool reported[2] = {false, false};
+      float err = std::hypot(self->position.x - u.x, self->position.y - u.y);
+      if (err > 0.5f && !reported[i]) {
+        reported[i] = true;
+        auto& map = side.game->GetMap();
+        int doors = 0;
+        for (int dy = -3; dy <= 3; ++dy)
+          for (int dx = -3; dx <= 3; ++dx) {
+            TileId id = map.GetTileId((u16)(u.x + dx), (u16)(u.y + dy));
+            if (id >= 162 && id <= 169) ++doors;
+          }
+        fprintf(stderr, "first divergence side %d at %u (%.1f s after re-sync): sim (%.2f, %.2f) v (%.2f, %.2f) | real (%.2f, %.2f) v (%.2f, %.2f) | energy sim %.0f real %.0f | door tiles near %d\n",
+                i, u.tick, since / 100.0f, self->position.x, self->position.y, self->velocity.x, self->velocity.y, u.x, u.y,
+                u.vx, u.vy, self->energy, u.energy, doors);
+      }
+    }
+    for (int mark : {100, 500, 1000, 3000}) {
+      if (since == mark) {
+        float err = std::hypot(self->position.x - u.x, self->position.y - u.y);
+        position_error[mark].push_back(err);
+        energy_error[mark].push_back(std::fabs(self->energy - u.energy));
+        if (mark == 500) worst5[i] = std::max(worst5[i], err);
+      }
+    }
+  }
+  sim_hits = nullptr;
+
+  auto median = [](std::vector<float> v) {
+    if (v.empty()) return -1.0f;
+    std::sort(v.begin(), v.end());
+    return v[v.size() / 2];
+  };
+  printf("replayed %zu and %zu updates\n", logs[0].size(), logs[1].size());
+  for (auto& [mark, errs] : position_error) {
+    printf("  %4.0f s after a re-sync: position error median %.2f tiles, max %.2f (n %zu); energy error median %.0f\n",
+           mark / 100.0f, median(errs), *std::max_element(errs.begin(), errs.end()), errs.size(),
+           median(energy_error[mark]));
+  }
+  for (int k = 0; k < 2; ++k) {
+    int bullets = 0, bombs = 0;
+    for (auto& f : sim_fires[k]) (f.second == (int)WeaponType::Bomb || f.second == (int)WeaponType::ProximityBomb ? bombs : bullets)++;
+    printf("  side %d fired in the simulator: %d bullets, %d bombs; first at %u\n", k, bullets, bombs,
+           sim_fires[k].empty() ? 0 : sim_fires[k].front().first);
+  }
+  printf("  upgrade syncs: %d / %d; teleports re-synced: %d / %d\n", upgrade_syncs[0], upgrade_syncs[1], teleports[0], teleports[1]);
+  printf("  deaths: real %d / %d, simulated %d / %d\n", real_deaths[0], real_deaths[1], sim_deaths[0], sim_deaths[1]);
+  // Hits: each real hit matched to a simulated one on the same side, same weapon, within 20 ticks.
+  std::vector<HitRecord> real = ReadRealHits(argv[4], 0), real_b = ReadRealHits(argv[7], 1);
+  real.insert(real.end(), real_b.begin(), real_b.end());
+  if (getenv("SIM_DEBUG")) {
+    for (size_t k = 0; k < std::min<size_t>(6, real.size()); ++k) fprintf(stderr, "real hit %u victim %d weapon %d\n", real[k].tick, real[k].victim, real[k].weapon);
+    for (size_t k = 0; k < std::min<size_t>(6, hits.size()); ++k) fprintf(stderr, "sim  hit %u victim %d weapon %d\n", hits[k].tick, hits[k].victim, hits[k].weapon);
+  }
+  std::vector<bool> used(hits.size(), false);
+  int matched = 0;
+  for (const HitRecord& r : real) {
+    for (size_t k = 0; k < hits.size(); ++k) {
+      if (used[k] || hits[k].victim != r.victim || hits[k].weapon != r.weapon) continue;
+      if (std::abs((s32)(hits[k].tick - r.tick)) <= 20) {
+        used[k] = true;
+        ++matched;
+        break;
+      }
+    }
+  }
+  if (getenv("SIM_DEBUG")) {
+    for (const HitRecord& r : real) {
+      bool found = false;
+      for (size_t k = 0; k < hits.size(); ++k)
+        if (hits[k].victim == r.victim && hits[k].weapon == r.weapon && std::abs((s32)(hits[k].tick - r.tick)) <= 20) found = true;
+      if (!found) fprintf(stderr, "unmatched real hit %u victim %d class %d\n", r.tick, r.victim, r.weapon);
+    }
+  }
+  if (getenv("SIM_DEBUG")) {
+    for (size_t k = 0; k < hits.size(); ++k) if (!used[k]) fprintf(stderr, "unmatched sim hit %u victim %d class %d\n", hits[k].tick, hits[k].victim, hits[k].weapon);
+  }
+  printf("  hits: real %zu, simulated %zu, matched %d (%.0f%% of real, %.0f%% of simulated)\n", real.size(), hits.size(),
+         matched, real.empty() ? 0.0 : 100.0 * matched / real.size(), hits.empty() ? 0.0 : 100.0 * matched / hits.size());
+  return 0;
+}
 }  // namespace
 
 int main(int argc, char** argv) {
+  if (argc >= 8 && strcmp(argv[1], "replay") == 0) return Replay(argv);
   if (argc < 4) {
     fprintf(stderr, "usage: duelsim <capture A> <capture B> <seconds>\n");
     return 1;
@@ -221,6 +627,9 @@ int main(int argc, char** argv) {
       in.SetAction(i == 0 ? InputAction::Left : InputAction::Right, (t / 70) % 3 == 0);
       in.SetAction(InputAction::Bullet, i == 0 && (t % 40) < 5);
       sides[i].game->Update(in, 0.01f);
+      // As zero's own loop does after every update: the collision tree is rebuilt, the scratch memory freed.
+      sides[i].game->player_manager.kdtree = nullptr;
+      sides[i].trans.Revert(sides[i].scratch);
     }
     while (!relay.outbox.empty()) {
       auto [to, pkt] = relay.outbox.front();

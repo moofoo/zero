@@ -81,6 +81,9 @@ install(TARGETS zero
 # The headless duel simulator (bot-ai ticket 41): zero's sources but its main, plus sim/.
 set(SIM_SOURCES ${SOURCES})
 list(FILTER SIM_SOURCES EXCLUDE REGEX ".*/zero/main\\.cpp$")
+# No bot or zone code: their global controllers listen on the event bus and expect a bot.
+list(FILTER SIM_SOURCES EXCLUDE REGEX ".*/zero/zones/.*")
+list(FILTER SIM_SOURCES EXCLUDE REGEX ".*/zero/ZeroBot\\.cpp$")
 file(GLOB SIM_MAIN sim/*.cpp)
 add_executable(duelsim ${SIM_SOURCES} ${SIM_MAIN})
 target_include_directories(duelsim PRIVATE . lib lib/glad/include lib/glfw/include)

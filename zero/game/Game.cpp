@@ -1,3 +1,4 @@
+#include <zero/game/InputLog.h>
 #include "Game.h"
 
 #include <assert.h>
@@ -26,6 +27,7 @@ static void OnAction(void* user, InputAction action) {
   Player* self = game->player_manager.GetSelf();
 
   if (!self) return;
+  InputLogAction(GetCurrentTick(), (u8)action);
 
   bool dirty_radar = false;
 

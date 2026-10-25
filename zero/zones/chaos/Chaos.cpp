@@ -4,7 +4,9 @@
 #include <zero/behavior/BehaviorBuilder.h>
 #include <zero/behavior/nodes/BlackboardNode.h>
 #include <zero/behavior/nodes/MathNode.h>
+#include <zero/behavior/nodes/MoveNode.h>
 #include <zero/behavior/nodes/PlayerNode.h>
+#include <zero/behavior/nodes/ShipNode.h>
 #include <zero/behavior/nodes/TimerNode.h>
 #include <zero/game/Logger.h>
 #include <zero/zones/ZoneController.h>
@@ -426,6 +428,28 @@ struct ChaosBehavior : public behavior::Behavior {
   std::unique_ptr<CommitDecision> decision;
 };
 
+// The piloting test bench's behaviour (bot-ai ticket 45; --behavior bench): it flies to the "bench_goal" blackboard
+// position (set by the duel simulator) with the same GoToNode the Chaos bot roams with, and does nothing else.
+struct BenchBehavior : public behavior::Behavior {
+  void OnInitialize(behavior::ExecuteContext& ctx) override { ctx.blackboard.Set("request_ship", 0); }
+
+  std::unique_ptr<behavior::BehaviorNode> CreateTree(behavior::ExecuteContext& ctx) override {
+    using namespace behavior;
+    BehaviorBuilder builder;
+    // clang-format off
+    builder
+      .Selector()
+          .Sequence()
+              .InvertChild<ShipQueryNode>("request_ship")
+              .Child<ShipRequestNode>("request_ship")
+              .End()
+          .Child<GoToNode>("bench_goal")
+          .End();
+    // clang-format on
+    return builder.Build();
+  }
+};
+
 struct ChaosController : ZoneController {
   bool IsZone(Zone zone) override { return zone == Zone::Chaos; }
 
@@ -454,6 +478,7 @@ void ChaosController::CreateBehaviors(const char* arena_name) {
   auto& repo = bot->bot_controller->behaviors;
 
   repo.Add("chaos", std::make_unique<ChaosBehavior>());
+  repo.Add("bench", std::make_unique<BenchBehavior>());
 
   SetBehavior("chaos");
 }

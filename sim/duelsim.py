@@ -60,6 +60,7 @@ class _Lib:
             lib.ds_solid.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_int]
             lib.ds_seed.argtypes = [ctypes.c_void_p, ctypes.c_uint]
             lib.ds_ship_fields.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.POINTER(ctypes.c_uint)]
+            lib.ds_bot_goal.argtypes = [ctypes.c_void_p, ctypes.c_float, ctypes.c_float]
             lib.ds_fair_size.restype = ctypes.c_int
             lib.ds_fair_observe.restype = ctypes.c_int
             lib.ds_fair_observe.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.POINTER(ctypes.c_float)]
@@ -159,6 +160,10 @@ class DuelEnv:
 
     SHIP_FIELDS = ("energy", "recharge", "rotation", "guns", "bombs", "thrust", "speed", "shrapnel", "repels", "bursts",
                    "decoys", "thors", "bricks", "rockets", "portals", "multifire", "capability")
+
+    def bot_goal(self, x, y):
+        """Where side 1's bot flies with --behavior bench (the piloting test bench)."""
+        self.lib.ds_bot_goal(self.handle, x, y)
 
     def ship_fields(self, side):
         """A side's ship upgrades as a dict (zero's InputLog.h fields)."""

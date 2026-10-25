@@ -4,6 +4,8 @@
   `libduelsim` (the C API used by Python).
 - `duelsim.py`: `DuelEnv`, the ctypes environment. `python duelsim.py` runs a smoke test and prints the speed.
 - `train.py`: PPO self-play on fair observations (ticket 42). Runs go to `runs/<name>/` (`log.jsonl`, checkpoints).
+- `bench.py`: the piloting test bench (ticket 45): zero's Chaos bot flying from point to point, scored against the
+  baseline in `data/bench-baseline.json` (500 trials, Veteran: 97.2% arrived, 1.28 times the shortest route's time).
 - `vecenv.py`: many environments stepped together, in worker processes (`train.py --workers`, one a core).
 
 ## On this laptop

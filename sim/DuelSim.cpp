@@ -828,6 +828,12 @@ void ds_step(void* handle, unsigned int actions_a, unsigned int actions_b, int t
 
 void ds_seed(void* handle, unsigned int seed) { ((Env*)handle)->seed = seed; }
 
+// Where side 1's bot flies, with --behavior bench (the piloting test bench, ticket 45): the "bench_goal" position.
+void ds_bot_goal(void* handle, float x, float y) {
+  Side& side = ((Env*)handle)->sides[1];
+  if (side.bot) side.bot->execute_ctx.blackboard.Set("bench_goal", Vector2f(x, y));
+}
+
 // A side's ship upgrades, as zero's input log has them (InputLog.h: kShipFields u32s, energy to capability).
 void ds_ship_fields(void* handle, int side_index, unsigned int* out) {
   ShipFields(((Env*)handle)->sides[side_index].game->ship_controller.ship, out);

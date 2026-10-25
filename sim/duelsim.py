@@ -134,6 +134,13 @@ class DuelEnv:
             return [0.0] * self.fair_size
         return list(self._fair)
 
+    def fair_array(self, side):
+        """fair() as a numpy float32 array (numpy is imported only for this)."""
+        import numpy as np
+        if not self.lib.ds_fair_observe(self.handle, side, self._fair):
+            return np.zeros(self.fair_size, dtype=np.float32)
+        return np.ctypeslib.as_array(self._fair).copy()
+
     def solid(self, x, y):
         return bool(self.lib.ds_solid(self.handle, 0, int(x), int(y)))
 

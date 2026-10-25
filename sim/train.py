@@ -17,6 +17,7 @@ import random
 import time
 from pathlib import Path
 
+import numpy as np
 import torch
 import torch.nn as nn
 
@@ -137,6 +138,11 @@ class Drifter:
 DRILLS = ("still", "drift", "scripted")
 
 
+def batch(arrays):
+    """Observations (numpy arrays, one an environment) as one tensor on the default device."""
+    return torch.from_numpy(np.stack(arrays)).to(torch.get_default_device())
+
+
 def act(policy, obs, h, starts, greedy=False):
     with torch.no_grad():
         logits, value, h = policy(obs.unsqueeze(1), h, starts.unsqueeze(1))
@@ -154,7 +160,7 @@ def evaluate(policy, envs, episodes, rng):
     wins = losses = draws = 0
     n = envs.count
     fair_a, opp = envs.reset()
-    obs = torch.tensor(fair_a)
+    obs = batch(fair_a)
     h = policy.initial(n)
     starts = torch.ones(n)
     aimers = [ScriptedAimer(rng) for _ in range(n)]
@@ -162,7 +168,8 @@ def evaluate(policy, envs, episodes, rng):
     while done_count < episodes:
         choice, _, _, h = act(policy, obs, h, starts, greedy=True)
         starts = torch.zeros(n)
-        actions_a = [DuelEnv.choice(*[int(x) for x in choice[i]]) for i in range(n)]
+        chosen = choice.tolist()
+        actions_a = [DuelEnv.choice(*chosen[i]) for i in range(n)]
         actions_b = [DuelEnv.choice(*aimers[i](opp[i])) for i in range(n)]
         steps = envs.step(actions_a, actions_b)
         for i, (_, done, info, _, _) in enumerate(steps):
@@ -174,7 +181,7 @@ def evaluate(policy, envs, episodes, rng):
                 draws += not dead or len(dead) == 2
                 aimers[i].reset()
                 starts[i] = 1.0
-        obs, opp = torch.tensor([r[3] for r in steps]), [r[4] for r in steps]
+        obs, opp = batch([r[3] for r in steps]), [r[4] for r in steps]
     return wins, losses, draws
 
 
@@ -211,7 +218,8 @@ def main():
     out = HERE / "runs" / args.run
     out.mkdir(parents=True, exist_ok=True)
     device = torch.device(args.device)
-    torch.set_default_device(device)  # every tensor below, and the networks, live on the device
+    if device.type != "cpu":
+        torch.set_default_device(device)  # every tensor below, and the networks, live on the device
     envs = VecEnv(args.envs, workers=args.workers, seed=args.seed * 1000, map_dir=args.map_dir,
                   spawn_gap=tuple(args.spawn_gap), max_seconds=args.max_seconds)
     eval_envs = VecEnv(8, seed=args.seed * 1000 + 500, map_dir=args.map_dir, max_seconds=args.max_seconds)
@@ -228,7 +236,8 @@ def main():
     stage = len(DRILLS) if args.no_drills else 0
     stage_results = []
     fair_a, fair_b = envs.reset()
-    obs, opp_obs = torch.tensor(fair_a), torch.tensor(fair_b)
+    obs, opp_obs = batch(fair_a), batch(fair_b)
+    opp_rows = fair_b  # the opponents' observations as arrays, for the scripted aimer
     h = policy.initial(n)
     opp_h = opponent.initial(n)
     starts = torch.ones(n)
@@ -281,18 +290,19 @@ def main():
                         opp_choice[i] = drifters[i](None)
                 elif k == "scripted":
                     for i in idx:
-                        opp_choice[i] = aimers[i](opp_obs[i].tolist())
+                        opp_choice[i] = aimers[i](opp_rows[i])
                 else:
                     net = opponent_net(k)
                     c, _, _, nh = act(net, opp_obs[idx], opp_h[:, idx], starts[idx])
                     opp_h[:, idx] = nh
-                    for j, i in enumerate(idx):
-                        opp_choice[i] = tuple(int(x) for x in c[j])
+                    for j, row in zip(idx, c.tolist()):
+                        opp_choice[j] = tuple(row)
             rewards, dones = torch.zeros(n), torch.zeros(n)
             new_obs, new_opp = [], []
             buf_start.append(starts.clone())
             starts = torch.zeros(n)
-            steps = envs.step([DuelEnv.choice(*[int(x) for x in choice[i]]) for i in range(n)],
+            chosen = choice.tolist()
+            steps = envs.step([DuelEnv.choice(*chosen[i]) for i in range(n)],
                               [DuelEnv.choice(*opp_choice[i]) for i in range(n)])
             for i, (ra, done, info, fair_a, fair_b) in enumerate(steps):
                 rewards[i] = ra
@@ -326,7 +336,8 @@ def main():
             buf_val.append(value)
             buf_rew.append(rewards)
             buf_done.append(dones)
-            obs, opp_obs = torch.tensor(new_obs), torch.tensor(new_opp)
+            obs, opp_obs = batch(new_obs), batch(new_opp)
+            opp_rows = new_opp
             total += n
         # Advantages (GAE), bootstrapped from the next value.
         with torch.no_grad():

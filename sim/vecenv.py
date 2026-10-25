@@ -5,7 +5,8 @@
     for ra, done, info, fair_a, fair_b in venv.step(actions_a, actions_b): ...
 
 Each environment's own seed is seed + its index. An environment that finishes an episode is reset at once, and step()
-returns the new episode's first observations with the finished one's reward, done and info.
+returns the new episode's first observations with the finished one's reward, done and info. Observations are numpy
+float32 arrays (DuelEnv.fair_array).
 """
 import multiprocessing as mp
 
@@ -20,7 +21,7 @@ def _step(env, a, b):
     _, _, (ra, _), done, info = env.step(a, b)
     if done:
         env.reset()
-    return ra, done, info, env.fair(0), env.fair(1)
+    return ra, done, info, env.fair_array(0), env.fair_array(1)
 
 
 def _worker(conn, indices, seed, kwargs):
@@ -31,7 +32,7 @@ def _worker(conn, indices, seed, kwargs):
         if message[0] == "reset":
             for e in envs:
                 e.reset()
-            conn.send([(e.fair(0), e.fair(1)) for e in envs])
+            conn.send([(e.fair_array(0), e.fair_array(1)) for e in envs])
         elif message[0] == "step":
             conn.send([_step(e, a, b) for e, a, b in zip(envs, message[1], message[2])])
         else:
@@ -65,7 +66,7 @@ class VecEnv:
         if self.envs is not None:
             for e in self.envs:
                 e.reset()
-            return [e.fair(0) for e in self.envs], [e.fair(1) for e in self.envs]
+            return [e.fair_array(0) for e in self.envs], [e.fair_array(1) for e in self.envs]
         for c in self.conns:
             c.send(("reset",))
         pairs = [None] * self.count

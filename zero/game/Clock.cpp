@@ -27,7 +27,16 @@ Tick GetCurrentTickOs() {
 #endif
 }
 
+static bool virtual_clock = false;
+static Tick virtual_tick = 0;
+
+void SetVirtualTick(Tick tick) {
+  virtual_clock = true;
+  virtual_tick = tick & 0x7fffffff;
+}
+
 Tick GetCurrentTick() {
+  if (virtual_clock) return virtual_tick;
   if (startup_tick == 0) {
     startup_tick = GetCurrentTickOs();
   }

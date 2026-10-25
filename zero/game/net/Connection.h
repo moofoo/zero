@@ -105,6 +105,11 @@ struct Connection {
   bool extra_position_info = false;
   bool send_damage = false;
 
+  // Loopback (ticket 41's duel simulator): when set, every packet this client sends goes to this function, unencrypted,
+  // instead of the socket; the simulator's relay plays the server.
+  void (*loopback)(void* user, u8* data, size_t size) = nullptr;
+  void* loopback_user = nullptr;
+
   u32 last_sync_tick = 0;
   u32 last_packet_tick = 0;
   LoginState login_state = LoginState::EncryptionRequested;

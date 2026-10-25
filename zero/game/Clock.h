@@ -20,6 +20,10 @@ constexpr u16 kInvalidSmallTick = 0xFFFF;
 
 Tick GetCurrentTick();
 
+// A virtual clock (ticket 41's duel simulator): once set, GetCurrentTick returns this tick instead of the OS clock's,
+// so a simulator can step the game faster than real time.
+void SetVirtualTick(Tick tick);
+
 constexpr s64 kTickDurationMicro = 10000;
 
 u64 GetMicrosecondTick();

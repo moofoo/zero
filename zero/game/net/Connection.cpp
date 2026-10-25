@@ -26,6 +26,36 @@
 #include <zero/game/net/security/Checksum.h>
 
 #include <chrono>
+
+namespace {
+// ZERO_CAPTURE=<folder> (ticket 41): every game packet this client receives (direction 0) and sends (1) is appended to
+// <folder>/<pid>.cap as: direction u8, tick u32, size u32, bytes; for building the duel simulator's relay.
+FILE* CaptureFile() {
+  static FILE* file = nullptr;
+  static bool checked = false;
+  if (!checked) {
+    checked = true;
+    if (const char* folder = getenv("ZERO_CAPTURE")) {
+      char path[512];
+      snprintf(path, sizeof(path), "%s/%d.cap", folder, (int)getpid());
+      file = fopen(path, "wb");
+    }
+  }
+  return file;
+}
+
+void Capture(unsigned char direction, const unsigned char* data, size_t size) {
+  FILE* file = CaptureFile();
+  if (!file) return;
+  unsigned int tick = zero::GetCurrentTick();
+  unsigned int length = (unsigned int)size;
+  fwrite(&direction, 1, 1, file);
+  fwrite(&tick, 4, 1, file);
+  fwrite(&length, 4, 1, file);
+  fwrite(data, 1, size, file);
+  fflush(file);
+}
+}  // namespace
 #include <thread>
 
 // #define PACKET_SHEDDING 20
@@ -731,6 +761,7 @@ void Connection::ProcessPacket(u8* pkt, size_t size) {
     }
   }
 
+  Capture(0, pkt, size);
   dispatcher.Dispatch(pkt, size);
   Event::Dispatch(S2CPacketEvent(pkt, size));
 }
@@ -1106,6 +1137,11 @@ size_t Connection::Send(u8* data, size_t size) {
 #endif
 
   Event::Dispatch(C2SPacketEvent(data, size));
+  Capture(1, data, size);
+  if (loopback) {
+    loopback(loopback_user, data, size);
+    return size;
+  }
 
   // TODO: This should be a proper system, but right now it just needs to handle
   // registration form

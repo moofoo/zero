@@ -77,3 +77,15 @@ install(TARGETS zero
 install(TARGETS zero
         CONFIGURATIONS Release
         RUNTIME DESTINATION Release)
+
+# The headless duel simulator (bot-ai ticket 41): zero's sources but its main, plus sim/.
+set(SIM_SOURCES ${SOURCES})
+list(FILTER SIM_SOURCES EXCLUDE REGEX ".*/zero/main\\.cpp$")
+file(GLOB SIM_MAIN sim/*.cpp)
+add_executable(duelsim ${SIM_SOURCES} ${SIM_MAIN})
+target_include_directories(duelsim PRIVATE . lib lib/glad/include lib/glfw/include)
+if(WIN32)
+  target_link_libraries(duelsim ws2_32)
+else()
+  target_link_libraries(duelsim dl -pthread)
+endif()

@@ -4,7 +4,8 @@
     fair_a, fair_b = venv.reset()
     for ra, done, info, fair_a, fair_b in venv.step(actions_a, actions_b): ...
 
-Each environment's own seed is seed + its index. An environment that finishes an episode is reset at once, and step()
+Each environment's own seed is seed + its index. With bots=k and bot={...}, the first k environments' side 1 is a zero
+bot (DuelEnv's bot), spread over the workers. An environment that finishes an episode is reset at once, and step()
 returns the new episode's first observations with the finished one's reward, done and info. Observations are numpy
 float32 arrays (DuelEnv.fair_array).
 """
@@ -14,7 +15,9 @@ from duelsim import DuelEnv
 
 
 def _make(index, seed, kwargs):
-    return DuelEnv(seed=seed + index, **kwargs)
+    bots, bot = kwargs.get("bots", 0), kwargs.get("bot")
+    rest = {k: v for k, v in kwargs.items() if k not in ("bots", "bot")}
+    return DuelEnv(seed=seed + index, bot=bot if index < bots else None, **rest)
 
 
 def _step(env, a, b):

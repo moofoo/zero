@@ -46,6 +46,8 @@ class _Lib:
             lib = ctypes.CDLL(str(path or default_library()))
             lib.ds_create.restype = ctypes.c_void_p
             lib.ds_create.argtypes = [ctypes.c_char_p, ctypes.c_char_p]
+            lib.ds_create_bot.restype = ctypes.c_void_p
+            lib.ds_create_bot.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint]
             lib.ds_reset.argtypes = [ctypes.c_void_p] + [ctypes.c_float] * 6
             lib.ds_step.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.c_uint, ctypes.c_int]
             lib.ds_observe.restype = ctypes.c_int
@@ -67,11 +69,15 @@ class DuelEnv:
 
     Rewards per step, for each side: damage dealt less damage taken, as shares of max energy, plus `kill_reward` for a
     kill and minus it for a death. An episode ends at the first death or after `max_seconds`.
+
+    With `bot`, side 1 is a zero Chaos bot (ticket 45) and step()'s second action is ignored: bot={"skill": "veteran"},
+    optionally "aggression" (default standard), "config" (a bot config; default chaos-offline's bots/chaos.cfg) and
+    "args" (more of zero's command line).
     """
 
     def __init__(self, map_dir=None, captures=None, frame_skip=10, max_weapons=16, max_seconds=120.0,
                  kill_reward=1.0, spawn_center=(512.0, 512.0), spawn_radius=60.0, spawn_gap=(20.0, 40.0),
-                 seed=None, library=None):
+                 seed=None, library=None, bot=None):
         self.lib = _Lib.get(library)
         self.frame_skip = frame_skip
         self.max_weapons = max_weapons
@@ -84,7 +90,14 @@ class DuelEnv:
         here = os.getcwd()
         os.chdir(map_dir)  # the client loads zones/<server>/<map>.lvl from where it runs
         try:
-            self.handle = self.lib.ds_create(str(Path(a).resolve()).encode(), str(Path(b).resolve()).encode())
+            if bot:
+                config = Path(bot.get("config") or Path.home() / "newcode/chaos-offline-clean/bots/chaos.cfg")
+                args = f"--skill {bot['skill']} --aggression {bot.get('aggression', 'standard')} --ship 1 " + bot.get("args", "")
+                self.handle = self.lib.ds_create_bot(str(Path(a).resolve()).encode(), str(Path(b).resolve()).encode(),
+                                                     str(config.resolve()).encode(), args.encode(),
+                                                     (seed or 0) & 0xFFFFFFFF)
+            else:
+                self.handle = self.lib.ds_create(str(Path(a).resolve()).encode(), str(Path(b).resolve()).encode())
         finally:
             os.chdir(here)
         if not self.handle:

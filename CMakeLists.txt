@@ -81,11 +81,14 @@ install(TARGETS zero
 # The headless duel simulator (bot-ai ticket 41): zero's sources but its main, plus sim/.
 set(SIM_SOURCES ${SOURCES})
 list(FILTER SIM_SOURCES EXCLUDE REGEX ".*/zero/main\\.cpp$")
-# No bot or zone code: their global controllers listen on the event bus and expect a bot.
+# Of the zones, only Chaos, whose bots the simulator can run (ticket 45): the other zones' global controllers listen on
+# the event bus and expect a bot. ZERO_SIM leaves out Chaos's own global controller; the simulator makes one a bot.
 list(FILTER SIM_SOURCES EXCLUDE REGEX ".*/zero/zones/.*")
-list(FILTER SIM_SOURCES EXCLUDE REGEX ".*/zero/ZeroBot\\.cpp$")
+file(GLOB SIM_CHAOS zero/zones/chaos/*.cpp)
+list(APPEND SIM_SOURCES ${SIM_CHAOS})
 file(GLOB SIM_MAIN sim/*.cpp)
 add_executable(duelsim ${SIM_SOURCES} ${SIM_MAIN})
+target_compile_definitions(duelsim PRIVATE ZERO_SIM)
 target_include_directories(duelsim PRIVATE . lib lib/glad/include lib/glfw/include)
 if(WIN32)
   target_link_libraries(duelsim ws2_32)
@@ -96,7 +99,7 @@ endif()
 # The simulator as a shared library for Python (ctypes): no main.
 add_library(duelsim_lib SHARED ${SIM_SOURCES} ${SIM_MAIN})
 set_target_properties(duelsim_lib PROPERTIES OUTPUT_NAME duelsim POSITION_INDEPENDENT_CODE ON)
-target_compile_definitions(duelsim_lib PRIVATE DUELSIM_LIBRARY)
+target_compile_definitions(duelsim_lib PRIVATE DUELSIM_LIBRARY ZERO_SIM)
 target_include_directories(duelsim_lib PRIVATE . lib lib/glad/include lib/glfw/include)
 if(WIN32)
   target_link_libraries(duelsim_lib ws2_32)

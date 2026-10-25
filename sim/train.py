@@ -262,6 +262,9 @@ def main():
     p.add_argument("--no-drills", action="store_true", help="start in the league, without the aiming drills")
     p.add_argument("--drill-pass", type=float, default=0.8)
     p.add_argument("--drill-window", type=int, default=100)
+    p.add_argument("--bot-share", type=float, default=0.0, help="the share of environments whose opponent is a zero bot "
+                   "(ticket 45), always; the rest play the league")
+    p.add_argument("--bot-skill", default="veteran", help="the zero bots' skill level (bots/chaos.cfg)")
     p.add_argument("--scripted-share", type=float, default=0.25, help="the share of episodes against the aimer")
     p.add_argument("--spawn-gap", type=float, nargs=2, default=(20.0, 40.0), help="tiles between the ships at spawn")
     p.add_argument("--spawn-center", type=float, nargs=2, default=(512.0, 512.0),
@@ -280,10 +283,16 @@ def main():
     device = torch.device(args.device)
     if device.type != "cpu":
         torch.set_default_device(device)  # every tensor below, and the networks, live on the device
-    envs = VecEnv(args.envs, workers=args.workers, seed=args.seed * 1000, map_dir=args.map_dir,
+    bot_count = int(round(args.bot_share * args.envs))
+    bot_spec = {"skill": args.bot_skill}
+    envs = VecEnv(args.envs, workers=args.workers, seed=args.seed * 1000, map_dir=args.map_dir, bots=bot_count,
+                  bot=bot_spec,
                   spawn_gap=tuple(args.spawn_gap), spawn_center=tuple(args.spawn_center),
                   spawn_radius=args.spawn_radius, max_seconds=args.max_seconds)
     eval_envs = VecEnv(8, seed=args.seed * 1000 + 500, map_dir=args.map_dir, max_seconds=args.max_seconds)
+    eval_bot_envs = VecEnv(4, seed=args.seed * 1000 + 700, map_dir=args.map_dir, max_seconds=args.max_seconds,
+                           spawn_gap=tuple(args.spawn_gap), spawn_center=tuple(args.spawn_center),
+                           spawn_radius=args.spawn_radius, bots=4, bot=bot_spec) if bot_count else None
     size = envs.fair_size
     policy = Policy(size).to(device)
     if args.init:
@@ -308,7 +317,9 @@ def main():
     starts = torch.ones(n)
     league_nets = {}
 
-    def pick_opponent():
+    def pick_opponent(i):
+        if i < bot_count:
+            return args.bot_skill  # a bot environment: its zero bot, always
         if stage < len(DRILLS):
             return DRILLS[stage]
         r = rng.random()
@@ -318,7 +329,7 @@ def main():
         return "latest" if r < args.scripted_share + 0.55 * (1 - args.scripted_share) else rng.choice(league)
 
     # Each environment's opponent for its current episode: a drill, "scripted", "latest" or a checkpoint path.
-    kinds = [pick_opponent() for _ in range(n)]
+    kinds = [pick_opponent(i) for i in range(n)]
 
     def opponent_net(kind):
         if kind == "latest":
@@ -347,7 +358,7 @@ def main():
             for i, k in enumerate(kinds):
                 groups.setdefault(k, []).append(i)
             for k, idx in groups.items():
-                if k == "still":
+                if k == "still" or (k == args.bot_skill and idx[0] < bot_count):  # a bot flies itself
                     for i in idx:
                         opp_choice[i] = (2, 1, 0)
                 elif k == "drift":
@@ -392,7 +403,7 @@ def main():
                     episode_rewards.append(running[i])
                     running[i] = 0.0
                     starts[i] = 1.0
-                    kinds[i] = pick_opponent()
+                    kinds[i] = pick_opponent(i)
                     opp_h[:, i] = 0.0
                     for k in SCRIPTED:
                         scripted[k][i].reset()
@@ -462,9 +473,10 @@ def main():
         record = {"iteration": iteration, "steps": total, "seconds": round(time.time() - started),
                   "episode_reward": round(sum(episode_rewards[-100:]) / max(len(episode_rewards[-100:]), 1), 3)}
         record["stage"] = DRILLS[stage] if stage < len(DRILLS) else "league"
-        for kind in ("still", "drift") + tuple(SCRIPTED) + ("latest", "league"):
+        bot_kinds = (args.bot_skill,) if bot_count else ()
+        for kind in ("still", "drift") + tuple(SCRIPTED) + bot_kinds + ("latest", "league"):
             rs = [r for r in results[-300:]
-                  if (r[0] == kind if kind != "league" else r[0] not in DRILLS + tuple(SCRIPTED) + ("latest",))]
+                  if (r[0] == kind if kind != "league" else r[0] not in DRILLS + tuple(SCRIPTED) + ("latest", args.bot_skill))]
             if rs:
                 record[f"vs_{kind}"] = {"episodes": len(rs), "won": round(sum(r[1] for r in rs) / len(rs), 2),
                                         "lost": round(sum(r[2] for r in rs) / len(rs), 2)}
@@ -472,6 +484,9 @@ def main():
             w, l, d = evaluate(policy, eval_envs, args.eval_episodes, rng)
             wd, ld, dd = evaluate(policy, eval_envs, args.eval_episodes, rng, dodge=True)
             record["eval_vs_dodger"] = {"won": wd, "lost": ld, "draw": dd}
+            if eval_bot_envs:
+                wb, lb, db = evaluate(policy, eval_bot_envs, args.eval_episodes, rng)
+                record[f"eval_vs_{args.bot_skill}"] = {"won": wb, "lost": lb, "draw": db}
             for k in kinds_scripted:
                 if k != "scripted":
                     wk, lk, dk = evaluate(policy, eval_envs, args.eval_episodes, rng, style=SCRIPTED[k])
@@ -482,6 +497,8 @@ def main():
         print(json.dumps(record), flush=True)
     torch.save(policy.state_dict(), out / "final.pt")
     envs.close()
+    if eval_bot_envs:
+        eval_bot_envs.close()
 
 
 if __name__ == "__main__":

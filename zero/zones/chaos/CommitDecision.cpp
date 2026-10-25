@@ -1,4 +1,5 @@
 #include "CommitDecision.h"
+#include "ChaosRandom.h"
 
 #include "EnemySight.h"
 #include "EnergyEstimate.h"
@@ -148,7 +149,7 @@ CommitDecision::CommitDecision(ZeroBot& bot, EnergyEstimate& estimate, Opportuni
       sight(sight),
       notice(notice),
       settings(settings),
-      random(std::random_device{}()) {}
+      random(ChaosSeed()) {}
 
 float CommitDecision::DamageRate(Player& shooter, Player& victim, bool shooter_is_self) {
   if (shooter.ship >= 8) return 0.0f;

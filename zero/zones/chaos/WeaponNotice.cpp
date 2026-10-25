@@ -1,4 +1,5 @@
 #include "WeaponNotice.h"
+#include "ChaosRandom.h"
 
 #include <zero/ZeroBot.h>
 #include <zero/game/Clock.h>
@@ -25,7 +26,7 @@ WeaponNotice::WeaponNotice(ZeroBot& bot, float awareness, Vector2f view_extent, 
       bot(bot),
       awareness(awareness),
       view_extent(view_extent),
-      random(std::random_device{}()) {}
+      random(ChaosSeed()) {}
 
 // Fixed for each weapon while it exists: who fired it, when it ends, and what it is. A multifire volley's bullets
 // share a key, and are noticed together, as a player sees the spread.

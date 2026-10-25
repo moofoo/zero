@@ -15,7 +15,16 @@
 #include <zero/game/GameEvent.h>
 #include <zero/game/InputLog.h>
 #include <zero/game/ShipController.h>
+#include <zero/Args.h>
+#include <zero/BotController.h>
+#include <zero/Config.h>
+#include <zero/RenderContext.h>
+#include <zero/ZeroBot.h>
+#include <zero/commands/CommandSystem.h>
 #include <zero/policy/DuelPolicy.h>
+#include <zero/zones/ZoneController.h>
+#include <zero/zones/chaos/Chaos.h>
+#include <zero/Seed.h>
 #include <zero/policy/FairObservation.h>
 
 #include <algorithm>
@@ -33,11 +42,10 @@
 using namespace zero;
 
 namespace zero {
-// Globals the client expects: the bot's name (ZeroBot.cpp), and the server name, whose folder (zones/<name>) holds the
-// cached map, and the security service address (normally defined with the bot's main).
-const char* kPlayerName = "sim";
-const char* kPlayerPassword = "none";
-GameSettings g_Settings;
+// Globals the client expects with the bot's main: the server name, whose folder (zones/<name>) holds the cached map,
+// and the security service address. ZeroBot.cpp, built in for the bots (ticket 45), has the player name and settings.
+extern const char* kPlayerName;
+extern const char* kPlayerPassword;
 const char* kServerName = "Chaos";
 const char* kSecurityServiceIp = "127.0.0.1";
 }  // namespace zero
@@ -77,6 +85,8 @@ struct Relay {
 
 struct Side {
   int index = 0;
+  // The side's event scope (Event.h): events from its client reach only its own handlers, as if it ran alone.
+  unsigned int scope = 0;
   Relay* relay = nullptr;
   u16 pid = 0xFFFF;
   MemoryArena perm{nullptr, 0}, trans{nullptr, 0}, work{nullptr, 0};
@@ -88,7 +98,74 @@ struct Side {
   // Later security packets (door and prize seeds), delivered at their own time in a replay: (server tick, packet).
   std::vector<std::pair<u32, std::vector<u8>>> deferred;
   size_t next_deferred = 0;
+  // A zero Chaos bot flying this side (ticket 45), made before the login replays so it hears the arena and map
+  // events: its bot config file and arguments (as zero's command line: --skill veteran --aggression standard ...).
+  std::string bot_config, bot_args;
+  ZeroBot* bot = nullptr;
+  std::unique_ptr<ZoneController> controller;
+  std::vector<std::string> bot_argv;
+  u32 bot_seed = 0;  // the next seed for the bot's random generators (ChaosRandom.h)
 };
+
+// Runs `work` in the side's event scope with the bot's seeds, then back to scope 0.
+template <typename F>
+void InScope(Side& side, F&& work) {
+  g_EventScope = side.scope;
+  if (side.bot) g_Seed = side.bot_seed;
+  work();
+  if (side.bot) side.bot_seed = *g_Seed;
+  g_Seed.reset();
+  g_EventScope = 0;
+}
+
+// Makes the side's bot around its game, as ZeroBot::JoinZone does without the connection and window.
+bool MakeBot(Side& side) {
+  ZeroBot* bot = new ZeroBot();
+  bot->game = side.game;
+  bot->config = Config::Load(side.bot_config.c_str());
+  if (!bot->config) {
+    fprintf(stderr, "duelsim: can't load the bot config %s\n", side.bot_config.c_str());
+    return false;
+  }
+  side.bot_argv = {"zero"};
+  size_t start = 0;
+  while (start < side.bot_args.size()) {
+    size_t end = side.bot_args.find(' ', start);
+    if (end == std::string::npos) end = side.bot_args.size();
+    if (end > start) side.bot_argv.push_back(side.bot_args.substr(start, end - start));
+    start = end + 1;
+  }
+  std::vector<char*> argv;
+  for (auto& a : side.bot_argv) argv.push_back(a.data());
+  bot->args = std::make_unique<ArgParser>((int)argv.size(), argv.data());
+  strcpy(bot->name, "SimBot");
+  bot->bot_controller = new BotController(*side.game);
+  bot->commands = new CommandSystem(*bot, side.game->dispatcher);
+  bot->server_info.name = "Chaos";
+  bot->server_info.zone = Zone::Chaos;
+  bot->execute_ctx.bot = bot;  // zero sets it every update, before the arena's packets arrive
+  bot->execute_ctx.dt = 0.01f;
+  side.controller = chaos::CreateChaosController();
+  side.bot = bot;
+  Event::Dispatch(ZeroBot::JoinRequestEvent(*bot, bot->server_info));
+  return true;
+}
+
+// The bot's think for this tick (ZeroBot::Update's first half): its tree sets the side's input.
+void BotThink(Side& side) {
+  ZeroBot& bot = *side.bot;
+  Game& game = *side.game;
+  if (bot.bot_controller->actuator.enabled) {
+    side.input.Clear();
+  } else {
+    side.input.ClearWeapons();
+  }
+  if (game.connection.login_state != Connection::LoginState::Complete) return;
+  bot.execute_ctx.bot = &bot;
+  bot.execute_ctx.dt = 0.01f;
+  RenderContext rc(&game.camera, &game.ui_camera, &game.sprite_renderer);
+  bot.bot_controller->Update(rc, side.input, bot.execute_ctx);
+}
 
 void Loopback(void* user, u8* data, size_t size) {
   Side* side = (Side*)user;
@@ -174,12 +251,15 @@ bool SetupSide(Side& side, const std::vector<Packet>& capture, Tick start, s32 o
   side.queue = new WorkQueue(side.work);
   side.worker = new Worker(*side.queue);
   side.worker->Launch();
+  g_EventScope = side.scope;
+  if (!side.bot_config.empty()) g_Seed = side.bot_seed;
   side.game = memory_arena_construct_type(&side.perm, Game, side.perm, side.trans, *side.queue, 1920, 1080);
   if (side.game->Initialize(side.input) == GameInitializeResult::Failure) return false;
   Connection& c = side.game->connection;
   c.loopback = Loopback;
   c.loopback_user = &side;
   c.connected = true;
+  if (!side.bot_config.empty() && !MakeBot(side)) return false;
   // Replay the arena setup: every server packet but positions, kills, chat and keep-alives.
   bool seen_security = false;
   for (const Packet& p : capture) {
@@ -199,6 +279,9 @@ bool SetupSide(Side& side, const std::vector<Packet>& capture, Tick start, s32 o
   }
   c.time_diff = 0;
   side.scratch = side.trans.GetSnapshot();
+  if (side.bot) side.bot_seed = *g_Seed;
+  g_Seed.reset();
+  g_EventScope = 0;
   return side.pid != 0xFFFF;
 }
 
@@ -639,7 +722,7 @@ void Deliver(Env& env) {
   while (!env.relay.outbox.empty()) {
     auto [to, pkt] = env.relay.outbox.front();
     env.relay.outbox.pop_front();
-    env.sides[to].game->connection.ProcessPacket(pkt.data(), pkt.size());
+    InScope(env.sides[to], [&] { env.sides[to].game->connection.ProcessPacket(pkt.data(), pkt.size()); });
   }
 }
 
@@ -647,20 +730,36 @@ void Deliver(Env& env) {
 
 extern "C" {
 
+void* ds_create_bot(const char* capture_a, const char* capture_b, const char* bot_config, const char* bot_args,
+                    unsigned int seed);
+
 // A new environment from two captured logins (one per side), run from a folder holding zones/<server>/<map>.lvl.
 // Null on failure.
-void* ds_create(const char* capture_a, const char* capture_b) {
+void* ds_create(const char* capture_a, const char* capture_b) { return ds_create_bot(capture_a, capture_b, nullptr, nullptr, 0); }
+
+// As ds_create, with side 1 flown by a zero Chaos bot (ticket 45): its bot config file (zero's chaos.cfg) and
+// arguments as on zero's command line ("--skill veteran --aggression standard --ship 1"); its random generators are
+// seeded from `seed`. The bot side's actions in ds_step are ignored. Without a config, as ds_create.
+void* ds_create_bot(const char* capture_a, const char* capture_b, const char* bot_config, const char* bot_args,
+                    unsigned int seed) {
+  static unsigned int next_scope = 1;
   auto a = ReadCapture(capture_a), b = ReadCapture(capture_b);
   if (a.empty() || b.empty()) return nullptr;
-  if (!env_watcher) env_watcher = new EnvWatcher();
+  if (!env_watcher) env_watcher = new EnvWatcher();  // scope 0: it hears every environment
   g_LogPrintLevel = LogLevel::Error;  // the clients' packet chatter would swamp a training run
   Env* env = new Env();
   env->tick = 100000;
   SetVirtualTick(env->tick);
   for (int i = 0; i < 2; ++i) {
     env->sides[i].index = i;
+    env->sides[i].scope = next_scope++;
     env->sides[i].relay = &env->relay;
     env->relay.sides[i] = &env->sides[i];
+  }
+  if (bot_config && *bot_config) {
+    env->sides[1].bot_config = bot_config;
+    env->sides[1].bot_args = bot_args ? bot_args : "";
+    env->sides[1].bot_seed = seed * 7919u + 1;
   }
   if (!SetupSide(env->sides[0], a, env->tick) || !SetupSide(env->sides[1], b, env->tick)) return nullptr;
   env->relay.outbox.clear();
@@ -686,7 +785,9 @@ void ds_reset(void* handle, float ax, float ay, float a_orientation, float bx, f
   // The last episode's weapons still in flight, in both clients' views.
   for (int i = 0; i < 2; ++i) {
     PlayerManager& pm = env.sides[i].game->player_manager;
-    for (size_t k = 0; k < pm.player_count; ++k) env.sides[i].game->weapon_manager.ClearWeapons(pm.players[k]);
+    InScope(env.sides[i], [&] {
+      for (size_t k = 0; k < pm.player_count; ++k) env.sides[i].game->weapon_manager.ClearWeapons(pm.players[k]);
+    });
   }
   env.happenings.clear();
   env.fair[0].clear();
@@ -702,10 +803,16 @@ void ds_step(void* handle, unsigned int actions_a, unsigned int actions_b, int t
     const u32 actions[2] = {actions_a, actions_b};
     for (int i = 0; i < 2; ++i) {
       Side& side = env.sides[i];
-      side.input.actions = actions[i];
-      side.game->Update(side.input, 0.01f);
-      side.game->player_manager.kdtree = nullptr;
-      side.trans.Revert(side.scratch);
+      InScope(side, [&] {
+        if (side.bot) {
+          BotThink(side);  // a bot side flies itself: its tree's input, not the caller's
+        } else {
+          side.input.actions = actions[i];
+        }
+        side.game->Update(side.input, 0.01f);
+        side.game->player_manager.kdtree = nullptr;
+        side.trans.Revert(side.scratch);
+      });
     }
     Deliver(env);
     if (env.tick % kObsEvery == 0) {

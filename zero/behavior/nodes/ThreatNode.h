@@ -1,5 +1,7 @@
 #pragma once
 
+#include <zero/Seed.h>
+
 #include <stdio.h>
 #include <zero/BotController.h>
 #include <zero/InfluenceMap.h>
@@ -463,7 +465,7 @@ struct FindTerritoryPosition : public BehaviorNode {
         nearby_distance_key(nearby_distance_key),
         output_key(output_key),
         fresh(fresh) {
-    rng = std::mt19937(dev());
+    rng = std::mt19937(NewSeed());
   }
 
   ExecuteResult Execute(ExecuteContext& ctx) override {
@@ -536,7 +538,6 @@ struct FindTerritoryPosition : public BehaviorNode {
   const char* output_key;
   bool fresh = false;
 
-  std::random_device dev;
   std::mt19937 rng;
 };
 

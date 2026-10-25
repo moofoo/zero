@@ -1,4 +1,5 @@
 #include "ChaosCombat.h"
+#include "ChaosRandom.h"
 
 #include "CommitDecision.h"
 #include "EnemySight.h"
@@ -278,7 +279,7 @@ struct ShotSpreadNode : public behavior::BehaviorNode {
     Vector2f aim_direction = Normalize(aimshot - self->position);
     Vector2f perp = Perpendicular(aim_direction);
 
-    float t = GetMicrosecondTick() / (kTickDurationMicro * 10.0f);
+    float t = GetCurrentTick() / 10.0f;  // the game tick, not the wall clock, so the simulator repeats
     aimshot += perp * sinf(t / period) * spread;
 
     ctx.blackboard.Set(aimshot_key, aimshot);
@@ -380,7 +381,7 @@ struct AcceptNode : public behavior::BehaviorNode {
         dodge_threshold(dodge_threshold),
         damage_judgement(damage_judgement),
         judgement_noise(judgement_noise),
-        random(std::random_device{}()) {}
+        random(ChaosSeed()) {}
 
   // Never accept a hit expected to leave less than this share of max energy.
   static constexpr float kLastEnergy = 0.1f;
@@ -784,7 +785,7 @@ struct CommittedDodgeNode : public behavior::BehaviorNode {
         planning(planning),
         sight(sight),
         incoming(threshold, kDodgeDistance),
-        random(std::random_device{}()) {}
+        random(ChaosSeed()) {}
 
   // Planning: kDirections directions and keeping on, each flown for kPlanSeconds at full thrust (in kPlanSteps steps,
   // stopping at walls). Each scores the damage of the weapons it considers (the most damaging, more of them with more
@@ -1007,7 +1008,7 @@ struct AnticipationNode : public behavior::BehaviorNode {
   static constexpr float kStrongForce = 10000.0f;
 
   AnticipationNode(float anticipation, float threshold, const EnemySight* sight, const WeaponNotice* notice)
-      : anticipation(anticipation), threshold(threshold), sight(sight), notice(notice), random(std::random_device{}()) {}
+      : anticipation(anticipation), threshold(threshold), sight(sight), notice(notice), random(ChaosSeed()) {}
 
   behavior::ExecuteResult Execute(behavior::ExecuteContext& ctx) override {
     Player* self = ctx.bot->game->player_manager.GetSelf();
@@ -1100,7 +1101,7 @@ struct AnticipationNode : public behavior::BehaviorNode {
 // `degrees` off on average.
 struct AimErrorNode : public behavior::BehaviorNode {
   AimErrorNode(const char* position_key, float degrees)
-      : position_key(position_key), sd(Radians(degrees)), random(std::random_device{}()) {}
+      : position_key(position_key), sd(Radians(degrees)), random(ChaosSeed()) {}
 
   behavior::ExecuteResult Execute(behavior::ExecuteContext& ctx) override {
     Player* self = ctx.bot->game->player_manager.GetSelf();
@@ -1380,7 +1381,7 @@ struct ShotValueNode : public behavior::BehaviorNode {
 // counted from the bot's own fire events. Always succeeds.
 struct FlightPhaseNode : public behavior::BehaviorNode, EventHandler<WeaponFireEvent> {
   FlightPhaseNode(float piloting, float bomb_min_range, WeaponNotice* notice)
-      : piloting(piloting), bomb_min_range(bomb_min_range), notice(notice), random(std::random_device{}()) {}
+      : piloting(piloting), bomb_min_range(bomb_min_range), notice(notice), random(ChaosSeed()) {}
 
   static constexpr float kShotRange = 40.0f;        // bullets are worth aiming for within this (tiles)
   static constexpr u32 kMaxAimTicks = 100;          // an aim phase lasts at most this long
@@ -1987,7 +1988,7 @@ struct PlaceRoamNode : public behavior::BehaviorNode {
   static constexpr float kMinPull = 0.05f;
 
   PlaceRoamNode(const std::vector<Place>* places, TagWeights weights, const DeathMemory* memory, float pull)
-      : places(places), weights(std::move(weights)), memory(memory), pull(pull), random(std::random_device{}()) {}
+      : places(places), weights(std::move(weights)), memory(memory), pull(pull), random(ChaosSeed()) {}
 
   behavior::ExecuteResult Execute(behavior::ExecuteContext& ctx) override {
     Player* self = ctx.bot->game->player_manager.GetSelf();

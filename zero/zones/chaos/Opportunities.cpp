@@ -1,4 +1,5 @@
 #include "Opportunities.h"
+#include "ChaosRandom.h"
 
 #include <math.h>
 
@@ -29,7 +30,7 @@ constexpr u32 kBattleTradeTicks = 200;
 constexpr u32 kBattleQuietTicks = 300;
 
 Opportunities::Opportunities(ZeroBot& bot, float spotting, float notice, Vector2f view_extent)
-    : bot(bot), spotting(spotting), notice(notice), view_extent(view_extent), random(std::random_device{}()) {}
+    : bot(bot), spotting(spotting), notice(notice), view_extent(view_extent), random(ChaosSeed()) {}
 
 bool Opportunities::OnScreen(const Player& player) const {
   Player* self = bot.game->player_manager.GetSelf();

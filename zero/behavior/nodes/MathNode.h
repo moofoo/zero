@@ -1,5 +1,7 @@
 #pragma once
 
+#include <zero/Seed.h>
+
 #include <zero/ZeroBot.h>
 #include <zero/behavior/BehaviorTree.h>
 #include <zero/game/Game.h>
@@ -197,8 +199,7 @@ struct RandomIntNode : public BehaviorNode {
       max = opt_max.value();
     }
 
-    std::random_device dev;
-    std::mt19937 rng(dev());
+    std::mt19937 rng(NewSeed());
     std::uniform_int_distribution<T> dist(min, max);
 
     T random_value = dist(rng);
@@ -243,8 +244,7 @@ struct RandomNode : public BehaviorNode {
       max = opt_max.value();
     }
 
-    std::random_device dev;
-    std::mt19937 rng(dev());
+    std::mt19937 rng(NewSeed());
     std::uniform_real_distribution<float> dist(min, max);
 
     float random_value = dist(rng);

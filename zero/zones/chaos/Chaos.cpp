@@ -8,7 +8,9 @@
 #include <zero/behavior/nodes/TimerNode.h>
 #include <zero/game/Logger.h>
 #include <zero/zones/ZoneController.h>
+#include <zero/zones/chaos/Chaos.h>
 #include <zero/zones/chaos/ChaosCombat.h>
+#include <zero/zones/chaos/ChaosRandom.h>
 #include <zero/zones/chaos/CommitDecision.h>
 #include <zero/zones/chaos/EnemySight.h>
 #include <zero/zones/chaos/Motives.h>
@@ -52,7 +54,7 @@ static Motive DrawMotive(std::string_view text) {
     start = end + 1;
   }
   if (total <= 0.0f) return Motive::Roam;
-  static std::mt19937 random(std::random_device{}());
+  std::mt19937 random(ChaosSeed());  // a fresh seed a pick, so bots sharing a process (the simulator) stay apart
   float pick = std::uniform_real_distribution<float>(0.0f, total)(random);
   for (auto& [motive, weight] : weights) {
     pick -= weight;
@@ -430,7 +432,13 @@ struct ChaosController : ZoneController {
   void CreateBehaviors(const char* arena_name) override;
 };
 
+// The controller for zero's own bot, one a process. The duel simulator (ZERO_SIM) makes one for each bot it runs
+// instead (CreateChaosController).
+#ifndef ZERO_SIM
 static ChaosController controller;
+#endif
+
+std::unique_ptr<ZoneController> CreateChaosController() { return std::make_unique<ChaosController>(); }
 
 void ChaosController::CreateBehaviors(const char* arena_name) {
   Log(LogLevel::Info, "Registering Chaos behaviors.");

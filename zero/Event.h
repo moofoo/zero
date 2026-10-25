@@ -8,6 +8,11 @@ namespace zero {
 template <typename T>
 struct EventTypeDispatcher;
 
+// Event scopes, for many games in one process (the duel simulator, bot-ai ticket 45): a handler belongs to the scope
+// current when it was made, and an event goes to the handlers of the current scope and to those of scope 0, which
+// hear every scope. A bot alone in its process never sets one, so everything is scope 0 as before.
+inline unsigned int g_EventScope = 0;
+
 struct Event {
   virtual ~Event() {}
 
@@ -23,9 +28,11 @@ struct Event {
 template <typename T>
 struct EventHandler {
  protected:
-  EventHandler() { EventTypeDispatcher<T>::Get().RegisterHandler(this); }
+  EventHandler() : event_scope(g_EventScope) { EventTypeDispatcher<T>::Get().RegisterHandler(this); }
 
  public:
+  unsigned int event_scope;
+
   virtual ~EventHandler() { EventTypeDispatcher<T>::Get().UnregisterHandler(this); }
 
   virtual void HandleEvent(const T& event) = 0;
@@ -46,8 +53,9 @@ struct EventTypeDispatcher {
   }
 
   void Dispatch(const T& event) {
+    unsigned int scope = g_EventScope;
     for (auto& handler : handlers) {
-      handler->HandleEvent(event);
+      if (handler->event_scope == 0 || handler->event_scope == scope) handler->HandleEvent(event);
     }
   }
 

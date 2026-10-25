@@ -1,4 +1,5 @@
 #include "EnergyEstimate.h"
+#include "ChaosRandom.h"
 
 #include <math.h>
 #include <zero/HeuristicEnergyTracker.h>
@@ -40,7 +41,7 @@ constexpr float kUnseenTicks = 500.0f;
 constexpr u32 kAdvanceInterval = 10;
 
 EnergyEstimate::EnergyEstimate(ZeroBot& bot, float attention, Vector2f view_extent)
-    : bot(bot), attention(attention), view_extent(view_extent), random(std::random_device{}()) {}
+    : bot(bot), attention(attention), view_extent(view_extent), random(ChaosSeed()) {}
 
 EnergyEstimate::Reading EnergyEstimate::Get(Player& player) {
   // Energy the server sent, as it would show it to a player, while it's fresh.

@@ -1,4 +1,5 @@
 #include "GreenSight.h"
+#include "ChaosRandom.h"
 
 #include <zero/CombatLogger.h>
 #include <zero/ZeroBot.h>
@@ -9,7 +10,7 @@ namespace zero {
 namespace chaos {
 
 GreenSight::GreenSight(ZeroBot& bot, float awareness, bool instant, Vector2f view_extent)
-    : bot(bot), awareness(awareness), instant(instant), view_extent(view_extent), random(std::random_device{}()) {}
+    : bot(bot), awareness(awareness), instant(instant), view_extent(view_extent), random(ChaosSeed()) {}
 
 void GreenSight::HandleEvent(const BotController::UpdateEvent& event) {
   u32 now = GetCurrentTick();

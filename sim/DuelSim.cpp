@@ -828,6 +828,11 @@ void ds_step(void* handle, unsigned int actions_a, unsigned int actions_b, int t
 
 void ds_seed(void* handle, unsigned int seed) { ((Env*)handle)->seed = seed; }
 
+// A side's ship upgrades, as zero's input log has them (InputLog.h: kShipFields u32s, energy to capability).
+void ds_ship_fields(void* handle, int side_index, unsigned int* out) {
+  ShipFields(((Env*)handle)->sides[side_index].game->ship_controller.ship, out);
+}
+
 int ds_fair_size() { return kFairSize; }
 
 // zero's own run of a policy file (zero/policy/DuelPolicy.h), for checking it against PyTorch: null if it won't load.

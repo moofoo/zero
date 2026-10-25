@@ -9,7 +9,9 @@ runs `frame_skip` ticks of 10 ms. An observation is a dict of the side's own shi
 sees it, and the nearest enemy weapons; ticket 42 decides what a policy may see of it (fair observations).
 
 The library is libduelsim.so (or duelsim.dll), built by zero's CMake target duelsim_lib. A new environment replays a
-captured login (sim/data/duel_a.cap, duel_b.cap: Chaos's duel profile, two Warbirds on freqs 0 and 1) and loads the
+captured login (sim/data/duelbox_a.cap, duelbox_b.cap: chaos-offline's duelbox profile, two Warbirds on freqs 0 and 1,
+each with a human duel's ship: full stats, 3 guns, 2 bombs, bouncing bullets, proximity, multifire, full shrapnel; the
+older duel_a.cap and duel_b.cap, from the duel profile, happened to give the same ship) and loads the
 map from map_dir/zones/Chaos/<map>.lvl.
 """
 import ctypes
@@ -57,6 +59,7 @@ class _Lib:
             lib.ds_solid.restype = ctypes.c_int
             lib.ds_solid.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_int]
             lib.ds_seed.argtypes = [ctypes.c_void_p, ctypes.c_uint]
+            lib.ds_ship_fields.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.POINTER(ctypes.c_uint)]
             lib.ds_fair_size.restype = ctypes.c_int
             lib.ds_fair_observe.restype = ctypes.c_int
             lib.ds_fair_observe.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.POINTER(ctypes.c_float)]
@@ -86,7 +89,7 @@ class DuelEnv:
         self.spawn_center, self.spawn_radius, self.spawn_gap = spawn_center, spawn_radius, spawn_gap
         self.random = random.Random(seed)
         map_dir = Path(map_dir or Path.home() / "newcode/chaos-offline/work/bots")
-        a, b = captures or (HERE / "data" / "duel_a.cap", HERE / "data" / "duel_b.cap")
+        a, b = captures or (HERE / "data" / "duelbox_a.cap", HERE / "data" / "duelbox_b.cap")
         here = os.getcwd()
         os.chdir(map_dir)  # the client loads zones/<server>/<map>.lvl from where it runs
         try:
@@ -153,6 +156,15 @@ class DuelEnv:
         if not self.lib.ds_fair_observe(self.handle, side, self._fair):
             return np.zeros(self.fair_size, dtype=np.float32)
         return np.ctypeslib.as_array(self._fair).copy()
+
+    SHIP_FIELDS = ("energy", "recharge", "rotation", "guns", "bombs", "thrust", "speed", "shrapnel", "repels", "bursts",
+                   "decoys", "thors", "bricks", "rockets", "portals", "multifire", "capability")
+
+    def ship_fields(self, side):
+        """A side's ship upgrades as a dict (zero's InputLog.h fields)."""
+        out = (ctypes.c_uint * len(self.SHIP_FIELDS))()
+        self.lib.ds_ship_fields(self.handle, side, out)
+        return dict(zip(self.SHIP_FIELDS, out))
 
     def solid(self, x, y):
         return bool(self.lib.ds_solid(self.handle, 0, int(x), int(y)))

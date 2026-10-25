@@ -7,6 +7,7 @@
 #include "GreenSight.h"
 #include "Opportunities.h"
 #include "PlayerHistory.h"
+#include "PolicyCombat.h"
 #include "TargetLock.h"
 #include "WeaponNotice.h"
 
@@ -2466,6 +2467,7 @@ std::unique_ptr<behavior::BehaviorNode> CreateCombatTree(const CombatSettings& s
                         .End()
                     .End()
                 .Selector()
+                    .Child<PolicyCombatNode>(settings.policy) // A learned policy flies while the target is on screen.
                     .Sequence() // A green on the way to a target still far off (ticket 32), dodging on the way.
                         .Child<TargetGreenWindowNode>()
                         .Child<GreenDetourNode>("nearest_target_position", "travel_position", &senses.greens,

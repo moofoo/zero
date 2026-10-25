@@ -13,6 +13,8 @@ struct Actuator {
               float thrust_threshold = 0.0f);
 
   bool enabled = true;
+  // Set by a node that pressed the keys itself this tick (the policy combat node): the next Update leaves them.
+  bool skip_once = false;
 };
 
 }  // namespace zero

@@ -18,6 +18,7 @@
 #include <zero/zones/chaos/PlayerHistory.h>
 #include <zero/zones/chaos/TargetLock.h>
 #include <zero/zones/chaos/WeaponNotice.h>
+#include <zero/policy/DuelPolicy.h>
 
 #include <algorithm>
 #include <memory>
@@ -230,6 +231,10 @@ struct ChaosBehavior : public behavior::Behavior {
     if (!skill.empty()) Log(LogLevel::Info, "Skill: %s", skill.c_str());
 
     settings = CombatSettings();
+    if (auto policy = lookup.Get("Policy")) {
+      settings.policy = LoadSharedPolicy(*policy);
+      Log(LogLevel::Info, "Policy: %s%s", *policy, settings.policy ? "" : " (not loaded; the tree fights)");
+    }
     settings.retreat_distance = lookup.GetFloat("RetreatDistance");
     settings.weak_enemy_energy = lookup.GetFloat("WeakEnemyEnergy");
     settings.bomb_min_range = lookup.GetFloat("BombMinRange");

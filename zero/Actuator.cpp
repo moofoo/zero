@@ -5,6 +5,10 @@ namespace zero {
 void Actuator::Update(Game& game, InputState& input, const Vector2f& force, float rotation, float rotation_threshold,
                       float thrust_threshold) {
   if (!enabled) return;
+  if (skip_once) {
+    skip_once = false;
+    return;
+  }
 
   float enter_delay = (game.connection.settings.EnterDelay / 100.0f);
   Player* self = game.player_manager.GetSelf();

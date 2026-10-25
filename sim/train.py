@@ -264,6 +264,9 @@ def main():
     p.add_argument("--drill-window", type=int, default=100)
     p.add_argument("--scripted-share", type=float, default=0.25, help="the share of episodes against the aimer")
     p.add_argument("--spawn-gap", type=float, nargs=2, default=(20.0, 40.0), help="tiles between the ships at spawn")
+    p.add_argument("--spawn-center", type=float, nargs=2, default=(512.0, 512.0),
+                   help="where the ships spawn around (tiles); the duel box: 186 144 with --spawn-radius 40")
+    p.add_argument("--spawn-radius", type=float, default=60.0)
     p.add_argument("--run", default="local")
     p.add_argument("--device", default="cpu")
     p.add_argument("--map-dir", default=None, help="the folder holding zones/Chaos/<map>.lvl")
@@ -278,7 +281,8 @@ def main():
     if device.type != "cpu":
         torch.set_default_device(device)  # every tensor below, and the networks, live on the device
     envs = VecEnv(args.envs, workers=args.workers, seed=args.seed * 1000, map_dir=args.map_dir,
-                  spawn_gap=tuple(args.spawn_gap), max_seconds=args.max_seconds)
+                  spawn_gap=tuple(args.spawn_gap), spawn_center=tuple(args.spawn_center),
+                  spawn_radius=args.spawn_radius, max_seconds=args.max_seconds)
     eval_envs = VecEnv(8, seed=args.seed * 1000 + 500, map_dir=args.map_dir, max_seconds=args.max_seconds)
     size = envs.fair_size
     policy = Policy(size).to(device)

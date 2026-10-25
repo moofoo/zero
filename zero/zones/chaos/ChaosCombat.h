@@ -8,6 +8,8 @@
 #include <vector>
 
 namespace zero {
+
+struct DuelPolicy;
 namespace chaos {
 
 struct CommitDecision;
@@ -28,6 +30,9 @@ struct WeaponNotice;
 struct CombatSettings {
   // Places on the map to roam between (ticket 09); without any, the bot patrols the Waypoints route.
   std::vector<Place> places;
+  // A learned duel policy (bot-ai ticket 42; the Policy key, a file from sim/export_policy.py): while the target is on
+  // screen it flies the ship (PolicyCombatNode). Null for the tree's own combat.
+  const DuelPolicy* policy = nullptr;
   // Greens on the way (ticket 32): the bot goes for a noticed green off its way by at most this much (tiles), when no
   // enemy or weapon makes it unsafe; 0 turns it off.
   float green_detour = 8.0f;

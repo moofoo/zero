@@ -15,6 +15,8 @@
 #include <zero/game/GameEvent.h>
 #include <zero/game/InputLog.h>
 #include <zero/game/ShipController.h>
+#include <zero/policy/DuelPolicy.h>
+#include <zero/policy/FairObservation.h>
 
 #include <algorithm>
 #include <cmath>
@@ -266,13 +268,6 @@ struct HitRecord {
 };
 
 // As the combat log names weapons: shrapnel is a bullet carrying its bomb's shrapnel count, a mine a bomb laid.
-int WeaponClass(const WeaponData& data) {
-  WeaponType type = data.type;
-  if (type == WeaponType::Bullet || type == WeaponType::BouncingBullet) return data.shrap > 0 ? 2 : 0;
-  if (type == WeaponType::Bomb || type == WeaponType::ProximityBomb) return data.alternate ? 2 : 1;
-  if (type == WeaponType::Thor) return 1;
-  return 2;
-}
 
 std::vector<HitRecord>* sim_hits = nullptr;
 Side* replay_sides = nullptr;
@@ -592,85 +587,6 @@ int Replay(char** argv) {
 
 namespace {
 
-// The fair observation (ticket 42): what a player in the seat could see, kFairSize floats, scaled to about -1..1.
-// Positions and velocities are in the ship's frame, as (ahead, right) of its heading, so "the enemy is to the right"
-// is one number. Own ship (8): velocity ahead, right (/20 tiles/s), heading x, y (on the map), energy share, ticks
-// until bullet (/100) and bomb (/150) are ready, alive. Opponent (8): on screen (the 1920x1080 screen: 60 x 33.75
-// tiles either side), only on radar, offset ahead, right (/60), and on screen only, relative velocity ahead, right
-// (/20) and its heading ahead, right. Enemy weapons on screen, the nearest kFairWeapons (8 each): offset ahead, right
-// (/60), relative velocity ahead, right (/40), bullet, bomb, other, present. Walls: kFairRays rays from the ship, the
-// first straight ahead and then clockwise, the distance to the first wall (/kRayLength), 1 for none.
-constexpr int kFairWeapons = 16;
-constexpr int kFairRays = 16;
-constexpr float kRayLength = 30.0f;
-constexpr int kFairSize = 8 + 8 + 8 * kFairWeapons + kFairRays;
-constexpr u32 kObsEvery = 5;
-constexpr u32 kObsDelayTicks = 15;
-constexpr float kScreenX = 60.0f, kScreenY = 33.75f;
-
-void FairObserve(Side& side, u16 other_pid, u32 tick, float* out) {
-  Game& g = *side.game;
-  Player* self = g.player_manager.GetSelf();
-  for (int k = 0; k < kFairSize; ++k) out[k] = 0.0f;
-  if (!self) return;
-  Ship& ship = g.ship_controller.ship;
-  int n = 0;
-  Vector2f heading = self->GetHeading();
-  Vector2f right(-heading.y, heading.x);  // y grows down the map, so this is clockwise of the heading
-  auto ahead_of = [&](Vector2f v) { return v.x * heading.x + v.y * heading.y; };
-  auto right_of = [&](Vector2f v) { return v.x * right.x + v.y * right.y; };
-  bool alive = self->ship < 8 && self->enter_delay <= 0.0f;
-  out[n++] = ahead_of(self->velocity) / 20.0f, out[n++] = right_of(self->velocity) / 20.0f;
-  out[n++] = heading.x, out[n++] = heading.y;
-  out[n++] = ship.energy > 0 ? self->energy / (float)ship.energy : 0.0f;
-  out[n++] = std::max<s32>(0, TICK_DIFF(ship.next_bullet_tick, tick)) / 100.0f;
-  out[n++] = std::max<s32>(0, TICK_DIFF(ship.next_bomb_tick, tick)) / 150.0f;
-  out[n++] = alive ? 1.0f : 0.0f;
-  Player* them = g.player_manager.GetPlayerById(other_pid);
-  if (them && them->ship < 8 && them->enter_delay <= 0.0f) {
-    Vector2f d = them->position - self->position;
-    bool on_screen = fabsf(d.x) <= kScreenX && fabsf(d.y) <= kScreenY;
-    bool on_radar = !on_screen && g.radar.InRadarView(them->position);
-    if (on_screen || on_radar) {
-      out[n] = on_screen ? 1.0f : 0.0f, out[n + 1] = on_radar ? 1.0f : 0.0f;
-      out[n + 2] = ahead_of(d) / 60.0f, out[n + 3] = right_of(d) / 60.0f;
-      if (on_screen) {
-        Vector2f dv = them->velocity - self->velocity;
-        Vector2f h = them->GetHeading();
-        out[n + 4] = ahead_of(dv) / 20.0f, out[n + 5] = right_of(dv) / 20.0f;
-        out[n + 6] = ahead_of(h), out[n + 7] = right_of(h);
-      }
-    }
-  }
-  n += 8;
-  std::vector<std::pair<float, const Weapon*>> near;
-  WeaponManager& wm = g.weapon_manager;
-  for (size_t k = 0; k < wm.weapon_count; ++k) {
-    const Weapon& w = wm.weapons[k];
-    if (w.frequency == self->frequency) continue;
-    Vector2f d = w.position - self->position;
-    if (fabsf(d.x) > kScreenX || fabsf(d.y) > kScreenY) continue;
-    near.push_back({d.LengthSq(), &w});
-  }
-  std::sort(near.begin(), near.end(), [](auto& x, auto& y) { return x.first < y.first; });
-  for (int k = 0; k < kFairWeapons; ++k, n += 8) {
-    if (k >= (int)near.size()) continue;
-    const Weapon& w = *near[k].second;
-    Vector2f d = w.position - self->position, dv = w.velocity - self->velocity;
-    int c = WeaponClass(w.data);
-    out[n] = ahead_of(d) / 60.0f, out[n + 1] = right_of(d) / 60.0f;
-    out[n + 2] = ahead_of(dv) / 40.0f, out[n + 3] = right_of(dv) / 40.0f;
-    out[n + 4] = c == 0, out[n + 5] = c == 1, out[n + 6] = c == 2, out[n + 7] = 1.0f;
-  }
-  auto& map = g.GetMap();
-  for (int r = 0; r < kFairRays; ++r) {
-    float angle = r * 2.0f * 3.14159265f / kFairRays;
-    Vector2f dir = heading * cosf(angle) + right * sinf(angle);
-    CastResult cast = map.Cast(self->position, dir, kRayLength, self->frequency);
-    out[n++] = cast.hit ? cast.distance / kRayLength : 1.0f;
-  }
-}
-
 struct Env {
   Relay relay;
   Side sides[2];
@@ -681,7 +597,7 @@ struct Env {
   // Fair observations kept every kObsEvery ticks, per side: (tick, observation), the latest last.
   std::deque<std::pair<u32, std::vector<float>>> fair[2];
   struct Happening {
-    int kind;  // 0 a hit taken, 1 a death
+    int kind;  // 0 a hit taken, 1 a death, 2 a hit taken from one's own weapon
     int side;  // the side hit, or that died
     float value;  // damage, or the killer's side
     int weapon;   // the weapon's class, for hits
@@ -697,7 +613,8 @@ struct EnvWatcher : EventHandler<WeaponSelfDamageEvent>, EventHandler<PlayerDeat
       for (int i = 0; i < 2; ++i) {
         PlayerManager& pm = env->sides[i].game->player_manager;
         if (&event.shooter >= pm.players && &event.shooter < pm.players + pm.player_count) {
-          env->happenings.push_back({0, i, (float)event.damage, WeaponClass(event.weapon.data)});
+          int kind = event.shooter.id == env->sides[i].pid ? 2 : 0;  // 2: its own weapon
+          env->happenings.push_back({kind, i, (float)event.damage, WeaponClass(event.weapon.data)});
           return;
         }
       }
@@ -794,7 +711,7 @@ void ds_step(void* handle, unsigned int actions_a, unsigned int actions_b, int t
     if (env.tick % kObsEvery == 0) {
       for (int i = 0; i < 2; ++i) {
         std::vector<float> o(kFairSize);
-        FairObserve(env.sides[i], env.sides[1 - i].pid, env.tick, o.data());
+        FairObserve(*env.sides[i].game, env.sides[1 - i].pid, env.tick, o.data());
         env.fair[i].push_back({env.tick, std::move(o)});
         while (env.fair[i].size() > 16) env.fair[i].pop_front();
       }
@@ -805,6 +722,14 @@ void ds_step(void* handle, unsigned int actions_a, unsigned int actions_b, int t
 void ds_seed(void* handle, unsigned int seed) { ((Env*)handle)->seed = seed; }
 
 int ds_fair_size() { return kFairSize; }
+
+// zero's own run of a policy file (zero/policy/DuelPolicy.h), for checking it against PyTorch: null if it won't load.
+const void* ds_policy_load(const char* path) { return LoadSharedPolicy(path); }
+
+// One step of a loaded policy: obs (its obs size), state (its hidden size, updated) and logits (DuelPolicy::kLogits).
+void ds_policy_step(const void* policy, const float* obs, float* state, float* logits) {
+  ((const DuelPolicy*)policy)->Step(obs, state, logits);
+}
 
 // A side's fair observation as it was kObsDelayTicks ago (the reaction delay): kFairSize floats (ds_fair_size).
 // Returns 0 until there's one that old.
@@ -861,8 +786,8 @@ int ds_observe(void* handle, int side_index, float* out, int max_weapons) {
   return written;
 }
 
-// What happened since the last call: up to `max` records of 4 floats (kind 0 hit / 1 death, side, damage or killer
-// side, weapon class). Returns how many.
+// What happened since the last call: up to `max` records of 4 floats (kind 0 hit / 1 death / 2 hit by one's own
+// weapon, side, damage or killer side, weapon class). Returns how many.
 int ds_happenings(void* handle, float* out, int max) {
   Env& env = *(Env*)handle;
   int n = 0;

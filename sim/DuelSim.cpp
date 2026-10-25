@@ -585,6 +585,188 @@ int Replay(char** argv) {
 }
 }  // namespace
 
+
+// --- A C API for training (ticket 41): environments of two clients each, stepped by callers -----------------------
+// Each environment keeps its own clock; the process-wide virtual clock is set to it before any of its work, so
+// environments in one process need not step together. Built as a shared library (DUELSIM_LIBRARY) for Python ctypes.
+
+namespace {
+
+struct Env {
+  Relay relay;
+  Side sides[2];
+  u32 tick = 0;
+  struct Happening {
+    int kind;  // 0 a hit taken, 1 a death
+    int side;  // the side hit, or that died
+    float value;  // damage, or the killer's side
+    int weapon;   // the weapon's class, for hits
+  };
+  std::vector<Happening> happenings;
+};
+
+std::vector<Env*> envs;
+
+struct EnvWatcher : EventHandler<WeaponSelfDamageEvent>, EventHandler<PlayerDeathEvent> {
+  void HandleEvent(const WeaponSelfDamageEvent& event) override {
+    for (Env* env : envs) {
+      for (int i = 0; i < 2; ++i) {
+        PlayerManager& pm = env->sides[i].game->player_manager;
+        if (&event.shooter >= pm.players && &event.shooter < pm.players + pm.player_count) {
+          env->happenings.push_back({0, i, (float)event.damage, WeaponClass(event.weapon.data)});
+          return;
+        }
+      }
+    }
+  }
+  void HandleEvent(const PlayerDeathEvent& event) override {
+    // Each client hears every kill; side 0's client reports them.
+    for (Env* env : envs) {
+      PlayerManager& pm = env->sides[0].game->player_manager;
+      if (&event.player < pm.players || &event.player >= pm.players + pm.player_count) continue;
+      int dead = event.player.id == env->sides[0].pid ? 0 : 1;
+      int killer = event.killer.id == env->sides[0].pid ? 0 : 1;
+      env->happenings.push_back({1, dead, (float)killer, 0});
+      return;
+    }
+  }
+};
+
+EnvWatcher* env_watcher = nullptr;
+
+void Deliver(Env& env) {
+  while (!env.relay.outbox.empty()) {
+    auto [to, pkt] = env.relay.outbox.front();
+    env.relay.outbox.pop_front();
+    env.sides[to].game->connection.ProcessPacket(pkt.data(), pkt.size());
+  }
+}
+
+}  // namespace
+
+extern "C" {
+
+// A new environment from two captured logins (one per side), run from a folder holding zones/<server>/<map>.lvl.
+// Null on failure.
+void* ds_create(const char* capture_a, const char* capture_b) {
+  auto a = ReadCapture(capture_a), b = ReadCapture(capture_b);
+  if (a.empty() || b.empty()) return nullptr;
+  if (!env_watcher) env_watcher = new EnvWatcher();
+  Env* env = new Env();
+  env->tick = 100000;
+  SetVirtualTick(env->tick);
+  for (int i = 0; i < 2; ++i) {
+    env->sides[i].index = i;
+    env->sides[i].relay = &env->relay;
+    env->relay.sides[i] = &env->sides[i];
+  }
+  if (!SetupSide(env->sides[0], a, env->tick) || !SetupSide(env->sides[1], b, env->tick)) return nullptr;
+  env->relay.outbox.clear();
+  envs.push_back(env);
+  return env;
+}
+
+// Puts both ships at the given positions (tiles), still, at full energy, facing `orientation` (0-1).
+void ds_reset(void* handle, float ax, float ay, float a_orientation, float bx, float by, float b_orientation) {
+  Env& env = *(Env*)handle;
+  SetVirtualTick(env.tick);
+  const float pos[2][3] = {{ax, ay, a_orientation}, {bx, by, b_orientation}};
+  for (int i = 0; i < 2; ++i) {
+    Game& g = *env.sides[i].game;
+    Player* self = g.player_manager.GetSelf();
+    if (!self) continue;
+    self->position = Vector2f(pos[i][0], pos[i][1]);
+    self->velocity = Vector2f(0, 0);
+    self->orientation = pos[i][2];
+    self->enter_delay = 0.0f;
+    self->energy = (float)g.ship_controller.ship.energy;
+  }
+  env.happenings.clear();
+}
+
+// Steps `ticks` ticks (10 ms each) with each side's held actions (InputAction bits).
+void ds_step(void* handle, unsigned int actions_a, unsigned int actions_b, int ticks) {
+  Env& env = *(Env*)handle;
+  for (int t = 0; t < ticks; ++t) {
+    SetVirtualTick(++env.tick);
+    const u32 actions[2] = {actions_a, actions_b};
+    for (int i = 0; i < 2; ++i) {
+      Side& side = env.sides[i];
+      side.input.actions = actions[i];
+      side.game->Update(side.input, 0.01f);
+      side.game->player_manager.kdtree = nullptr;
+      side.trans.Revert(side.scratch);
+    }
+    Deliver(env);
+  }
+}
+
+// One side's view, as 18 + 5 x max_weapons floats: own x, y, vx, vy, orientation, energy, max energy, enter delay
+// (s), ticks until its bullet and bomb are ready; the opponent as this client sees it: x, y, vx, vy, orientation,
+// enter delay, energy as last reported, and 1 if it's in the game; then up to max_weapons enemy weapons nearest the
+// ship: x, y, vx, vy, class (0 bullet, 1 bomb, 2 other), unused slots -1. Returns how many weapons were written.
+int ds_observe(void* handle, int side_index, float* out, int max_weapons) {
+  Env& env = *(Env*)handle;
+  Side& side = env.sides[side_index];
+  Game& g = *side.game;
+  Player* self = g.player_manager.GetSelf();
+  Player* them = g.player_manager.GetPlayerById(env.sides[1 - side_index].pid);
+  int n = 0;
+  auto put = [&](float v) { out[n++] = v; };
+  Ship& ship = g.ship_controller.ship;
+  put(self ? self->position.x : 0), put(self ? self->position.y : 0), put(self ? self->velocity.x : 0);
+  put(self ? self->velocity.y : 0), put(self ? self->orientation : 0), put(self ? self->energy : 0);
+  put((float)ship.energy), put(self ? self->enter_delay : 0);
+  put((float)std::max<s32>(0, TICK_DIFF(ship.next_bullet_tick, env.tick)));
+  put((float)std::max<s32>(0, TICK_DIFF(ship.next_bomb_tick, env.tick)));
+  put(them ? them->position.x : 0), put(them ? them->position.y : 0), put(them ? them->velocity.x : 0);
+  put(them ? them->velocity.y : 0), put(them ? them->orientation : 0), put(them ? them->enter_delay : 0);
+  put(them ? them->energy : 0), put(them && them->ship < 8 ? 1.0f : 0.0f);
+  std::vector<std::pair<float, const Weapon*>> near;
+  WeaponManager& wm = g.weapon_manager;
+  for (size_t k = 0; k < wm.weapon_count; ++k) {
+    const Weapon& w = wm.weapons[k];
+    if (self && w.frequency != self->frequency) near.push_back({w.position.DistanceSq(self->position), &w});
+  }
+  std::sort(near.begin(), near.end(), [](auto& x, auto& y) { return x.first < y.first; });
+  int written = 0;
+  for (int k = 0; k < max_weapons; ++k) {
+    if (k < (int)near.size()) {
+      const Weapon& w = *near[k].second;
+      put(w.position.x), put(w.position.y), put(w.velocity.x), put(w.velocity.y), put((float)WeaponClass(w.data));
+      ++written;
+    } else {
+      for (int j = 0; j < 5; ++j) put(-1.0f);
+    }
+  }
+  return written;
+}
+
+// What happened since the last call: up to `max` records of 4 floats (kind 0 hit / 1 death, side, damage or killer
+// side, weapon class). Returns how many.
+int ds_happenings(void* handle, float* out, int max) {
+  Env& env = *(Env*)handle;
+  int n = 0;
+  for (auto& h : env.happenings) {
+    if (n >= max) break;
+    out[n * 4] = (float)h.kind, out[n * 4 + 1] = (float)h.side, out[n * 4 + 2] = h.value, out[n * 4 + 3] = (float)h.weapon;
+    ++n;
+  }
+  env.happenings.clear();
+  return n;
+}
+
+// Whether a tile is a wall for a side's ship (doors as they are now).
+int ds_solid(void* handle, int side_index, int x, int y) {
+  Env& env = *(Env*)handle;
+  Game& g = *env.sides[side_index].game;
+  Player* self = g.player_manager.GetSelf();
+  return g.GetMap().IsSolid((u16)x, (u16)y, self ? self->frequency : 0) ? 1 : 0;
+}
+
+}  // extern "C"
+
+#ifndef DUELSIM_LIBRARY
 int main(int argc, char** argv) {
   if (argc >= 8 && strcmp(argv[1], "replay") == 0) return Replay(argv);
   if (argc < 4) {
@@ -652,3 +834,4 @@ int main(int argc, char** argv) {
   printf("simulated %.0f s in %.3f s wall: %.0f times real time\n", seconds, elapsed, seconds / elapsed);
   return 0;
 }
+#endif  // DUELSIM_LIBRARY

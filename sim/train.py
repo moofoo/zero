@@ -319,6 +319,8 @@ def main():
                    "enemy within 60 degrees ahead")
     p.add_argument("--bullet-bonus", type=float, default=0.5, help="with --dial: bullet damage dealt is worth this much "
                    "more")
+    p.add_argument("--dial-ends", type=float, default=0.0, help="with --dial: the share of episodes whose dials are 0 "
+                   "or 1 (either, evenly) rather than anywhere between, for a clearer contrast")
     p.add_argument("--eval-dials", default="0,1", help="with --dial: the dials the bot evaluations play at")
     p.add_argument("--no-drills", action="store_true", help="start in the league, without the aiming drills")
     p.add_argument("--drill-pass", type=float, default=0.8)
@@ -381,8 +383,11 @@ def main():
     rows = fair_a  # the learner's observations as arrays, for the dial's costs
     opp_rows = fair_b  # the opponents' observations as arrays, for the scripted aimer
     # Each episode's dials (ticket 50), the learner's and its policy opponent's; None without --dial.
-    dial = torch.tensor([rng.random() for _ in range(n)], dtype=torch.float32) if args.dial else None
-    opp_dial = torch.tensor([rng.random() for _ in range(n)], dtype=torch.float32) if args.dial else None
+    def draw_dial():
+        return float(rng.random() < 0.5) if rng.random() < args.dial_ends else rng.random()
+
+    dial = torch.tensor([draw_dial() for _ in range(n)], dtype=torch.float32) if args.dial else None
+    opp_dial = torch.tensor([draw_dial() for _ in range(n)], dtype=torch.float32) if args.dial else None
     eval_dials = [float(x) for x in args.eval_dials.split(",")] if args.dial else [0.0]
     style = collections.Counter()  # the dial's effect, for the log: steps beyond range and reversing, by dial
     h = policy.initial(n)
@@ -486,7 +491,7 @@ def main():
                     starts[i] = 1.0
                     kinds[i] = pick_opponent(i)
                     if args.dial:
-                        dial[i], opp_dial[i] = rng.random(), rng.random()
+                        dial[i], opp_dial[i] = draw_dial(), draw_dial()
                     opp_h[:, i] = 0.0
                     for k in SCRIPTED:
                         scripted[k][i].reset()

@@ -104,7 +104,9 @@ static void OnFlagDropPkt(void* user, u8* pkt, size_t size) {
 }
 
 static void OnArenaListPkt(void* user, u8* pkt, size_t size) {
-  NetworkBuffer buffer(pkt, kMaxPacketSize);
+  // Parse only the packet's own bytes: past them lies whatever the buffer held before, and a name read from there
+  // could overflow arena_name.
+  NetworkBuffer buffer(pkt, size, size);
   Game* game = (Game*)user;
 
   buffer.ReadU8();  // Skip type byte
@@ -120,11 +122,13 @@ static void OnArenaListPkt(void* user, u8* pkt, size_t size) {
 
       buffer.ReadU8();
     } else {
+      if (buffer.read + 2 > buffer.data + buffer.size) break;
       s16 count = buffer.ReadU16();
 
       // The current directory is marked with negative count
       if (count < 0) {
-        strcpy(game->arena_name, current_name);
+        strncpy(game->arena_name, current_name, sizeof(game->arena_name) - 1);
+        game->arena_name[sizeof(game->arena_name) - 1] = 0;
         break;
       }
 

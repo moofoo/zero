@@ -4,6 +4,7 @@
 // Each client's arena setup is replayed from packets captured from a real game (zero's ZERO_CAPTURE).
 //
 // duelsim <capture A> <capture B> <seconds>   (run from a bots folder holding zones/Chaos/<map>.lvl)
+// duelsim player <capture> <input log> <out> [combat log]   (a player's recording as fair observations; ticket 46)
 #include <zero/game/Clock.h>
 #include <zero/game/Settings.h>
 #include <zero/game/Game.h>
@@ -243,7 +244,10 @@ void Relay::FromClient(int from, u8* data, size_t size) {
   }
 }
 
-bool SetupSide(Side& side, const std::vector<Packet>& capture, Tick start, s32 offset = 0, bool defer = false) {
+// With `until`, only packets captured up to that server tick are replayed (a player's recording: the rest come in
+// their own time); `*replayed` is then how many of the capture's packets that was.
+bool SetupSide(Side& side, const std::vector<Packet>& capture, Tick start, s32 offset = 0, bool defer = false,
+               u32 until = 0, size_t* replayed = nullptr) {
   constexpr size_t kPermanentSize = Megabytes(64), kTransientSize = Megabytes(32), kWorkSize = Megabytes(4);
   side.perm = MemoryArena((u8*)malloc(kPermanentSize), kPermanentSize);
   side.trans = MemoryArena((u8*)malloc(kTransientSize), kTransientSize);
@@ -262,7 +266,10 @@ bool SetupSide(Side& side, const std::vector<Packet>& capture, Tick start, s32 o
   if (!side.bot_config.empty() && !MakeBot(side)) return false;
   // Replay the arena setup: every server packet but positions, kills, chat and keep-alives.
   bool seen_security = false;
+  size_t count = 0;
   for (const Packet& p : capture) {
+    if (until && TICK_GT((u32)((s32)p.tick + offset) & 0x7fffffff, until)) break;
+    ++count;
     if (p.direction != 0 || p.data.empty()) continue;
     u8 type = p.data[0];
     if (type == 0x00 || type == 0x05 || type == 0x28 || type == 0x06 || type == 0x07 || type == 0x27) continue;
@@ -277,6 +284,7 @@ bool SetupSide(Side& side, const std::vector<Packet>& capture, Tick start, s32 o
     std::vector<u8> copy = p.data;
     c.ProcessPacket(copy.data(), copy.size());
   }
+  if (replayed) *replayed = count;
   c.time_diff = 0;
   side.scratch = side.trans.GetSnapshot();
   if (side.bot) side.bot_seed = *g_Seed;
@@ -295,6 +303,7 @@ struct LoggedUpdate {
   float x, y, vx, vy, orientation, energy, enter_delay;
   u8 ship;
   u32 fields[kShipFields];  // the ship's upgrades (InputLog.h)
+  float dt = 0.01f;  // the update's time: a tick in zero's logs, a frame's in nullspace's (record 3)
 };
 
 std::vector<LoggedUpdate> ReadInputLog(const char* path, s32 offset) {
@@ -310,12 +319,13 @@ std::vector<LoggedUpdate> ReadInputLog(const char* path, s32 offset) {
       u8 action;
       if (fread(&action, 1, 1, f) != 1) break;
       pending.push_back(action);
-    } else if (type == 1) {
+    } else if (type == 1 || type == 3) {  // 3: nullspace's frame update, with its dt after
       LoggedUpdate u;
       float v[6];
       if (fread(&u.actions, 4, 1, f) != 1 || fread(v, 4, 6, f) != 6 || fread(&u.ship, 1, 1, f) != 1 ||
           fread(&u.enter_delay, 4, 1, f) != 1 || fread(u.fields, 4, kShipFields, f) != (size_t)kShipFields)
         break;
+      if (type == 3 && fread(&u.dt, 4, 1, f) != 1) break;
       u.tick = (u32)((s32)tick + offset) & 0x7fffffff;
       u.x = v[0], u.y = v[1], u.vx = v[2], u.vy = v[3], u.orientation = v[4], u.energy = v[5];
       u.one_shots.swap(pending);
@@ -661,6 +671,184 @@ int Replay(char** argv) {
          matched, real.empty() ? 0.0 : 100.0 * matched / real.size(), hits.empty() ? 0.0 : 100.0 * matched / hits.size());
   return 0;
 }
+
+// --- A player's recording (bot-ai ticket 46): fair observations of what the player saw -----------------------------
+// One client is fed the player's recorded packets at their own times (nullspace's NULLSPACE_CAPTURE), with its ship
+// put where the player's was every tick (NULLSPACE_INPUTLOG): the player's own movement isn't simulated, so nullspace
+// updating once a frame doesn't matter. The opponent and its weapons come from the server's packets, as they reached
+// the player. Its fair observation is written every kObsEvery ticks, for pairing with the player's inputs.
+
+struct SelfHitWatcher : EventHandler<WeaponSelfDamageEvent> {
+  Game* game = nullptr;
+  std::vector<HitRecord> hits, own;  // hits taken from others, and from the player's own weapons
+  void HandleEvent(const WeaponSelfDamageEvent& event) override {
+    if (!game) return;
+    Player* self = game->player_manager.GetSelf();
+    (self && &event.shooter == self ? own : hits).push_back({GetCurrentTick(), 0, WeaponClass(event.weapon.data)});
+  }
+};
+
+// A player's real hits taken, from their combat log ("hit" events, in server ticks): from others, and their own.
+void ReadPlayerHits(const char* path, const char* self_name, std::vector<HitRecord>& hits, std::vector<HitRecord>& own) {
+  FILE* f = fopen(path, "r");
+  if (!f) return;
+  char line[4096], shooter[64];
+  snprintf(shooter, sizeof(shooter), "\"shooter\":\"%s\"", self_name);
+  while (fgets(line, sizeof(line), f)) {
+    if (!strstr(line, "\"e\":\"hit\"")) continue;
+    const char* t = strstr(line, "\"tick\":");
+    const char* w = strstr(line, "\"weapon\":\"");
+    if (!t || !w) continue;
+    w += 10;
+    int weapon = strncmp(w, "bullet", 6) == 0 || strncmp(w, "bounce", 6) == 0 ? 0
+                 : strncmp(w, "bomb", 4) == 0 || strncmp(w, "prox", 4) == 0 || strncmp(w, "thor", 4) == 0 ? 1
+                                                                                               : 2;
+    (strstr(line, shooter) ? own : hits).push_back({(u32)strtoul(t + 7, nullptr, 10), 0, weapon});
+  }
+  fclose(f);
+}
+
+// Real hits matched to simulated ones: same weapon class, within 20 ticks.
+int MatchHits(const std::vector<HitRecord>& real, const std::vector<HitRecord>& sim) {
+  std::vector<bool> used(sim.size(), false);
+  int matched = 0;
+  for (const HitRecord& r : real) {
+    for (size_t k = 0; k < sim.size(); ++k) {
+      if (used[k] || sim[k].weapon != r.weapon || std::abs((s32)(sim[k].tick - r.tick)) > 20) continue;
+      used[k] = true;
+      ++matched;
+      break;
+    }
+  }
+  return matched;
+}
+
+// The enemy the observation is of: the first other player in a ship on another team.
+u16 Opponent(Game& g) {
+  Player* self = g.player_manager.GetSelf();
+  if (!self) return 0xFFFF;
+  for (size_t k = 0; k < g.player_manager.player_count; ++k) {
+    Player& p = g.player_manager.players[k];
+    if (&p != self && p.ship < 8 && p.frequency != self->frequency) return p.id;
+  }
+  return 0xFFFF;
+}
+
+// The player's ship as logged.
+void PutShip(Player& self, const LoggedUpdate& u) {
+  self.position = Vector2f(u.x, u.y);
+  self.velocity = Vector2f(u.vx, u.vy);
+  self.orientation = u.orientation;
+  self.energy = u.energy;
+  self.enter_delay = u.ship < 8 ? u.enter_delay : self.enter_delay;
+}
+
+int PlayerReplay(int argc, char** argv) {
+  // player <capture> <input log> <out> [combat log]
+  std::vector<Packet> capture = ReadCapture(argv[2]);
+  s32 offset = ServerOffset(capture);
+  std::vector<LoggedUpdate> log = ReadInputLog(argv[3], offset);
+  if (capture.empty() || log.empty()) {
+    fprintf(stderr, "can't read the recording\n");
+    return 1;
+  }
+  size_t first = 0;
+  while (first < log.size() && log[first].ship >= 8) ++first;
+  if (first == log.size()) {
+    fprintf(stderr, "the player never entered a ship\n");
+    return 1;
+  }
+  kPlayerName = "sim";
+  u32 start = log[first].tick, end = log.back().tick;
+  SetVirtualTick(start);
+  Relay relay;  // the client's own packets go nowhere
+  static Side side;
+  side.relay = &relay;
+  relay.sides[0] = relay.sides[1] = &side;
+  size_t next_packet = 0;
+  if (!SetupSide(side, capture, start, offset, true, start, &next_packet)) {
+    fprintf(stderr, "setup failed\n");
+    return 1;
+  }
+  relay.outbox.clear();
+  Game& g = *side.game;
+  SelfHitWatcher watcher;
+  watcher.game = &g;
+
+  FILE* out = fopen(argv[4], "wb");
+  if (!out) {
+    fprintf(stderr, "can't write %s\n", argv[4]);
+    return 1;
+  }
+  // The file: "ZRO1", the observation size u32, the server-time offset s32, then each observation as its local tick
+  // (the recording's clock, as the input log's) u32 and its floats.
+  u32 size = kFairSize;
+  fwrite("ZRO1", 1, 4, out);
+  fwrite(&size, 4, 1, out);
+  fwrite(&offset, 4, 1, out);
+  std::vector<float> obs(kFairSize);
+  size_t next = first, delivered = 0, written = 0, on_screen = 0, on_radar = 0, alive = 0;
+  const LoggedUpdate* now = &log[first];
+  for (u32 t = start; TICK_GTE(end, t); ++t) {
+    SetVirtualTick(t);
+    while (side.next_deferred < side.deferred.size() && TICK_GTE(t, side.deferred[side.next_deferred].first)) {
+      auto& pkt = side.deferred[side.next_deferred++].second;
+      g.connection.ProcessPacket(pkt.data(), pkt.size());
+    }
+    // The server's packets due by now. Core packets (reliable, clusters) are skipped: their contents were captured
+    // on their own as the client unwrapped them.
+    while (next_packet < capture.size()) {
+      const Packet& p = capture[next_packet];
+      if (TICK_GT((u32)((s32)p.tick + offset) & 0x7fffffff, t)) break;
+      ++next_packet;
+      if (p.direction != 0 || p.data.empty() || p.data[0] == 0x00) continue;
+      std::vector<u8> copy = p.data;
+      g.connection.ProcessPacket(copy.data(), copy.size());
+      ++delivered;
+    }
+    while (next < log.size() && TICK_GTE(t, log[next].tick)) now = &log[next++];
+    Player* self = g.player_manager.GetSelf();
+    if (!self) continue;
+    if (now->ship < 8) {
+      u32 fields[kShipFields];
+      ShipFields(g.ship_controller.ship, fields);
+      if (memcmp(fields, now->fields, sizeof(fields)) != 0) SetShipFields(g.ship_controller.ship, now->fields);
+    }
+    PutShip(*self, *now);
+    side.input.actions = now->actions;
+    g.Update(side.input, 0.01f);
+    g.player_manager.kdtree = nullptr;
+    side.trans.Revert(side.scratch);
+    relay.outbox.clear();
+    PutShip(*self, *now);
+    if (t % kObsEvery == 0) {
+      FairObserve(g, Opponent(g), t, obs.data());
+      u32 local = (u32)((s32)t - offset) & 0x7fffffff;
+      fwrite(&local, 4, 1, out);
+      fwrite(obs.data(), 4, kFairSize, out);
+      ++written;
+      alive += obs[7] > 0.5f;
+      on_screen += obs[8] > 0.5f;
+      on_radar += obs[9] > 0.5f;
+    }
+  }
+  fclose(out);
+  printf("replayed %.1f min: %zu packets delivered, %zu observations written (alive %.0f%%, the opponent on screen "
+         "%.0f%%, on radar only %.0f%%)\n", TICK_DIFF(end, start) / 6000.0f, delivered, written,
+         100.0f * alive / std::max<size_t>(written, 1), 100.0f * on_screen / std::max<size_t>(written, 1),
+         100.0f * on_radar / std::max<size_t>(written, 1));
+  if (argc > 5) {
+    // A check that the opponent's weapons arrived as the player saw them: the hits the client took against the real
+    // ones from the player's combat log.
+    std::vector<HitRecord> real, real_own;
+    Player* self = g.player_manager.GetSelf();
+    ReadPlayerHits(argv[5], self ? self->name : "", real, real_own);
+    printf("  hits taken from the opponent: real %zu, replayed %zu, matched %d; from own weapons: real %zu, replayed %zu "
+           "(own weapons are the player's, fired in the replay from their keys)\n",
+           real.size(), watcher.hits.size(), MatchHits(real, watcher.hits), real_own.size(), watcher.own.size());
+  }
+  return 0;
+}
 }  // namespace
 
 
@@ -931,6 +1119,7 @@ int ds_solid(void* handle, int side_index, int x, int y) {
 #ifndef DUELSIM_LIBRARY
 int main(int argc, char** argv) {
   if (argc >= 8 && strcmp(argv[1], "replay") == 0) return Replay(argv);
+  if (argc >= 5 && strcmp(argv[1], "player") == 0) return PlayerReplay(argc, argv);
   if (argc < 4) {
     fprintf(stderr, "usage: duelsim <capture A> <capture B> <seconds>\n");
     return 1;

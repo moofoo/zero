@@ -75,7 +75,7 @@ def examples(ticks, obs, inp):
     frames = [(u["tick"], u["actions"], u["dt"] if u["dt"] is not None else 0.01) for u in updates]
     alive = {u["tick"] for u in updates if u["ship"] < 8 and u["enter_delay"] <= 0}
     first, last = updates[0]["tick"], updates[-1]["tick"]
-    xs, ys, errors = [], [], []
+    xs, ys, ts, errors = [], [], [], []
     k = 0
     # Frames by tick, for the windows.
     by_tick = {}
@@ -102,26 +102,30 @@ def examples(ticks, obs, inp):
         fire = 2 if held_ticks(window, start, BOMB) > 0 else 1 if held_ticks(window, start, BULLET) > 0 else 0
         xs.append(obs[k])
         ys.append((turn, thrust, fire))
-    return np.array(xs, dtype=np.float32), np.array(ys, dtype=np.int64), np.array(errors)
+        ts.append(start)
+    return (np.array(xs, dtype=np.float32), np.array(ys, dtype=np.int64), np.array(ts, dtype=np.int64),
+            np.array(errors))
 
 
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("recordings", nargs="+")
-    p.add_argument("--out", default=None, help="an .npz of obs (n, fair size) and choices (n, 3: turn, thrust, fire)")
+    p.add_argument("--out", default=None, help="an .npz of obs (n, fair size), choices (n, 3: turn, thrust, fire), "
+                   "ticks (each decision's, on its recording's clock), session (its recording's index) and names")
     p.add_argument("--map-dir", default=str(Path.home() / "newcode/chaos-offline/work/bots"))
     p.add_argument("--simulator", default=str(HERE.parent / "build" / "duelsim"))
     args = p.parse_args()
-    all_x, all_y, all_e = [], [], []
+    all_x, all_y, all_t, all_s, all_e = [], [], [], [], []
     for r in args.recordings:
         base = Path(r)
         base = base.with_suffix("") if base.suffix in (".cap", ".inp", ".obs") else base
         print(base.name)
         ticks, obs, inp = replay(base, args.map_dir, args.simulator)
-        x, y, e = examples(ticks, obs, inp)
+        x, y, t, e = examples(ticks, obs, inp)
         seen = (x[:, 8] > 0.5).mean() if len(x) else 0.0
         print(f"  {len(x)} decisions ({len(x) / 600:.1f} min alive), the opponent on screen in {seen:.0%}")
-        all_x.append(x), all_y.append(y), all_e.append(e)
+        all_x.append(x), all_y.append(y), all_t.append(t), all_e.append(e)
+        all_s.append(np.full(len(x), len(all_s), dtype=np.int64))
     x, y, e = np.concatenate(all_x), np.concatenate(all_y), np.concatenate(all_e)
     names = (("left", "tap left", "none", "tap right", "right"), ("forward", "none", "reverse"),
              ("none", "bullet", "bomb"))
@@ -132,7 +136,9 @@ def main():
     print(f"turn rounding: mean {e.mean():.2f} ticks a decision off the keys (while turning {turning.mean():.2f}); "
           f"within a tick {np.mean(e <= 1.0):.0%}")
     if args.out:
-        np.savez_compressed(args.out, obs=x, choices=y)
+        np.savez_compressed(args.out, obs=x, choices=y, ticks=np.concatenate(all_t), session=np.concatenate(all_s),
+                            names=np.array([Path(r).with_suffix("").name if Path(r).suffix in (".cap", ".inp", ".obs")
+                                            else Path(r).name for r in args.recordings]))
         print(f"wrote {len(x)} examples to {args.out}")
 
 

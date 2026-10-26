@@ -265,6 +265,10 @@ def main():
     p.add_argument("--bot-share", type=float, default=0.0, help="the share of environments whose opponent is a zero bot "
                    "(ticket 45), always; the rest play the league")
     p.add_argument("--bot-skill", default="veteran", help="the zero bots' skill level (bots/chaos.cfg)")
+    p.add_argument("--bot-specs", default="", help="several bot opponents instead, as skill:aggression pairs spread "
+                   "over the bot environments in turn, each also evaluated: veteran:standard,elite:aggressive")
+    p.add_argument("--lr-final", type=float, default=None, help="the learning rate falls in a straight line to this "
+                   "by the last step (none: it stays --lr)")
     p.add_argument("--scripted-share", type=float, default=0.25, help="the share of episodes against the aimer")
     p.add_argument("--spawn-gap", type=float, nargs=2, default=(20.0, 40.0), help="tiles between the ships at spawn")
     p.add_argument("--spawn-center", type=float, nargs=2, default=(512.0, 512.0),
@@ -284,15 +288,18 @@ def main():
     if device.type != "cpu":
         torch.set_default_device(device)  # every tensor below, and the networks, live on the device
     bot_count = int(round(args.bot_share * args.envs))
-    bot_spec = {"skill": args.bot_skill}
+    pairs = [x.split(":") for x in args.bot_specs.split(",") if x] or [[args.bot_skill, "standard"]]
+    bot_specs = [{"skill": p[0], "aggression": p[1] if len(p) > 1 else "standard"} for p in pairs]
+    bot_names = [f"{b['skill']}-{b['aggression']}" if len(bot_specs) > 1 else b["skill"] for b in bot_specs]
     envs = VecEnv(args.envs, workers=args.workers, seed=args.seed * 1000, map_dir=args.map_dir, bots=bot_count,
-                  bot=bot_spec,
+                  bot=bot_specs,
                   spawn_gap=tuple(args.spawn_gap), spawn_center=tuple(args.spawn_center),
                   spawn_radius=args.spawn_radius, max_seconds=args.max_seconds)
     eval_envs = VecEnv(8, seed=args.seed * 1000 + 500, map_dir=args.map_dir, max_seconds=args.max_seconds)
-    eval_bot_envs = VecEnv(4, seed=args.seed * 1000 + 700, map_dir=args.map_dir, max_seconds=args.max_seconds,
-                           spawn_gap=tuple(args.spawn_gap), spawn_center=tuple(args.spawn_center),
-                           spawn_radius=args.spawn_radius, bots=4, bot=bot_spec) if bot_count else None
+    eval_bot_envs = [VecEnv(4, seed=args.seed * 1000 + 700 + 10 * k, map_dir=args.map_dir, max_seconds=args.max_seconds,
+                            spawn_gap=tuple(args.spawn_gap), spawn_center=tuple(args.spawn_center),
+                            spawn_radius=args.spawn_radius, bots=4, bot=spec)
+                     for k, spec in enumerate(bot_specs)] if bot_count else []
     size = envs.fair_size
     policy = Policy(size).to(device)
     if args.init:
@@ -319,7 +326,7 @@ def main():
 
     def pick_opponent(i):
         if i < bot_count:
-            return args.bot_skill  # a bot environment: its zero bot, always
+            return bot_names[i % len(bot_names)]  # a bot environment: its zero bot, always
         if stage < len(DRILLS):
             return DRILLS[stage]
         r = rng.random()
@@ -348,6 +355,9 @@ def main():
     started = time.time()
     while total < args.steps:
         iteration += 1
+        if args.lr_final is not None:
+            for group in optimizer.param_groups:
+                group["lr"] = args.lr + (args.lr_final - args.lr) * min(total / args.steps, 1.0)
         buf_obs, buf_act, buf_logp, buf_val, buf_rew, buf_done, buf_start = [], [], [], [], [], [], []
         h0 = h.clone()
         for t in range(args.rollout):
@@ -358,7 +368,7 @@ def main():
             for i, k in enumerate(kinds):
                 groups.setdefault(k, []).append(i)
             for k, idx in groups.items():
-                if k == "still" or (k == args.bot_skill and idx[0] < bot_count):  # a bot flies itself
+                if k == "still" or (k in bot_names and idx[0] < bot_count):  # a bot flies itself
                     for i in idx:
                         opp_choice[i] = (2, 1, 0)
                 elif k == "drift":
@@ -473,10 +483,10 @@ def main():
         record = {"iteration": iteration, "steps": total, "seconds": round(time.time() - started),
                   "episode_reward": round(sum(episode_rewards[-100:]) / max(len(episode_rewards[-100:]), 1), 3)}
         record["stage"] = DRILLS[stage] if stage < len(DRILLS) else "league"
-        bot_kinds = (args.bot_skill,) if bot_count else ()
+        bot_kinds = tuple(bot_names) if bot_count else ()
         for kind in ("still", "drift") + tuple(SCRIPTED) + bot_kinds + ("latest", "league"):
             rs = [r for r in results[-300:]
-                  if (r[0] == kind if kind != "league" else r[0] not in DRILLS + tuple(SCRIPTED) + ("latest", args.bot_skill))]
+                  if (r[0] == kind if kind != "league" else r[0] not in DRILLS + tuple(SCRIPTED) + ("latest",) + bot_kinds)]
             if rs:
                 record[f"vs_{kind}"] = {"episodes": len(rs), "won": round(sum(r[1] for r in rs) / len(rs), 2),
                                         "lost": round(sum(r[2] for r in rs) / len(rs), 2)}
@@ -484,9 +494,9 @@ def main():
             w, l, d = evaluate(policy, eval_envs, args.eval_episodes, rng)
             wd, ld, dd = evaluate(policy, eval_envs, args.eval_episodes, rng, dodge=True)
             record["eval_vs_dodger"] = {"won": wd, "lost": ld, "draw": dd}
-            if eval_bot_envs:
-                wb, lb, db = evaluate(policy, eval_bot_envs, args.eval_episodes, rng)
-                record[f"eval_vs_{args.bot_skill}"] = {"won": wb, "lost": lb, "draw": db}
+            for name, bot_envs in zip(bot_names, eval_bot_envs):
+                wb, lb, db = evaluate(policy, bot_envs, args.eval_episodes, rng)
+                record[f"eval_vs_{name}"] = {"won": wb, "lost": lb, "draw": db}
             for k in kinds_scripted:
                 if k != "scripted":
                     wk, lk, dk = evaluate(policy, eval_envs, args.eval_episodes, rng, style=SCRIPTED[k])
@@ -497,8 +507,8 @@ def main():
         print(json.dumps(record), flush=True)
     torch.save(policy.state_dict(), out / "final.pt")
     envs.close()
-    if eval_bot_envs:
-        eval_bot_envs.close()
+    for bot_envs in eval_bot_envs:
+        bot_envs.close()
 
 
 if __name__ == "__main__":

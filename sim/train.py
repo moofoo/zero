@@ -9,8 +9,11 @@ the aiming drills (DRILLS): a still target, a drifting one, then the aimer, each
 sees only the fair observation (duelsim.DuelEnv.fair: 150 ms old, what a player could see) and chooses turn, thrust
 and fire ten times a second. The network: two layers of 256, a 256-unit GRU, a value head and three action heads.
 Every --eval-every iterations it plays the scripted aimer for a score that doesn't drift with the league.
+With --dial (ticket 50), an aggression dial is an extra input, and the reward charges range and reversing and pays
+for bullets in proportion to it.
 """
 import argparse
+import collections
 import json
 import math
 import random
@@ -21,16 +24,19 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from duelsim import DuelEnv
+from duelsim import DuelEnv, _Lib
 from vecenv import VecEnv
 
 HERE = Path(__file__).parent
 
 
 class Policy(nn.Module):
-    def __init__(self, obs_size, hidden=256):
+    """`extra` inputs follow the fair observation: with --dial, one, the aggression dial (0 to 1)."""
+
+    def __init__(self, obs_size, hidden=256, extra=0):
         super().__init__()
-        self.body = nn.Sequential(nn.Linear(obs_size, hidden), nn.Tanh(), nn.Linear(hidden, hidden), nn.Tanh())
+        self.body = nn.Sequential(nn.Linear(obs_size + extra, hidden), nn.Tanh(), nn.Linear(hidden, hidden), nn.Tanh())
+        self.extra = extra
         self.gru = nn.GRU(hidden, hidden, batch_first=True)
         self.heads = nn.ModuleList([nn.Linear(hidden, k) for k in (5, 3, 3)])  # turn, thrust, fire (DuelEnv.choice)
         self.value = nn.Linear(hidden, 1)
@@ -51,6 +57,28 @@ class Policy(nn.Module):
             outs.append(y)
         y = torch.cat(outs, 1)
         return [head(y) for head in self.heads], self.value(y).squeeze(-1), h
+
+
+def load_policy(path, extra=None, device="cpu"):
+    """A checkpoint as a Policy. Its extra inputs come from the checkpoint; with `extra`, it gets that many, the new
+    ones with zero weights, so it plays as before until trained (a policy from before the dial gains one)."""
+    state = torch.load(path, map_location=device, weights_only=True)
+    fair_size = _Lib.get().ds_fair_size()
+    had = state["body.0.weight"].shape[1] - fair_size
+    extra = had if extra is None else extra
+    if extra < had:
+        raise ValueError(f"{path} has {had} extra inputs, more than {extra}")
+    if extra > had:
+        w = state["body.0.weight"]
+        state["body.0.weight"] = torch.cat([w, torch.zeros(w.shape[0], extra - had, dtype=w.dtype)], 1)
+    policy = Policy(fair_size, extra=extra).to(device)
+    policy.load_state_dict(state)
+    return policy
+
+
+def with_dial(obs, dial):
+    """The policy's input: the fair observations (n, fair) with the dial (n,) after them; None leaves them as they are."""
+    return obs if dial is None else torch.cat([obs, dial.unsqueeze(1)], 1)
 
 
 class ScriptedAimer:
@@ -205,9 +233,9 @@ def act(policy, obs, h, starts, greedy=False):
     return torch.stack(choices, -1), logp, value[:, 0], h
 
 
-def evaluate(policy, envs, episodes, rng, dodge=False, style="hold"):
-    """Greedy learner against the scripted aimer (one that dodges bombs, with dodge): wins, losses, draws over
-    `episodes`."""
+def evaluate(policy, envs, episodes, rng, dodge=False, style="hold", dial=0.0):
+    """Greedy learner (at `dial`, if it has one) against the scripted aimer (one that dodges bombs, with dodge; or a
+    zero bot, in bot environments): wins, losses, draws over `episodes`."""
     wins = losses = draws = 0
     n = envs.count
     fair_a, opp = envs.reset()
@@ -215,9 +243,10 @@ def evaluate(policy, envs, episodes, rng, dodge=False, style="hold"):
     h = policy.initial(n)
     starts = torch.ones(n)
     aimers = [ScriptedAimer(rng, dodge, style) for _ in range(n)]
+    dials = torch.full((n,), dial) if policy.extra else None
     done_count = 0
     while done_count < episodes:
-        choice, _, _, h = act(policy, obs, h, starts, greedy=True)
+        choice, _, _, h = act(policy, with_dial(obs, dials), h, starts, greedy=True)
         starts = torch.zeros(n)
         chosen = choice.tolist()
         actions_a = [DuelEnv.choice(*chosen[i]) for i in range(n)]
@@ -234,6 +263,27 @@ def evaluate(policy, envs, episodes, rng, dodge=False, style="hold"):
                 starts[i] = 1.0
         obs, opp = batch([r[3] for r in steps]), [r[4] for r in steps]
     return wins, losses, draws
+
+
+def shaping(args, o, thrust, hits, style, dial):
+    """The dial's reward at full dial (ticket 50), from the learner's observation `o` it chose from, its thrust choice
+    and the step's hits: a cost for range beyond --range-tiles, one for reversing while facing the enemy, and a bonus
+    for bullet damage dealt. Counts the step in `style` by dial band (below a third, above two thirds)."""
+    facing = False
+    if o[8] > 0.5 or o[9] > 0.5:  # on screen or radar
+        ahead, right = o[10] * 60.0, o[11] * 60.0
+        excess = min(max(math.hypot(ahead, right) / args.range_tiles - 1.0, 0.0), 1.0)
+        facing = ahead > 0 and abs(math.atan2(right, ahead)) < math.pi / 3
+    else:
+        excess = 1.0
+    reversing = thrust == 2 and facing
+    band = "low" if dial < 1 / 3 else "high" if dial > 2 / 3 else None
+    if band:
+        style[band] += 1
+        style[band + "_beyond"] += excess > 0
+        style[band + "_reverse"] += reversing
+    bullets = sum(x["share"] for x in hits if x["side"] == 1 and x["class"] == "bullet" and not x["own"])
+    return -args.range_cost * excess - (args.reverse_cost if reversing else 0.0) + args.bullet_bonus * bullets
 
 
 def main():
@@ -259,6 +309,17 @@ def main():
                    "share, by turns: scripted (holds about 12 tiles), rusher, retreater (SCRIPTED)")
     p.add_argument("--time-cost", type=float, default=0.0, help="taken from the learner's reward each step")
     p.add_argument("--draw-penalty", type=float, default=0.0, help="taken from the learner's reward at a timeout")
+    p.add_argument("--dial", action="store_true", help="the aggression dial (ticket 50): each episode, the learner and "
+                   "policy opponents get a dial between 0 and 1 as an input, and the learner's reward has, times its "
+                   "dial, the costs and bonus below; a policy from before the dial (--init) gains the input")
+    p.add_argument("--range-tiles", type=float, default=15.0, help="with --dial: beyond this the range cost starts")
+    p.add_argument("--range-cost", type=float, default=0.004, help="with --dial: taken each step at twice --range-tiles "
+                   "or more (or with the enemy out of sight), in proportion between")
+    p.add_argument("--reverse-cost", type=float, default=0.003, help="with --dial: taken each step reversing with the "
+                   "enemy within 60 degrees ahead")
+    p.add_argument("--bullet-bonus", type=float, default=0.5, help="with --dial: bullet damage dealt is worth this much "
+                   "more")
+    p.add_argument("--eval-dials", default="0,1", help="with --dial: the dials the bot evaluations play at")
     p.add_argument("--no-drills", action="store_true", help="start in the league, without the aiming drills")
     p.add_argument("--drill-pass", type=float, default=0.8)
     p.add_argument("--drill-window", type=int, default=100)
@@ -301,10 +362,9 @@ def main():
                             spawn_radius=args.spawn_radius, bots=4, bot=spec)
                      for k, spec in enumerate(bot_specs)] if bot_count else []
     size = envs.fair_size
-    policy = Policy(size).to(device)
-    if args.init:
-        policy.load_state_dict(torch.load(args.init, map_location=device, weights_only=True))
-    opponent = Policy(size).to(device)
+    extra = 1 if args.dial else 0
+    policy = load_policy(args.init, extra, device) if args.init else Policy(size, extra=extra).to(device)
+    opponent = Policy(size, extra=extra).to(device)
     opponent.load_state_dict(policy.state_dict())
     optimizer = torch.optim.Adam(policy.parameters(), lr=args.lr)
     league = []  # checkpoint paths
@@ -318,7 +378,13 @@ def main():
     stage_results = []
     fair_a, fair_b = envs.reset()
     obs, opp_obs = batch(fair_a), batch(fair_b)
+    rows = fair_a  # the learner's observations as arrays, for the dial's costs
     opp_rows = fair_b  # the opponents' observations as arrays, for the scripted aimer
+    # Each episode's dials (ticket 50), the learner's and its policy opponent's; None without --dial.
+    dial = torch.tensor([rng.random() for _ in range(n)], dtype=torch.float32) if args.dial else None
+    opp_dial = torch.tensor([rng.random() for _ in range(n)], dtype=torch.float32) if args.dial else None
+    eval_dials = [float(x) for x in args.eval_dials.split(",")] if args.dial else [0.0]
+    style = collections.Counter()  # the dial's effect, for the log: steps beyond range and reversing, by dial
     h = policy.initial(n)
     opp_h = opponent.initial(n)
     starts = torch.ones(n)
@@ -342,7 +408,7 @@ def main():
         if kind == "latest":
             return opponent
         if kind not in league_nets:
-            net = Policy(size)
+            net = Policy(size, extra=extra)
             net.load_state_dict(torch.load(kind, map_location=device, weights_only=True))
             league_nets[kind] = net
         return league_nets[kind]
@@ -361,7 +427,8 @@ def main():
         buf_obs, buf_act, buf_logp, buf_val, buf_rew, buf_done, buf_start = [], [], [], [], [], [], []
         h0 = h.clone()
         for t in range(args.rollout):
-            choice, logp, value, h = act(policy, obs, h, starts)
+            inputs = with_dial(obs, dial)
+            choice, logp, value, h = act(policy, inputs, h, starts)
             # The opponents: group environments by opponent kind for batched play.
             opp_choice = [None] * n
             groups = {}
@@ -379,7 +446,8 @@ def main():
                         opp_choice[i] = scripted[k][i](opp_rows[i])
                 else:
                     net = opponent_net(k)
-                    c, _, _, nh = act(net, opp_obs[idx], opp_h[:, idx], starts[idx])
+                    c, _, _, nh = act(net, with_dial(opp_obs[idx], None if opp_dial is None else opp_dial[idx]),
+                                      opp_h[:, idx], starts[idx])
                     opp_h[:, idx] = nh
                     for j, row in zip(idx, c.tolist()):
                         opp_choice[j] = tuple(row)
@@ -390,8 +458,11 @@ def main():
             chosen = choice.tolist()
             steps = envs.step([DuelEnv.choice(*chosen[i]) for i in range(n)],
                               [DuelEnv.choice(*opp_choice[i]) for i in range(n)])
+            dials = dial.tolist() if args.dial else None
             for i, (ra, done, info, fair_a, fair_b) in enumerate(steps):
                 ra -= args.time_cost
+                if args.dial:
+                    ra += dials[i] * shaping(args, rows[i], chosen[i][1], info["hits"], style, dials[i])
                 if done and not info["deaths"]:
                     ra -= args.draw_penalty
                 rewards[i] = ra
@@ -414,24 +485,26 @@ def main():
                     running[i] = 0.0
                     starts[i] = 1.0
                     kinds[i] = pick_opponent(i)
+                    if args.dial:
+                        dial[i], opp_dial[i] = rng.random(), rng.random()
                     opp_h[:, i] = 0.0
                     for k in SCRIPTED:
                         scripted[k][i].reset()
                     drifters[i].reset()
                 new_obs.append(fair_a)
                 new_opp.append(fair_b)
-            buf_obs.append(obs)
+            buf_obs.append(inputs)
             buf_act.append(choice)
             buf_logp.append(logp)
             buf_val.append(value)
             buf_rew.append(rewards)
             buf_done.append(dones)
             obs, opp_obs = batch(new_obs), batch(new_opp)
-            opp_rows = new_opp
+            rows, opp_rows = new_obs, new_opp
             total += n
         # Advantages (GAE), bootstrapped from the next value.
         with torch.no_grad():
-            _, last_value, _ = policy(obs.unsqueeze(1), h, starts.unsqueeze(1))
+            _, last_value, _ = policy(with_dial(obs, dial).unsqueeze(1), h, starts.unsqueeze(1))
             last_value = last_value[:, 0]
         T = args.rollout
         adv = torch.zeros(T, n)
@@ -483,6 +556,11 @@ def main():
         record = {"iteration": iteration, "steps": total, "seconds": round(time.time() - started),
                   "episode_reward": round(sum(episode_rewards[-100:]) / max(len(episode_rewards[-100:]), 1), 3)}
         record["stage"] = DRILLS[stage] if stage < len(DRILLS) else "league"
+        for band in ("low", "high"):
+            if style[band]:
+                record[f"dial_{band}"] = {"beyond": round(style[band + "_beyond"] / style[band], 2),
+                                          "reversing": round(style[band + "_reverse"] / style[band], 2)}
+        style.clear()
         bot_kinds = tuple(bot_names) if bot_count else ()
         for kind in ("still", "drift") + tuple(SCRIPTED) + bot_kinds + ("latest", "league"):
             rs = [r for r in results[-300:]
@@ -495,8 +573,9 @@ def main():
             wd, ld, dd = evaluate(policy, eval_envs, args.eval_episodes, rng, dodge=True)
             record["eval_vs_dodger"] = {"won": wd, "lost": ld, "draw": dd}
             for name, bot_envs in zip(bot_names, eval_bot_envs):
-                wb, lb, db = evaluate(policy, bot_envs, args.eval_episodes, rng)
-                record[f"eval_vs_{name}"] = {"won": wb, "lost": lb, "draw": db}
+                for d in eval_dials:
+                    wb, lb, db = evaluate(policy, bot_envs, args.eval_episodes, rng, dial=d)
+                    record[f"eval_vs_{name}" + (f"@{d:g}" if args.dial else "")] = {"won": wb, "lost": lb, "draw": db}
             for k in kinds_scripted:
                 if k != "scripted":
                     wk, lk, dk = evaluate(policy, eval_envs, args.eval_episodes, rng, style=SCRIPTED[k])

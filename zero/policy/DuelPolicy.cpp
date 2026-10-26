@@ -1,6 +1,7 @@
 #include "DuelPolicy.h"
 
 #include <zero/game/Logger.h>
+#include <zero/policy/FairObservation.h>
 
 #include <cmath>
 #include <cstdio>
@@ -80,7 +81,7 @@ bool DuelPolicy::Load(const char* path) {
             linear("heads.2.weight", "heads.2.bias", heads[2]);
   if (ok) {
     obs_size = body0.in, hidden = body1.out;
-    ok = body1.in == body0.out && gru_ih.in == hidden && gru_ih.out == 3 * hidden && gru_hh.in == hidden &&
+    ok = obs_size >= kFairSize && body1.in == body0.out && gru_ih.in == hidden && gru_ih.out == 3 * hidden && gru_hh.in == hidden &&
          gru_hh.out == 3 * hidden && heads[0].out == kTurns && heads[1].out == kThrusts && heads[2].out == kFires;
     for (const Linear& h : heads) ok = ok && h.in == hidden;
   }

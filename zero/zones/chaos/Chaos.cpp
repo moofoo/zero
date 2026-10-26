@@ -239,6 +239,7 @@ struct ChaosBehavior : public behavior::Behavior {
       settings.policy = LoadSharedPolicy(*policy);
       Log(LogLevel::Info, "Policy: %s%s", *policy, settings.policy ? "" : " (not loaded; the tree fights)");
     }
+    if (auto aggression = lookup.GetFloat("PolicyAggression")) settings.policy_aggression = *aggression;
     settings.retreat_distance = lookup.GetFloat("RetreatDistance");
     settings.weak_enemy_energy = lookup.GetFloat("WeakEnemyEnergy");
     settings.bomb_min_range = lookup.GetFloat("BombMinRange");

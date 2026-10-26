@@ -33,6 +33,9 @@ struct CombatSettings {
   // A learned duel policy (bot-ai ticket 42; the Policy key, a file from sim/export_policy.py): while the target is on
   // screen it flies the ship (PolicyCombatNode). Null for the tree's own combat.
   const DuelPolicy* policy = nullptr;
+  // The policy's aggression dial (ticket 50; the PolicyAggression key, 0 to 1), for a policy trained with one: higher
+  // fights closer, with bullets more and reversing less.
+  float policy_aggression = 0.0f;
   // Greens on the way (ticket 32): the bot goes for a noticed green off its way by at most this much (tiles), when no
   // enemy or weapon makes it unsafe; 0 turns it off.
   float green_detour = 8.0f;

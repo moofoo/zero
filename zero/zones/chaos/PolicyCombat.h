@@ -25,12 +25,13 @@ struct PolicyCombatNode : public behavior::BehaviorNode {
   static constexpr u32 kTapTicks = 3;    // a tapped turn is held this long (duelsim.DuelEnv.TAP_TICKS)
   static constexpr u32 kPauseTicks = 50;  // off for longer than this, the policy starts over
 
-  explicit PolicyCombatNode(const DuelPolicy* policy) : policy(policy) {}
+  PolicyCombatNode(const DuelPolicy* policy, float aggression) : policy(policy), aggression(aggression) {}
 
   behavior::ExecuteResult Execute(behavior::ExecuteContext& ctx) override;
 
  private:
   const DuelPolicy* policy;
+  float aggression;  // the dial input after the observation, for a policy trained with one (ticket 50)
   u16 target_id = 0xFFFF;
   u32 last_tick = 0;
   bool active = false;

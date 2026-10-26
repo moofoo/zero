@@ -61,6 +61,7 @@ ExecuteResult PolicyCombatNode::Execute(ExecuteContext& ctx) {
         break;
       }
     }
+    obs.resize(policy->obs_size, aggression);  // a dial policy's extra input (train.py --dial)
     float logits[DuelPolicy::kLogits];
     policy->Step(obs.data(), state.data(), logits);
     DuelPolicy::Greedy(logits, choice);

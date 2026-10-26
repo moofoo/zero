@@ -229,7 +229,8 @@ class DuelEnv:
             kind, side, value, weapon = self._events[4 * k:4 * k + 4]
             side = int(side)
             if kind in (0, 2):  # a hit taken by `side`, from its own weapon for kind 2
-                hits.append({"side": side, "damage": value, "class": WEAPON_CLASSES[int(weapon)], "own": kind == 2})
+                hits.append({"side": side, "damage": value, "share": value / max_energy[side],
+                             "class": WEAPON_CLASSES[int(weapon)], "own": kind == 2})
                 rewards[side] -= value / max_energy[side]
                 rewards[1 - side] += value / max_energy[side]
             else:  # `side` died, to `value`

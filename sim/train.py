@@ -13,7 +13,8 @@ With --dial (ticket 50), an aggression dial is an extra input, and the reward ch
 for bullets in proportion to it.
 With --clone (ticket 46's second stage), a network cloned from the player's recordings (clone.py) is an opponent for
 --clone-share of the league's episodes, and with --clone-kl the learner is held near it: the loss adds that times the
-KL divergence from the clone's choices to the learner's, on the learner's own observations.
+KL divergence from the clone's choices to the learner's (or the reverse, --clone-kl-reverse; over --clone-kl-choices), on
+the learner's own observations.
 """
 import argparse
 import collections
@@ -341,7 +342,10 @@ def main():
     p.add_argument("--clone-share", type=float, default=0.0, help="with --clone: the share of the league's episodes "
                    "against it (sampling its choices, as a player varies)")
     p.add_argument("--clone-kl", type=float, default=0.0, help="with --clone: the loss adds this times KL(clone || "
-                   "learner), summed over the three choices, averaged over steps")
+                   "learner), summed over --clone-kl-choices, averaged over steps")
+    p.add_argument("--clone-kl-choices", default="turn,thrust,fire", help="the choices the KL counts (turn is aim)")
+    p.add_argument("--clone-kl-reverse", action="store_true", help="KL(learner || clone) instead: the learner may "
+                   "settle on any of the clone's likely choices, rather than spreading over all of them as it does")
     p.add_argument("--no-drills", action="store_true", help="start in the league, without the aiming drills")
     p.add_argument("--drill-pass", type=float, default=0.8)
     p.add_argument("--drill-window", type=int, default=100)
@@ -391,6 +395,7 @@ def main():
     clone = load_policy(args.clone, 0, device) if args.clone else None
     clone_h = clone.initial(args.envs) if clone else None
     clone_log = collections.Counter()  # ticket 46, for the log: the KL from the clone, and how often they'd agree
+    kl_choices = set(args.clone_kl_choices.split(","))
     optimizer = torch.optim.Adam(policy.parameters(), lr=args.lr)
     league = []  # checkpoint paths
 
@@ -594,13 +599,20 @@ def main():
                 surrogate = torch.min(ratio * ADV[:, sl], torch.clamp(ratio, 1 - args.clip, 1 + args.clip) * ADV[:, sl])
                 loss = -surrogate.mean() + 0.5 * ((value - RET[:, sl]) ** 2).mean() - args.entropy * entropy.mean()
                 if CL is not None:
-                    # Held near the player: KL(clone || learner) for each choice, the clone's columns in head order.
+                    # Held near the player: the KL between the clone's and the learner's choices, the clone's columns
+                    # in head order.
                     kl, at, agree = 0.0, 0, 0.0
-                    for lg in logits:
+                    for name, lg in zip(("turn", "thrust", "fire"), logits):
                         lp = CL[:, sl, at:at + lg.shape[-1]]
-                        kl = kl + (lp.exp() * (lp - torch.log_softmax(lg, -1))).sum(-1)
-                        agree = agree + (lg.argmax(-1) == lp.argmax(-1)).float().mean().item()
                         at += lg.shape[-1]
+                        agree = agree + (lg.argmax(-1) == lp.argmax(-1)).float().mean().item()
+                        if name not in kl_choices:
+                            continue
+                        lq = torch.log_softmax(lg, -1)
+                        if args.clone_kl_reverse:
+                            kl = kl + (lq.exp() * (lq - lp)).sum(-1)
+                        else:
+                            kl = kl + (lp.exp() * (lp - lq)).sum(-1)
                     loss = loss + args.clone_kl * kl.mean()
                     clone_log["kl"] += kl.mean().item()
                     clone_log["agree"] += agree / len(logits)

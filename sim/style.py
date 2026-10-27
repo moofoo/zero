@@ -23,7 +23,7 @@ from train import Policy, act, load_policy
 
 def play(policy, env, games, dial, range_tiles):
     s = collections.Counter()
-    dists, fire_energy = [], []
+    dists, fire_energy, bombs = [], [], []
     for _ in range(games):
         env.reset()
         h = policy.initial(1)
@@ -55,6 +55,9 @@ def play(policy, env, games, dial, range_tiles):
             s["fire_bomb"] += fire == 2
             _, _, _, done, info = env.step(DuelEnv.choice(turn, thrust, fire), 0)
             for shot in info["shots"]:
+                if shot["side"] == 0 and shot["class"] == "bomb" and seen:
+                    # The enemy's angle off the nose as the bomb leaves: a laid bomb is fired well off it.
+                    bombs.append([s["steps"], abs(math.degrees(math.atan2(o[11], o[10]))), False])
                 if shot["side"] == 0:
                     s["shots_" + shot["class"]] += 1
                     s["shots_below_half"] += o[4] < 0.5
@@ -65,8 +68,14 @@ def play(policy, env, games, dial, range_tiles):
                     s["taken_own"] += hit["damage"] if hit["own"] else 0
                 elif not hit["own"]:
                     s["landed_" + hit["class"]] += 1
+                    if hit["class"] == "bomb":  # credited to the latest bomb of the last 3 s
+                        for b in reversed(bombs):
+                            if s["steps"] - b[0] <= 30:
+                                b[2] = True
+                                break
         dead = {d["side"] for d in info["deaths"]}
         s["won" if dead == {1} else "lost" if dead == {0} else "draw"] += 1
+    s["bombs"] = bombs
     return s, sorted(dists), sorted(fire_energy)
 
 
@@ -109,6 +118,13 @@ def main():
               f"energy when firing median {fe[len(fe) // 2] if fe else float('nan'):.0%}, below half "
               f"{s['shots_below_half'] / max(shots, 1):.0%} of shots; time below half {s['below_half'] / s['steps']:.0%}",
               flush=True)
+        bombs = s["bombs"]
+        laid = [b for b in bombs if b[1] > 30]
+        if bombs:
+            hit = sum(b[2] for b in bombs)
+            print(f"  bombs: {len(bombs)}, hit {hit / len(bombs):.0%}; over 30 degrees off the nose {len(laid) / len(bombs):.0%}, "
+                  f"hitting {sum(b[2] for b in laid) / max(len(laid), 1):.0%}, {sum(b[2] for b in laid) / max(hit, 1):.0%} of bomb hits",
+                  flush=True)
 
 
 if __name__ == "__main__":

@@ -21,6 +21,7 @@
 #include <zero/Config.h>
 #include <zero/RenderContext.h>
 #include <zero/ZeroBot.h>
+#include <zero/HeuristicEnergyTracker.h>
 #include <zero/commands/CommandSystem.h>
 #include <zero/policy/DuelPolicy.h>
 #include <zero/zones/ZoneController.h>
@@ -868,9 +869,9 @@ struct Env {
   // Fair observations kept every kObsEvery ticks, per side: (tick, observation), the latest last.
   std::deque<std::pair<u32, std::vector<float>>> fair[2];
   struct Happening {
-    int kind;  // 0 a hit taken, 1 a death, 2 a hit taken from one's own weapon
+    int kind;  // 0 a hit taken, 1 a death, 2 a hit taken from one's own weapon, 3 a shot fired (ticket 51)
     int side;  // the side hit, or that died
-    float value;  // damage, or the killer's side
+    float value;  // damage, the killer's side, or a shot's energy cost
     int weapon;   // the weapon's class, for hits
   };
   std::vector<Happening> happenings;
@@ -878,7 +879,19 @@ struct Env {
 
 std::vector<Env*> envs;
 
-struct EnvWatcher : EventHandler<WeaponSelfDamageEvent>, EventHandler<PlayerDeathEvent> {
+struct EnvWatcher : EventHandler<WeaponSelfDamageEvent>, EventHandler<PlayerDeathEvent>, EventHandler<WeaponFireEvent> {
+  // A side's own shot: its energy cost as the ship was charged (the combat log's "cost": no super or flag here).
+  void HandleEvent(const WeaponFireEvent& event) override {
+    for (Env* env : envs) {
+      for (int i = 0; i < 2; ++i) {
+        Game& g = *env->sides[i].game;
+        if (&event.player != g.player_manager.GetSelf()) continue;
+        u32 cost = GetWeaponFireCost(g.connection.settings.ShipSettings[event.player.ship], event.data);
+        env->happenings.push_back({3, i, (float)cost, WeaponClass(event.data)});
+        return;
+      }
+    }
+  }
   void HandleEvent(const WeaponSelfDamageEvent& event) override {
     for (Env* env : envs) {
       for (int i = 0; i < 2; ++i) {
@@ -1093,7 +1106,7 @@ int ds_observe(void* handle, int side_index, float* out, int max_weapons) {
 }
 
 // What happened since the last call: up to `max` records of 4 floats (kind 0 hit / 1 death / 2 hit by one's own
-// weapon, side, damage or killer side, weapon class). Returns how many.
+// weapon / 3 shot fired, side, damage or killer side or the shot's energy cost, weapon class). Returns how many.
 int ds_happenings(void* handle, float* out, int max) {
   Env& env = *(Env*)handle;
   int n = 0;

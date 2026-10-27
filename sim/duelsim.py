@@ -223,7 +223,7 @@ class DuelEnv:
         self.ticks += self.frame_skip
         n = self.lib.ds_happenings(self.handle, self._events, 256)
         rewards = [0.0, 0.0]
-        hits, deaths = [], []
+        hits, deaths, shots = [], [], []
         max_energy = [self.observe(0)["self"]["max_energy"] or 1.0, self.observe(1)["self"]["max_energy"] or 1.0]
         for k in range(n):
             kind, side, value, weapon = self._events[4 * k:4 * k + 4]
@@ -233,13 +233,17 @@ class DuelEnv:
                              "class": WEAPON_CLASSES[int(weapon)], "own": kind == 2})
                 rewards[side] -= value / max_energy[side]
                 rewards[1 - side] += value / max_energy[side]
+            elif kind == 3:  # `side` fired a shot costing `value` energy (ticket 51)
+                shots.append({"side": side, "cost": value, "share": value / max_energy[side],
+                              "class": WEAPON_CLASSES[int(weapon)]})
             else:  # `side` died, to `value`
                 deaths.append({"side": side, "killer": int(value)})
                 rewards[side] -= self.kill_reward
                 if int(value) != side:
                     rewards[int(value)] += self.kill_reward
         done = bool(deaths) or self.ticks >= self.max_ticks
-        return self.observe(0), self.observe(1), tuple(rewards), done, {"hits": hits, "deaths": deaths, "ticks": self.ticks}
+        return self.observe(0), self.observe(1), tuple(rewards), done, {"hits": hits, "deaths": deaths, "shots": shots,
+                                                                         "ticks": self.ticks}
 
 
 if __name__ == "__main__":

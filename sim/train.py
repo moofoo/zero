@@ -92,12 +92,17 @@ class ScriptedAimer:
     DODGE_SECONDS, DODGE_TILES = 3.0, 7.0  # with dodge, bombs passing this near this soon are dodged
 
     # Styles: "hold" keeps about 12 tiles; "rush" closes to point-blank and fires bullets, as Veteran does when it
-    # commits; "retreat" holds but, below half energy, turns and flies off until it has recharged, then comes back.
+    # commits; "retreat" holds but, below half energy, turns and flies off until it has recharged, then comes back;
+    # "punish" (ticket 51) holds, and rushes while its target's energy (target_energy, set by the caller each step
+    # from the target's own view: what a player would infer from the shots it fired) is below PUNISH_ENERGY.
+    PUNISH_ENERGY = 0.4
+
     def __init__(self, rng, dodge=False, style="hold"):
         self.rng = rng
         self.dodge = dodge
         self.style = style
         self.fleeing = False
+        self.target_energy = 1.0
         self.turns = [0.0, 0.0]  # the last two steps' turns (TURN_AMOUNT), latest last
 
     def reset(self):
@@ -176,7 +181,8 @@ class ScriptedAimer:
         closing = -(dx * obs[12] + dy * obs[13]) * 20.0 / dist
         if self.fleeing:
             return turn, (0 if abs(angle) < 1.0 else 1), 0
-        if self.style == "rush":
+        rushing = self.style == "rush" or (self.style == "punish" and self.target_energy < self.PUNISH_ENERGY)
+        if rushing:
             thrust = 2 if dist < 2 else (0 if dist > 4 and closing < 12 else 1)
         elif dist > 18:
             thrust = 0 if closing < 8 else 1
@@ -186,7 +192,7 @@ class ScriptedAimer:
             thrust = 1
         fire = 0
         if abs(angle) < 0.15:
-            fire = 2 if dist > 10 and rng.random() < 0.25 else 1
+            fire = 2 if dist > 10 and not rushing and rng.random() < 0.25 else 1
         return turn, thrust, fire
 
 
@@ -213,7 +219,7 @@ class Drifter:
 # to the league.
 DRILLS = ("still", "drift", "scripted")
 # The scripted opponents a run can include (--scripted-kinds), by their ScriptedAimer style.
-SCRIPTED = {"scripted": "hold", "rusher": "rush", "retreater": "retreat"}
+SCRIPTED = {"scripted": "hold", "rusher": "rush", "retreater": "retreat", "punisher": "punish"}
 
 
 def batch(arrays):
@@ -250,6 +256,9 @@ def evaluate(policy, envs, episodes, rng, dodge=False, style="hold", dial=0.0):
         starts = torch.zeros(n)
         chosen = choice.tolist()
         actions_a = [DuelEnv.choice(*chosen[i]) for i in range(n)]
+        energy = obs[:, 4].tolist()  # the learner's energy share, for a punisher
+        for i in range(n):
+            aimers[i].target_energy = energy[i]
         actions_b = [DuelEnv.choice(*aimers[i](opp[i])) for i in range(n)]
         steps = envs.step(actions_a, actions_b)
         for i, (_, done, info, _, _) in enumerate(steps):
@@ -306,7 +315,8 @@ def main():
     p.add_argument("--init", default=None, help="a checkpoint to start from")
     p.add_argument("--dodge", action="store_true", help="the scripted opponents dodge bombs")
     p.add_argument("--scripted-kinds", default="scripted", help="the scripted opponents in the league's scripted "
-                   "share, by turns: scripted (holds about 12 tiles), rusher, retreater (SCRIPTED)")
+                   "share, by turns: scripted (holds about 12 tiles), rusher, retreater, punisher (rushes a learner low on "
+                   "energy) (SCRIPTED); a kind named twice comes up twice as often")
     p.add_argument("--time-cost", type=float, default=0.0, help="taken from the learner's reward each step")
     p.add_argument("--draw-penalty", type=float, default=0.0, help="taken from the learner's reward at a timeout")
     p.add_argument("--dial", action="store_true", help="the aggression dial (ticket 50): each episode, the learner and "
@@ -321,6 +331,8 @@ def main():
                    "more")
     p.add_argument("--dial-ends", type=float, default=0.0, help="with --dial: the share of episodes whose dials are 0 "
                    "or 1 (either, evenly) rather than anywhere between, for a clearer contrast")
+    p.add_argument("--shot-cost", type=float, default=0.0, help="ticket 51: each shot the learner fires costs this "
+                   "times its energy as a share of full energy (0.5: about 0.018 a bullet, 0.10 a bomb)")
     p.add_argument("--eval-dials", default="0,1", help="with --dial: the dials the bot evaluations play at")
     p.add_argument("--no-drills", action="store_true", help="start in the league, without the aiming drills")
     p.add_argument("--drill-pass", type=float, default=0.8)
@@ -390,6 +402,7 @@ def main():
     opp_dial = torch.tensor([draw_dial() for _ in range(n)], dtype=torch.float32) if args.dial else None
     eval_dials = [float(x) for x in args.eval_dials.split(",")] if args.dial else [0.0]
     style = collections.Counter()  # the dial's effect, for the log: steps beyond range and reversing, by dial
+    energy_log = collections.Counter()  # ticket 51, for the log: the learner's steps below half energy, its shots
     h = policy.initial(n)
     opp_h = opponent.initial(n)
     starts = torch.ones(n)
@@ -448,6 +461,7 @@ def main():
                         opp_choice[i] = drifters[i](None)
                 elif k in SCRIPTED:
                     for i in idx:
+                        scripted[k][i].target_energy = float(rows[i][4])  # the learner's energy, for a punisher
                         opp_choice[i] = scripted[k][i](opp_rows[i])
                 else:
                     net = opponent_net(k)
@@ -468,6 +482,14 @@ def main():
                 ra -= args.time_cost
                 if args.dial:
                     ra += dials[i] * shaping(args, rows[i], chosen[i][1], info["hits"], style, dials[i])
+                # Ticket 51: each shot fired costs a share of its energy, so a shot pays only when it's likely to hit.
+                spent = sum(x["share"] for x in info["shots"] if x["side"] == 0)
+                ra -= args.shot_cost * spent
+                energy_log["steps"] += 1
+                energy_log["below_half"] += rows[i][4] < 0.5
+                fired = sum(1 for x in info["shots"] if x["side"] == 0)
+                energy_log["shots"] += fired
+                energy_log["shots_below_half"] += fired if rows[i][4] < 0.5 else 0
                 if done and not info["deaths"]:
                     ra -= args.draw_penalty
                 rewards[i] = ra
@@ -566,6 +588,11 @@ def main():
                 record[f"dial_{band}"] = {"beyond": round(style[band + "_beyond"] / style[band], 2),
                                           "reversing": round(style[band + "_reverse"] / style[band], 2)}
         style.clear()
+        if energy_log["steps"]:
+            record["energy"] = {"below_half": round(energy_log["below_half"] / energy_log["steps"], 3),
+                                "shots_a_minute": round(600 * energy_log["shots"] / energy_log["steps"], 1),
+                                "shots_below_half": round(energy_log["shots_below_half"] / max(energy_log["shots"], 1), 3)}
+        energy_log.clear()
         bot_kinds = tuple(bot_names) if bot_count else ()
         for kind in ("still", "drift") + tuple(SCRIPTED) + bot_kinds + ("latest", "league"):
             rs = [r for r in results[-300:]

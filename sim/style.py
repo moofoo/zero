@@ -5,7 +5,9 @@
 Greedy play, one game a life, in the duel box (spawns 20 to 56 tiles apart). Per dial setting (policies trained with
 --dial; one without plays once): kill share, damage taken a minute and its share from the policy's own bombs, the
 distance to the enemy while on screen (median and quartiles), the share of steps reversing while facing the enemy
-(within 60 degrees ahead), the share of time beyond --range tiles, and the bullet and bomb hits it lands a minute.
+(within 60 degrees ahead), the share of time beyond --range tiles, and the bullet and bomb hits it lands a minute; and
+for ticket 51, shots fired a minute, hits a bullet, its energy when firing and the time it spends below half energy
+(the energy it saw, 150 ms old).
 """
 import argparse
 import collections
@@ -21,7 +23,7 @@ from train import Policy, act, load_policy
 
 def play(policy, env, games, dial, range_tiles):
     s = collections.Counter()
-    dists = []
+    dists, fire_energy = [], []
     for _ in range(games):
         env.reset()
         h = policy.initial(1)
@@ -48,9 +50,15 @@ def play(policy, env, games, dial, range_tiles):
             else:
                 s["beyond"] += 1
             s["thrust_reverse"] += thrust == 2
+            s["below_half"] += o[7] > 0.5 and o[4] < 0.5
             s["fire_bullet"] += fire == 1
             s["fire_bomb"] += fire == 2
             _, _, _, done, info = env.step(DuelEnv.choice(turn, thrust, fire), 0)
+            for shot in info["shots"]:
+                if shot["side"] == 0:
+                    s["shots_" + shot["class"]] += 1
+                    s["shots_below_half"] += o[4] < 0.5
+                    fire_energy.append(float(o[4]))
             for hit in info["hits"]:
                 if hit["side"] == 0:
                     s["taken"] += hit["damage"]
@@ -59,7 +67,7 @@ def play(policy, env, games, dial, range_tiles):
                     s["landed_" + hit["class"]] += 1
         dead = {d["side"] for d in info["deaths"]}
         s["won" if dead == {1} else "lost" if dead == {0} else "draw"] += 1
-    return s, sorted(dists)
+    return s, sorted(dists), sorted(fire_energy)
 
 
 def main():
@@ -81,7 +89,7 @@ def main():
                       bot={"skill": skill, "aggression": aggression or "standard"},
                       spawn_center=(186, 144), spawn_radius=40, spawn_gap=(20, 56))
         started = time.time()
-        s, ds = play(policy, env, args.games, dial, args.range)
+        s, ds, fe = play(policy, env, args.games, dial, args.range)
         minutes = s["steps"] / 600.0
         kills = s["won"] + s["lost"]
         q = (lambda f: ds[int(f * (len(ds) - 1))]) if ds else (lambda f: float("nan"))
@@ -93,7 +101,13 @@ def main():
         print(f"  reversing {s['thrust_reverse'] / s['steps']:.0%} of steps, facing the enemy {s['reverse_facing'] / s['steps']:.0%}; "
               f"fires bullets {s['fire_bullet'] / s['steps']:.0%}, bombs {s['fire_bomb'] / s['steps']:.0%}; "
               f"lands a minute: bullets {s['landed_bullet'] / minutes:.1f}, bombs {s['landed_bomb'] / minutes:.1f}, "
-              f"other {s['landed_other'] / minutes:.1f}  ({time.time() - started:.0f} s)", flush=True)
+              f"other {s['landed_other'] / minutes:.1f}  ({time.time() - started:.0f} s)")
+        shots = s["shots_bullet"] + s["shots_bomb"]
+        print(f"  energy (ticket 51): fires a minute bullets {s['shots_bullet'] / minutes:.1f}, bombs "
+              f"{s['shots_bomb'] / minutes:.1f}; hits a bullet {s['landed_bullet'] / max(s['shots_bullet'], 1):.2f}; "
+              f"energy when firing median {fe[len(fe) // 2] if fe else float('nan'):.0%}, below half "
+              f"{s['shots_below_half'] / max(shots, 1):.0%} of shots; time below half {s['below_half'] / s['steps']:.0%}",
+              flush=True)
 
 
 if __name__ == "__main__":

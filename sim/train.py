@@ -11,6 +11,9 @@ and fire ten times a second. The network: two layers of 256, a 256-unit GRU, a v
 Every --eval-every iterations it plays the scripted aimer for a score that doesn't drift with the league.
 With --dial (ticket 50), an aggression dial is an extra input, and the reward charges range and reversing and pays
 for bullets in proportion to it.
+With --clone (ticket 46's second stage), a network cloned from the player's recordings (clone.py) is an opponent for
+--clone-share of the league's episodes, and with --clone-kl the learner is held near it: the loss adds that times the
+KL divergence from the clone's choices to the learner's, on the learner's own observations.
 """
 import argparse
 import collections
@@ -334,6 +337,11 @@ def main():
     p.add_argument("--shot-cost", type=float, default=0.0, help="ticket 51: each shot the learner fires costs this "
                    "times its energy as a share of full energy (0.5: about 0.018 a bullet, 0.10 a bomb)")
     p.add_argument("--eval-dials", default="0,1", help="with --dial: the dials the bot evaluations play at")
+    p.add_argument("--clone", default=None, help="ticket 46: a clone.py network of the player (no dial)")
+    p.add_argument("--clone-share", type=float, default=0.0, help="with --clone: the share of the league's episodes "
+                   "against it (sampling its choices, as a player varies)")
+    p.add_argument("--clone-kl", type=float, default=0.0, help="with --clone: the loss adds this times KL(clone || "
+                   "learner), summed over the three choices, averaged over steps")
     p.add_argument("--no-drills", action="store_true", help="start in the league, without the aiming drills")
     p.add_argument("--drill-pass", type=float, default=0.8)
     p.add_argument("--drill-window", type=int, default=100)
@@ -380,6 +388,9 @@ def main():
     policy = load_policy(args.init, extra, device) if args.init else Policy(size, extra=extra).to(device)
     opponent = Policy(size, extra=extra).to(device)
     opponent.load_state_dict(policy.state_dict())
+    clone = load_policy(args.clone, 0, device) if args.clone else None
+    clone_h = clone.initial(args.envs) if clone else None
+    clone_log = collections.Counter()  # ticket 46, for the log: the KL from the clone, and how often they'd agree
     optimizer = torch.optim.Adam(policy.parameters(), lr=args.lr)
     league = []  # checkpoint paths
 
@@ -416,8 +427,11 @@ def main():
         r = rng.random()
         if not league or r < args.scripted_share:
             return rng.choice(kinds_scripted)
+        if clone is not None and r < args.scripted_share + args.clone_share:
+            return "clone"
         # The rest: a bit over half against the latest, the others against a random checkpoint.
-        return "latest" if r < args.scripted_share + 0.55 * (1 - args.scripted_share) else rng.choice(league)
+        rest = args.scripted_share + (args.clone_share if clone is not None else 0.0)
+        return "latest" if r < rest + 0.55 * (1 - rest) else rng.choice(league)
 
     # Each environment's opponent for its current episode: a drill, "scripted", "latest" or a checkpoint path.
     kinds = [pick_opponent(i) for i in range(n)]
@@ -425,6 +439,8 @@ def main():
     def opponent_net(kind):
         if kind == "latest":
             return opponent
+        if kind == "clone":
+            return clone
         if kind not in league_nets:
             net = Policy(size, extra=extra)
             net.load_state_dict(torch.load(kind, map_location=device, weights_only=True))
@@ -443,10 +459,15 @@ def main():
             for group in optimizer.param_groups:
                 group["lr"] = args.lr + (args.lr_final - args.lr) * min(total / args.steps, 1.0)
         buf_obs, buf_act, buf_logp, buf_val, buf_rew, buf_done, buf_start = [], [], [], [], [], [], []
+        buf_clone = []  # the clone's log-probabilities for each choice, on the learner's observations
         h0 = h.clone()
         for t in range(args.rollout):
             inputs = with_dial(obs, dial)
             choice, logp, value, h = act(policy, inputs, h, starts)
+            if clone is not None and args.clone_kl:
+                with torch.no_grad():
+                    lg, _, clone_h = clone(obs.unsqueeze(1), clone_h, starts.unsqueeze(1))
+                buf_clone.append(torch.cat([torch.log_softmax(x[:, 0], -1) for x in lg], -1))
             # The opponents: group environments by opponent kind for batched play.
             opp_choice = [None] * n
             groups = {}
@@ -465,7 +486,7 @@ def main():
                         opp_choice[i] = scripted[k][i](opp_rows[i])
                 else:
                     net = opponent_net(k)
-                    c, _, _, nh = act(net, with_dial(opp_obs[idx], None if opp_dial is None else opp_dial[idx]),
+                    c, _, _, nh = act(net, with_dial(opp_obs[idx], opp_dial[idx] if net.extra else None),
                                       opp_h[:, idx], starts[idx])
                     opp_h[:, idx] = nh
                     for j, row in zip(idx, c.tolist()):
@@ -551,6 +572,7 @@ def main():
         ADV = adv.transpose(0, 1)
         RET = returns.transpose(0, 1)
         S = torch.stack(buf_start).transpose(0, 1)
+        CL = torch.stack(buf_clone).transpose(0, 1) if buf_clone else None
         ADV = (ADV - ADV.mean()) / (ADV.std() + 1e-8)
         # The hidden state at each chunk's start, from a replay of the rollout with the policy before updating.
         with torch.no_grad():
@@ -571,6 +593,18 @@ def main():
                 ratio = torch.exp(logp - LP[:, sl])
                 surrogate = torch.min(ratio * ADV[:, sl], torch.clamp(ratio, 1 - args.clip, 1 + args.clip) * ADV[:, sl])
                 loss = -surrogate.mean() + 0.5 * ((value - RET[:, sl]) ** 2).mean() - args.entropy * entropy.mean()
+                if CL is not None:
+                    # Held near the player: KL(clone || learner) for each choice, the clone's columns in head order.
+                    kl, at, agree = 0.0, 0, 0.0
+                    for lg in logits:
+                        lp = CL[:, sl, at:at + lg.shape[-1]]
+                        kl = kl + (lp.exp() * (lp - torch.log_softmax(lg, -1))).sum(-1)
+                        agree = agree + (lg.argmax(-1) == lp.argmax(-1)).float().mean().item()
+                        at += lg.shape[-1]
+                    loss = loss + args.clone_kl * kl.mean()
+                    clone_log["kl"] += kl.mean().item()
+                    clone_log["agree"] += agree / len(logits)
+                    clone_log["chunks"] += 1
                 optimizer.zero_grad()
                 loss.backward()
                 nn.utils.clip_grad_norm_(policy.parameters(), 0.5)
@@ -593,10 +627,15 @@ def main():
                                 "shots_a_minute": round(600 * energy_log["shots"] / energy_log["steps"], 1),
                                 "shots_below_half": round(energy_log["shots_below_half"] / max(energy_log["shots"], 1), 3)}
         energy_log.clear()
+        if clone_log["chunks"]:
+            record["clone"] = {"kl": round(clone_log["kl"] / clone_log["chunks"], 3),
+                               "agree": round(clone_log["agree"] / clone_log["chunks"], 3)}
+        clone_log.clear()
         bot_kinds = tuple(bot_names) if bot_count else ()
-        for kind in ("still", "drift") + tuple(SCRIPTED) + bot_kinds + ("latest", "league"):
+        for kind in ("still", "drift") + tuple(SCRIPTED) + bot_kinds + ("clone", "latest", "league"):
             rs = [r for r in results[-300:]
-                  if (r[0] == kind if kind != "league" else r[0] not in DRILLS + tuple(SCRIPTED) + ("latest",) + bot_kinds)]
+                  if (r[0] == kind if kind != "league"
+                      else r[0] not in DRILLS + tuple(SCRIPTED) + ("clone", "latest") + bot_kinds)]
             if rs:
                 record[f"vs_{kind}"] = {"episodes": len(rs), "won": round(sum(r[1] for r in rs) / len(rs), 2),
                                         "lost": round(sum(r[2] for r in rs) / len(rs), 2)}

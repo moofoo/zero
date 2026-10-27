@@ -80,7 +80,8 @@ def evaluate(policy, x, y, m):
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("data", nargs="+", help="player_data.py .npz files")
-    p.add_argument("--test", default="1", help="held-out sessions, by index (comma-separated)")
+    p.add_argument("--test", default="1", help="held-out sessions, by index (comma-separated); none: train on all, "
+                   "for --epochs, and keep the last epoch's network")
     p.add_argument("--init", default=None, help="a train.py checkpoint to start from (default: a new network)")
     p.add_argument("--out", default=None)
     p.add_argument("--epochs", type=int, default=30)
@@ -100,23 +101,26 @@ def main():
         session.append(d["session"] + offset)
         offset += int(d["session"].max()) + 1
     obs, choices, session, ticks = map(np.concatenate, (obs, choices, session, ticks))
-    test = [int(s) for s in args.test.split(",")]
+    test = [] if args.test == "none" else [int(s) for s in args.test.split(",")]
     train = [s for s in range(offset) if s not in test]
     x, y, m = windows(obs, choices, session, ticks, train, args.window, args.fraction)
     if args.mirror:
         mx, my = mirror(x.numpy(), y.numpy())
         x, y, m = torch.cat([x, torch.tensor(mx)]), torch.cat([y, torch.tensor(my)]), torch.cat([m, m])
-    tx, ty, tm = windows(obs, choices, session, ticks, test, args.window)
-    common = {HEADS[k]: round(float(np.bincount(choices[np.isin(session, test), k]).max()
-                                    / np.isin(session, test).sum()), 3) for k in range(3)}
-    print(json.dumps({"train_decisions": int(m.sum().item()), "test_decisions": int(tm.sum().item()),
-                      "most_common_share": common}), flush=True)
+    if test:
+        tx, ty, tm = windows(obs, choices, session, ticks, test, args.window)
+        common = {HEADS[k]: round(float(np.bincount(choices[np.isin(session, test), k]).max()
+                                        / np.isin(session, test).sum()), 3) for k in range(3)}
+        print(json.dumps({"train_decisions": int(m.sum().item()), "test_decisions": int(tm.sum().item()),
+                          "most_common_share": common}), flush=True)
+    else:
+        print(json.dumps({"train_decisions": int(m.sum().item())}), flush=True)
 
     fair_size = _Lib.get().ds_fair_size()
     policy = load_policy(args.init) if args.init else Policy(fair_size)
     if policy.extra:
         raise SystemExit("cloning a dial policy isn't supported; start from one without")
-    if args.init:
+    if args.init and test:
         print(json.dumps({"epoch": 0, "held_out": evaluate(policy, tx, ty, tm)}), flush=True)
     optimizer = torch.optim.Adam(policy.parameters(), lr=args.lr)
     best = None
@@ -133,12 +137,17 @@ def main():
             nn.utils.clip_grad_norm_(policy.parameters(), 1.0)
             optimizer.step()
             total += loss.item() * len(i)
+        if not test:
+            print(json.dumps({"epoch": epoch, "train_loss": round(total / len(order), 3)}), flush=True)
+            best = (None, epoch, policy.state_dict())
+            continue
         held = evaluate(policy, tx, ty, tm)
         score = sum(v[1] for v in held.values())
         print(json.dumps({"epoch": epoch, "train_loss": round(total / len(order), 3), "held_out": held}), flush=True)
         if best is None or score < best[0]:
             best = (score, epoch, {k: v.clone() for k, v in policy.state_dict().items()})
-    print(json.dumps({"best_epoch": best[1], "held_out_loss": round(best[0], 3)}))
+    if test:
+        print(json.dumps({"best_epoch": best[1], "held_out_loss": round(best[0], 3)}))
     if args.out:
         torch.save(best[2], args.out)
 

@@ -76,6 +76,7 @@ def main():
     p.add_argument("--games", type=int, default=100)
     p.add_argument("--dials", default="0,0.5,1")
     p.add_argument("--bot", default="veteran:standard", help="skill:aggression")
+    p.add_argument("--bot-config", default=None, help="the bot's config file (default: duelsim's, chaos-offline's)")
     p.add_argument("--range", type=float, default=15.0, help="tiles; the share of time beyond it is reported")
     p.add_argument("--seed", type=int, default=9)
     p.add_argument("--map-dir", default=None)
@@ -86,7 +87,7 @@ def main():
     dials = [float(x) for x in args.dials.split(",")] if policy.extra else [0.0]
     for dial in dials:
         env = DuelEnv(seed=args.seed, max_seconds=90, map_dir=args.map_dir,
-                      bot={"skill": skill, "aggression": aggression or "standard"},
+                      bot={"skill": skill, "aggression": aggression or "standard", "config": args.bot_config},
                       spawn_center=(186, 144), spawn_radius=40, spawn_gap=(20, 56))
         started = time.time()
         s, ds, fe = play(policy, env, args.games, dial, args.range)

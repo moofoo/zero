@@ -385,6 +385,11 @@ CombatMode CommitDecision::Decide(Player& self, Player& target) {
 
   win_chance = chance;
   CombatMode chosen = Choose(chance, self, target);
+  if (settings.punish_energy && self.energy >= settings.commit_energy * bot.game->ship_controller.ship.energy &&
+      target.ship < 8) {
+    float target_max = (float)bot.game->connection.settings.ShipSettings[target.ship].MaximumEnergy;
+    if (estimate.Get(target).energy < *settings.punish_energy * target_max) chosen = CombatMode::Commit;
+  }
   if (chosen == CombatMode::Commit && mode != CombatMode::Commit) {
     commit_tick = now;
     closing = distance > kCommitRange;

@@ -333,6 +333,7 @@ struct ChaosBehavior : public behavior::Behavior {
     decision_settings.disengage_confidence =
         lookup.Value("DisengageConfidence", decision_settings.disengage_confidence);
     decision_settings.commit_energy = lookup.Value("CommitEnergy", decision_settings.commit_energy);
+    decision_settings.punish_energy = lookup.GetFloat("PunishEnergy");
     decision_settings.lead_skill = settings.lead_skill;
     float leash = lookup.Value("LeashDistance", kDefaultLeashDistance);
     decision_settings.retreat_distance = settings.retreat_distance.value_or(leash);

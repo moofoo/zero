@@ -3,6 +3,7 @@
 #include <zero/Types.h>
 #include <zero/game/GameEvent.h>
 
+#include <optional>
 #include <random>
 #include <unordered_map>
 
@@ -62,6 +63,10 @@ struct DecisionSettings {
   float recharge_to = 0.65f;
   // The bot's LeadSkill, for its own bombs' expected damage (BombDamageShare).
   float lead_skill = 1.0f;
+  // Punishing (bot-ai ticket 51; the PunishEnergy key): commit, whatever the odds, while the target's estimated energy
+  // is below this fraction of its ship's maximum and the bot can commit (CommitEnergy), as a player goes in on an
+  // enemy that has emptied itself firing. Unset: off.
+  std::optional<float> punish_energy;
 };
 
 // The commit decision: whether to commit, pressure, hold, disengage or recharge, from a quick estimate of who would run

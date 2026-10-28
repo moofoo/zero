@@ -19,7 +19,7 @@ With --clone (ticket 46's second stage), a network cloned from the player's reco
 KL divergence from the clone's choices to the learner's (or the reverse, --clone-kl-reverse; over --clone-kl-choices,
 each weighted, name:weight), on the learner's own observations.
 --idle-cost charges each step after --idle-grace seconds without landing damage: stalling costs, a lure that pays off
-doesn't. --low-energy-cost charges time below half energy.
+doesn't; in the red (--idle-red) it's off, as surviving comes first. --low-energy-cost charges time below half energy.
 """
 import argparse
 import collections
@@ -357,6 +357,9 @@ def main():
                    "not for a lure that pays off")
     p.add_argument("--idle-grace", type=float, default=5.0, help="with --idle-cost: seconds without landing damage "
                    "before it starts")
+    p.add_argument("--idle-red", type=float, default=0.3, help="with --idle-cost: below this share of energy the "
+                   "learner should be surviving, not dealing damage: no cost and the clock stops; the cost comes back "
+                   "in full by half energy")
     p.add_argument("--clone", default=None, help="ticket 46: a clone.py network of the player (no dial)")
     p.add_argument("--clone-share", type=float, default=0.0, help="with --clone: the share of the league's episodes "
                    "against it (sampling its choices, as a player varies)")
@@ -547,9 +550,10 @@ def main():
                 ra -= args.shot_cost * spent
                 ra -= args.low_energy_cost * max(0.0, 0.5 - float(rows[i][4])) / 0.5
                 landed = any(x["side"] == 1 and not x["own"] for x in info["hits"])
-                idle[i] = 0 if landed or done else idle[i] + 1
+                energy = float(rows[i][4])
+                idle[i] = 0 if landed or done else idle[i] + (energy >= args.idle_red)
                 if idle[i] > args.idle_grace * 10:
-                    ra -= args.idle_cost
+                    ra -= args.idle_cost * min(max((energy - args.idle_red) / max(0.5 - args.idle_red, 1e-6), 0.0), 1.0)
                 energy_log["idle"] += idle[i] > args.idle_grace * 10
                 energy_log["steps"] += 1
                 energy_log["below_half"] += rows[i][4] < 0.5

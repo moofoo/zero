@@ -6,7 +6,8 @@ The examples come from player_data.py (obs, choices, ticks, session). Sessions n
 train. The network sees each session in order, in windows of --window decisions with its memory cleared at each
 window's start, and learns all three choices (turn, thrust, fire) by cross-entropy. --fraction trains on the first
 part of each training session only, for a learning curve. --mirror adds each window mirrored left to right (the
-observation's right-hand numbers negated, the rays reversed, left and right turns swapped).
+observation's right-hand numbers negated, the rays reversed, left and right turns swapped). --repeat weights training
+sessions by repeating their windows (10,11,12:3: those three sessions count three times).
 
 Prints held-out accuracy per choice (and the share of the most common choice, for scale) as training goes, and the
 starting network's (with --init) before any.
@@ -90,6 +91,8 @@ def main():
     p.add_argument("--lr", type=float, default=3e-4)
     p.add_argument("--fraction", type=float, default=1.0)
     p.add_argument("--mirror", action="store_true")
+    p.add_argument("--repeat", default="", help="training sessions to count more than once, by index, and how many "
+                   "times: 10,11,12:3")
     p.add_argument("--seed", type=int, default=1)
     args = p.parse_args()
     torch.manual_seed(args.seed)
@@ -103,6 +106,9 @@ def main():
     obs, choices, session, ticks = map(np.concatenate, (obs, choices, session, ticks))
     test = [] if args.test == "none" else [int(s) for s in args.test.split(",")]
     train = [s for s in range(offset) if s not in test]
+    if args.repeat:
+        sessions, _, times = args.repeat.partition(":")
+        train += [int(s) for s in sessions.split(",") if int(s) in train] * (int(times or 2) - 1)
     x, y, m = windows(obs, choices, session, ticks, train, args.window, args.fraction)
     if args.mirror:
         mx, my = mirror(x.numpy(), y.numpy())

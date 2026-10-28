@@ -8,14 +8,15 @@ of them until checkpoints exist), which keeps self-play honest against close-ran
 the aiming drills (DRILLS): a still target, a drifting one, then the aimer, each until it wins 80% (--no-drills skips). The policy
 sees only the fair observation (duelsim.DuelEnv.fair: 150 ms old, what a player could see) and chooses turn, thrust
 and fire ten times a second. The network: two layers of 256, a 256-unit GRU, a value head and three action heads.
---league-fixed keeps earlier runs' networks in the league for good, so the learner keeps beating old styles.
+--league-fixed keeps earlier runs' networks in the league for good, so the learner keeps beating old styles (each
+picked in proportion to its weight, path:weight, 1 by default).
 Every --eval-every iterations it plays the scripted aimer for a score that doesn't drift with the league.
 With --dial (ticket 50), an aggression dial is an extra input, and the reward charges range and reversing and pays
 for bullets in proportion to it.
 With --clone (ticket 46's second stage), a network cloned from the player's recordings (clone.py) is an opponent for
 --clone-share of the league's episodes, and with --clone-kl the learner is held near it: the loss adds that times the
-KL divergence from the clone's choices to the learner's (or the reverse, --clone-kl-reverse; over --clone-kl-choices), on
-the learner's own observations.
+KL divergence from the clone's choices to the learner's (or the reverse, --clone-kl-reverse; over --clone-kl-choices,
+each weighted, name:weight), on the learner's own observations.
 """
 import argparse
 import collections
@@ -340,7 +341,8 @@ def main():
                    "times its energy as a share of full energy (0.5: about 0.018 a bullet, 0.10 a bomb)")
     p.add_argument("--eval-dials", default="0,1", help="with --dial: the dials the bot evaluations play at")
     p.add_argument("--league-fixed", default="", help="earlier runs' networks kept in the league for good, comma-separated "
-                   "(with or without the dial), so the learner keeps beating old styles: runs/v6-panel/final.pt,...")
+                   "(with or without the dial), so the learner keeps beating old styles: runs/v6-panel/final.pt,...; path:weight "
+                   "plays one more often (weights 1 by default)")
     p.add_argument("--league-fixed-share", type=float, default=0.3, help="with --league-fixed: the share of the league's "
                    "random-checkpoint episodes played against one of them")
     p.add_argument("--clone", default=None, help="ticket 46: a clone.py network of the player (no dial)")
@@ -348,7 +350,8 @@ def main():
                    "against it (sampling its choices, as a player varies)")
     p.add_argument("--clone-kl", type=float, default=0.0, help="with --clone: the loss adds this times KL(clone || "
                    "learner), summed over --clone-kl-choices, averaged over steps")
-    p.add_argument("--clone-kl-choices", default="turn,thrust,fire", help="the choices the KL counts (turn is aim)")
+    p.add_argument("--clone-kl-choices", default="turn,thrust,fire", help="the choices the KL counts (turn is aim), "
+                   "each optionally weighted, name:weight (fire:5 holds the firing five times as hard)")
     p.add_argument("--clone-kl-reverse", action="store_true", help="KL(learner || clone) instead: the learner may "
                    "settle on any of the clone's likely choices, rather than spreading over all of them as it does")
     p.add_argument("--no-drills", action="store_true", help="start in the league, without the aiming drills")
@@ -400,10 +403,12 @@ def main():
     clone = load_policy(args.clone, 0, device) if args.clone else None
     clone_h = clone.initial(args.envs) if clone else None
     clone_log = collections.Counter()  # ticket 46, for the log: the KL from the clone, and how often they'd agree
-    kl_choices = set(args.clone_kl_choices.split(","))
+    kl_weights = {name: float(w or 1) for name, _, w in (x.partition(":") for x in args.clone_kl_choices.split(","))}
     optimizer = torch.optim.Adam(policy.parameters(), lr=args.lr)
     league = []  # checkpoint paths
-    fixed = [x for x in args.league_fixed.split(",") if x]  # earlier runs' networks, always in the league
+    fixed_weighted = [x.partition(":") for x in args.league_fixed.split(",") if x]
+    fixed = [path for path, _, _ in fixed_weighted]  # earlier runs' networks, always in the league
+    fixed_weights = [float(w or 1) for _, _, w in fixed_weighted]
     fixed_names = {path: "fixed-" + Path(path).parent.name for path in fixed}
 
     n = args.envs
@@ -446,7 +451,7 @@ def main():
         if r < rest + 0.55 * (1 - rest):
             return "latest"
         if fixed and (not league or rng.random() < args.league_fixed_share):
-            return rng.choice(fixed)
+            return rng.choices(fixed, fixed_weights)[0]
         return rng.choice(league)
 
     # Each environment's opponent for its current episode: a drill, "scripted", "latest" or a checkpoint path.
@@ -619,13 +624,15 @@ def main():
                         lp = CL[:, sl, at:at + lg.shape[-1]]
                         at += lg.shape[-1]
                         agree = agree + (lg.argmax(-1) == lp.argmax(-1)).float().mean().item()
-                        if name not in kl_choices:
+                        if name not in kl_weights:
                             continue
                         lq = torch.log_softmax(lg, -1)
                         if args.clone_kl_reverse:
-                            kl = kl + (lq.exp() * (lq - lp)).sum(-1)
+                            part = (lq.exp() * (lq - lp)).sum(-1)
                         else:
-                            kl = kl + (lp.exp() * (lp - lq)).sum(-1)
+                            part = (lp.exp() * (lp - lq)).sum(-1)
+                        kl = kl + kl_weights[name] * part
+                        clone_log[f"kl_{name}"] += part.mean().item()
                     loss = loss + args.clone_kl * kl.mean()
                     clone_log["kl"] += kl.mean().item()
                     clone_log["agree"] += agree / len(logits)
@@ -654,7 +661,9 @@ def main():
         energy_log.clear()
         if clone_log["chunks"]:
             record["clone"] = {"kl": round(clone_log["kl"] / clone_log["chunks"], 3),
-                               "agree": round(clone_log["agree"] / clone_log["chunks"], 3)}
+                               "agree": round(clone_log["agree"] / clone_log["chunks"], 3),
+                               **{k: round(clone_log[k] / clone_log["chunks"], 3) for k in clone_log
+                                  if k.startswith("kl_")}}
         clone_log.clear()
         bot_kinds = tuple(bot_names) if bot_count else ()
         for kind in ("still", "drift") + tuple(SCRIPTED) + bot_kinds + ("clone", "latest", "league") + tuple(fixed):

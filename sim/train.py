@@ -476,6 +476,9 @@ def main():
         return league_nets[kind]
 
     log = open(out / "log.jsonl", "a")
+    # The run's settings first, so a log says how it was trained (a record without "steps").
+    log.write(json.dumps({"settings": vars(args), "started": time.strftime("%Y-%m-%d %H:%M:%S")}) + "\n")
+    log.flush()
     total = 0
     iteration = 0
     episode_rewards, results = [], []

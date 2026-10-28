@@ -9,7 +9,8 @@ the aiming drills (DRILLS): a still target, a drifting one, then the aimer, each
 sees only the fair observation (duelsim.DuelEnv.fair: 150 ms old, what a player could see) and chooses turn, thrust
 and fire ten times a second. The network: two layers of 256, a 256-unit GRU, a value head and three action heads.
 --league-fixed keeps earlier runs' networks in the league for good, so the learner keeps beating old styles (each
-picked in proportion to its weight, path:weight, 1 by default).
+picked in proportion to its weight, path:weight, 1 by default); with --league-fixed-greedy they play their likeliest
+choices, as they're judged head to head, rather than sampling.
 Every --eval-every iterations it plays the scripted aimer for a score that doesn't drift with the league.
 With --dial (ticket 50), an aggression dial is an extra input, and the reward charges range and reversing and pays
 for bullets in proportion to it.
@@ -345,6 +346,10 @@ def main():
                    "plays one more often (weights 1 by default)")
     p.add_argument("--league-fixed-share", type=float, default=0.3, help="with --league-fixed: the share of the league's "
                    "random-checkpoint episodes played against one of them")
+    p.add_argument("--league-fixed-greedy", action="store_true", help="the --league-fixed networks play their likeliest "
+                   "choices rather than sampling (sampled, v6 is far weaker than greedy)")
+    p.add_argument("--low-energy-cost", type=float, default=0.0, help="ticket 46: each step the learner is below half "
+                   "energy costs this times its shortfall from half, as a share of half (1 at empty)")
     p.add_argument("--clone", default=None, help="ticket 46: a clone.py network of the player (no dial)")
     p.add_argument("--clone-share", type=float, default=0.0, help="with --clone: the share of the league's episodes "
                    "against it (sampling its choices, as a player varies)")
@@ -510,7 +515,7 @@ def main():
                 else:
                     net = opponent_net(k)
                     c, _, _, nh = act(net, with_dial(opp_obs[idx], opp_dial[idx] if net.extra else None),
-                                      opp_h[:, idx], starts[idx])
+                                      opp_h[:, idx], starts[idx], greedy=args.league_fixed_greedy and k in fixed)
                     opp_h[:, idx] = nh
                     for j, row in zip(idx, c.tolist()):
                         opp_choice[j] = tuple(row)
@@ -529,6 +534,7 @@ def main():
                 # Ticket 51: each shot fired costs a share of its energy, so a shot pays only when it's likely to hit.
                 spent = sum(x["share"] for x in info["shots"] if x["side"] == 0)
                 ra -= args.shot_cost * spent
+                ra -= args.low_energy_cost * max(0.0, 0.5 - float(rows[i][4])) / 0.5
                 energy_log["steps"] += 1
                 energy_log["below_half"] += rows[i][4] < 0.5
                 fired = sum(1 for x in info["shots"] if x["side"] == 0)

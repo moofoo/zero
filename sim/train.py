@@ -8,6 +8,7 @@ of them until checkpoints exist), which keeps self-play honest against close-ran
 the aiming drills (DRILLS): a still target, a drifting one, then the aimer, each until it wins 80% (--no-drills skips). The policy
 sees only the fair observation (duelsim.DuelEnv.fair: 150 ms old, what a player could see) and chooses turn, thrust
 and fire ten times a second. The network: two layers of 256, a 256-unit GRU, a value head and three action heads.
+--league-fixed keeps earlier runs' networks in the league for good, so the learner keeps beating old styles.
 Every --eval-every iterations it plays the scripted aimer for a score that doesn't drift with the league.
 With --dial (ticket 50), an aggression dial is an extra input, and the reward charges range and reversing and pays
 for bullets in proportion to it.
@@ -338,6 +339,10 @@ def main():
     p.add_argument("--shot-cost", type=float, default=0.0, help="ticket 51: each shot the learner fires costs this "
                    "times its energy as a share of full energy (0.5: about 0.018 a bullet, 0.10 a bomb)")
     p.add_argument("--eval-dials", default="0,1", help="with --dial: the dials the bot evaluations play at")
+    p.add_argument("--league-fixed", default="", help="earlier runs' networks kept in the league for good, comma-separated "
+                   "(with or without the dial), so the learner keeps beating old styles: runs/v6-panel/final.pt,...")
+    p.add_argument("--league-fixed-share", type=float, default=0.3, help="with --league-fixed: the share of the league's "
+                   "random-checkpoint episodes played against one of them")
     p.add_argument("--clone", default=None, help="ticket 46: a clone.py network of the player (no dial)")
     p.add_argument("--clone-share", type=float, default=0.0, help="with --clone: the share of the league's episodes "
                    "against it (sampling its choices, as a player varies)")
@@ -398,6 +403,8 @@ def main():
     kl_choices = set(args.clone_kl_choices.split(","))
     optimizer = torch.optim.Adam(policy.parameters(), lr=args.lr)
     league = []  # checkpoint paths
+    fixed = [x for x in args.league_fixed.split(",") if x]  # earlier runs' networks, always in the league
+    fixed_names = {path: "fixed-" + Path(path).parent.name for path in fixed}
 
     n = args.envs
     kinds_scripted = args.scripted_kinds.split(",")
@@ -430,13 +437,17 @@ def main():
         if stage < len(DRILLS):
             return DRILLS[stage]
         r = rng.random()
-        if not league or r < args.scripted_share:
+        if not (league or fixed) or r < args.scripted_share:
             return rng.choice(kinds_scripted)
         if clone is not None and r < args.scripted_share + args.clone_share:
             return "clone"
-        # The rest: a bit over half against the latest, the others against a random checkpoint.
+        # The rest: a bit over half against the latest, the others against a random checkpoint or a fixed network.
         rest = args.scripted_share + (args.clone_share if clone is not None else 0.0)
-        return "latest" if r < rest + 0.55 * (1 - rest) else rng.choice(league)
+        if r < rest + 0.55 * (1 - rest):
+            return "latest"
+        if fixed and (not league or rng.random() < args.league_fixed_share):
+            return rng.choice(fixed)
+        return rng.choice(league)
 
     # Each environment's opponent for its current episode: a drill, "scripted", "latest" or a checkpoint path.
     kinds = [pick_opponent(i) for i in range(n)]
@@ -446,6 +457,8 @@ def main():
             return opponent
         if kind == "clone":
             return clone
+        if kind in fixed and kind not in league_nets:
+            league_nets[kind] = load_policy(kind, device=device)  # its own inputs: a policy from before the dial has none
         if kind not in league_nets:
             net = Policy(size, extra=extra)
             net.load_state_dict(torch.load(kind, map_location=device, weights_only=True))
@@ -644,13 +657,14 @@ def main():
                                "agree": round(clone_log["agree"] / clone_log["chunks"], 3)}
         clone_log.clear()
         bot_kinds = tuple(bot_names) if bot_count else ()
-        for kind in ("still", "drift") + tuple(SCRIPTED) + bot_kinds + ("clone", "latest", "league"):
+        for kind in ("still", "drift") + tuple(SCRIPTED) + bot_kinds + ("clone", "latest", "league") + tuple(fixed):
             rs = [r for r in results[-300:]
                   if (r[0] == kind if kind != "league"
-                      else r[0] not in DRILLS + tuple(SCRIPTED) + ("clone", "latest") + bot_kinds)]
+                      else r[0] not in DRILLS + tuple(SCRIPTED) + ("clone", "latest") + bot_kinds + tuple(fixed))]
             if rs:
-                record[f"vs_{kind}"] = {"episodes": len(rs), "won": round(sum(r[1] for r in rs) / len(rs), 2),
-                                        "lost": round(sum(r[2] for r in rs) / len(rs), 2)}
+                record[f"vs_{fixed_names.get(kind, kind)}"] = {
+                    "episodes": len(rs), "won": round(sum(r[1] for r in rs) / len(rs), 2),
+                    "lost": round(sum(r[2] for r in rs) / len(rs), 2)}
         if iteration % args.eval_every == 0:
             w, l, d = evaluate(policy, eval_envs, args.eval_episodes, rng)
             wd, ld, dd = evaluate(policy, eval_envs, args.eval_episodes, rng, dodge=True)

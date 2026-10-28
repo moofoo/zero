@@ -4,7 +4,8 @@
 
 Greedy play, one game a life, sides swapped every game (spawns 20 to 56 tiles apart). Each policy plays at --dial if it
 has one. Prints wins, losses and draws for the first, its kill share with a 95% interval, and each side's bombs a
-minute.
+minute; then for each, as style.py measures it: bullets and bombs fired a minute and the share of each that hit, the
+time spent below half energy and the damage taken a minute.
 """
 import argparse
 import collections
@@ -40,7 +41,9 @@ def main():
         while not done:
             chosen = [None, None]
             for k, net in enumerate(nets):
-                x = torch.from_numpy(env.fair_array(sides[k])).unsqueeze(0)
+                o = env.fair_array(sides[k])
+                s[f"below_half_{k}"] += o[7] > 0.5 and o[4] < 0.5
+                x = torch.from_numpy(o).unsqueeze(0)
                 if net.extra:
                     x = torch.cat([x, torch.full((1, 1), args.dial)], 1)
                 c, _, _, hs[k] = act(net, x, hs[k], starts, greedy=True)
@@ -49,8 +52,12 @@ def main():
             _, _, _, done, info = env.step(chosen[0], chosen[1])
             s["steps"] += 1
             for shot in info["shots"]:
-                if shot["class"] == "bomb":
-                    s[f"bombs_{sides.index(shot['side'])}"] += 1
+                s[f"{shot['class']}s_{sides.index(shot['side'])}"] += 1
+            for hit in info["hits"]:
+                k = sides.index(hit["side"])  # the side hit
+                s[f"taken_{k}"] += hit["damage"]
+                if not hit["own"]:
+                    s[f"landed_{hit['class']}_{1 - k}"] += 1
         dead = {sides.index(d["side"]) for d in info["deaths"]}
         s["won" if dead == {1} else "lost" if dead == {0} else "draw"] += 1
     kills = s["won"] + s["lost"]
@@ -60,6 +67,11 @@ def main():
     print(f"{args.a} against {args.b}: won {s['won']} lost {s['lost']} draw {s['draw']}, kill share {share:.2f} "
           f"[{max(share - half, 0):.2f}-{min(share + half, 1):.2f}]; bombs a minute {s['bombs_0'] / minutes:.1f} "
           f"against {s['bombs_1'] / minutes:.1f}; {minutes:.1f} min")
+    for k, name in enumerate((args.a, args.b)):
+        print(f"  {name}: bullets {s[f'bullets_{k}'] / minutes:.1f} a minute hitting "
+              f"{s[f'landed_bullet_{k}'] / max(s[f'bullets_{k}'], 1):.2f}, bombs {s[f'bombs_{k}'] / minutes:.1f} hitting "
+              f"{s[f'landed_bomb_{k}'] / max(s[f'bombs_{k}'], 1):.2f}; below half energy "
+              f"{s[f'below_half_{k}'] / s['steps']:.2f} of the time; damage taken {s[f'taken_{k}'] / minutes:.0f} a minute")
 
 
 if __name__ == "__main__":

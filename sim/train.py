@@ -18,6 +18,8 @@ With --clone (ticket 46's second stage), a network cloned from the player's reco
 --clone-share of the league's episodes, and with --clone-kl the learner is held near it: the loss adds that times the
 KL divergence from the clone's choices to the learner's (or the reverse, --clone-kl-reverse; over --clone-kl-choices,
 each weighted, name:weight), on the learner's own observations.
+--idle-cost charges each step after --idle-grace seconds without landing damage: stalling costs, a lure that pays off
+doesn't. --low-energy-cost charges time below half energy.
 """
 import argparse
 import collections
@@ -350,6 +352,11 @@ def main():
                    "choices rather than sampling (sampled, v6 is far weaker than greedy)")
     p.add_argument("--low-energy-cost", type=float, default=0.0, help="ticket 46: each step the learner is below half "
                    "energy costs this times its shortfall from half, as a share of half (1 at empty)")
+    p.add_argument("--idle-cost", type=float, default=0.0, help="ticket 46: each step more than --idle-grace seconds "
+                   "since the learner last landed damage (or since the episode began) costs this: a charge for stalling, "
+                   "not for a lure that pays off")
+    p.add_argument("--idle-grace", type=float, default=5.0, help="with --idle-cost: seconds without landing damage "
+                   "before it starts")
     p.add_argument("--clone", default=None, help="ticket 46: a clone.py network of the player (no dial)")
     p.add_argument("--clone-share", type=float, default=0.0, help="with --clone: the share of the league's episodes "
                    "against it (sampling its choices, as a player varies)")
@@ -483,6 +490,7 @@ def main():
     iteration = 0
     episode_rewards, results = [], []
     running = [0.0] * n
+    idle = [0] * n  # steps since the learner last landed damage, for --idle-cost
     started = time.time()
     while total < args.steps:
         iteration += 1
@@ -538,6 +546,11 @@ def main():
                 spent = sum(x["share"] for x in info["shots"] if x["side"] == 0)
                 ra -= args.shot_cost * spent
                 ra -= args.low_energy_cost * max(0.0, 0.5 - float(rows[i][4])) / 0.5
+                landed = any(x["side"] == 1 and not x["own"] for x in info["hits"])
+                idle[i] = 0 if landed or done else idle[i] + 1
+                if idle[i] > args.idle_grace * 10:
+                    ra -= args.idle_cost
+                energy_log["idle"] += idle[i] > args.idle_grace * 10
                 energy_log["steps"] += 1
                 energy_log["below_half"] += rows[i][4] < 0.5
                 fired = sum(1 for x in info["shots"] if x["side"] == 0)
@@ -666,7 +679,8 @@ def main():
         if energy_log["steps"]:
             record["energy"] = {"below_half": round(energy_log["below_half"] / energy_log["steps"], 3),
                                 "shots_a_minute": round(600 * energy_log["shots"] / energy_log["steps"], 1),
-                                "shots_below_half": round(energy_log["shots_below_half"] / max(energy_log["shots"], 1), 3)}
+                                "shots_below_half": round(energy_log["shots_below_half"] / max(energy_log["shots"], 1), 3),
+                                "idle": round(energy_log["idle"] / energy_log["steps"], 3)}
         energy_log.clear()
         if clone_log["chunks"]:
             record["clone"] = {"kl": round(clone_log["kl"] / clone_log["chunks"], 3),

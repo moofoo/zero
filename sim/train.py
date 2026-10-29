@@ -10,7 +10,8 @@ sees only the fair observation (duelsim.DuelEnv.fair: 150 ms old, what a player 
 and fire ten times a second. The network: two layers of 256, a 256-unit GRU, a value head and three action heads.
 --league-fixed keeps earlier runs' networks in the league for good, so the learner keeps beating old styles (each
 picked in proportion to its weight, path:weight, 1 by default); with --league-fixed-greedy they play their likeliest
-choices, as they're judged head to head, rather than sampling.
+choices, as they're judged head to head, rather than sampling; --focus plays one of them for --focus-share of the
+league's episodes outright.
 Every --eval-every iterations it plays the scripted aimer for a score that doesn't drift with the league.
 With --dial (ticket 50), an aggression dial is an extra input, and the reward charges range and reversing and pays
 for bullets in proportion to it.
@@ -348,6 +349,9 @@ def main():
                    "plays one more often (weights 1 by default)")
     p.add_argument("--league-fixed-share", type=float, default=0.3, help="with --league-fixed: the share of the league's "
                    "random-checkpoint episodes played against one of them")
+    p.add_argument("--focus", default=None, help="ticket 46: one of the --league-fixed networks played for "
+                   "--focus-share of the league's episodes outright (v6, the patient opponent the league lacks)")
+    p.add_argument("--focus-share", type=float, default=0.0)
     p.add_argument("--league-fixed-greedy", action="store_true", help="the --league-fixed networks play their likeliest "
                    "choices rather than sampling (sampled, v6 is far weaker than greedy)")
     p.add_argument("--low-energy-cost", type=float, default=0.0, help="ticket 46: each step the learner is below half "
@@ -424,6 +428,8 @@ def main():
     fixed_weighted = [x.partition(":") for x in args.league_fixed.split(",") if x]
     fixed = [path for path, _, _ in fixed_weighted]  # earlier runs' networks, always in the league
     fixed_weights = [float(w or 1) for _, _, w in fixed_weighted]
+    if args.focus and args.focus not in fixed:
+        raise SystemExit("--focus must be one of the --league-fixed networks")
     fixed_names = {path: "fixed-" + Path(path).parent.name for path in fixed}
 
     n = args.envs
@@ -461,8 +467,11 @@ def main():
             return rng.choice(kinds_scripted)
         if clone is not None and r < args.scripted_share + args.clone_share:
             return "clone"
-        # The rest: a bit over half against the latest, the others against a random checkpoint or a fixed network.
         rest = args.scripted_share + (args.clone_share if clone is not None else 0.0)
+        if args.focus and r < rest + args.focus_share:
+            return args.focus
+        rest += args.focus_share if args.focus else 0.0
+        # The rest: a bit over half against the latest, the others against a random checkpoint or a fixed network.
         if r < rest + 0.55 * (1 - rest):
             return "latest"
         if fixed and (not league or rng.random() < args.league_fixed_share):

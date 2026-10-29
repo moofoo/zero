@@ -11,7 +11,8 @@ and fire ten times a second. The network: two layers of 256, a 256-unit GRU, a v
 --league-fixed keeps earlier runs' networks in the league for good, so the learner keeps beating old styles (each
 picked in proportion to its weight, path:weight, 1 by default); with --league-fixed-greedy they play their likeliest
 choices, as they're judged head to head, rather than sampling; --focus plays one of them for --focus-share of the
-league's episodes outright.
+league's episodes outright. --pfsp picks among them by how often the learner loses to each (prioritized fictitious
+self-play, as AlphaStar's league did), so the styles it can't yet beat get the games.
 Every --eval-every iterations it plays the scripted aimer for a score that doesn't drift with the league.
 With --dial (ticket 50), an aggression dial is an extra input, and the reward charges range and reversing and pays
 for bullets in proportion to it.
@@ -352,6 +353,11 @@ def main():
     p.add_argument("--focus", default=None, help="ticket 46: one of the --league-fixed networks played for "
                    "--focus-share of the league's episodes outright (v6, the patient opponent the league lacks)")
     p.add_argument("--focus-share", type=float, default=0.0)
+    p.add_argument("--pfsp", type=float, default=0.0, help="ticket 46: pick among the --league-fixed networks in "
+                   "proportion to (1 - the learner's win rate against each) to this power, times its weight, rather than "
+                   "by weight alone (2: AlphaStar's; a network it always beats keeps a tenth of an even one's share)")
+    p.add_argument("--pfsp-window", type=int, default=100, help="with --pfsp: the episodes against each network its "
+                   "win rate is taken over")
     p.add_argument("--league-fixed-greedy", action="store_true", help="the --league-fixed networks play their likeliest "
                    "choices rather than sampling (sampled, v6 is far weaker than greedy)")
     p.add_argument("--low-energy-cost", type=float, default=0.0, help="ticket 46: each step the learner is below half "
@@ -431,6 +437,14 @@ def main():
     if args.focus and args.focus not in fixed:
         raise SystemExit("--focus must be one of the --league-fixed networks")
     fixed_names = {path: "fixed-" + Path(path).parent.name for path in fixed}
+    fixed_won = {path: collections.deque(maxlen=args.pfsp_window) for path in fixed}  # for --pfsp: the recent wins
+
+    def fixed_pick_weights():
+        if not args.pfsp:
+            return fixed_weights
+        # Even odds until a network has been played, and never below a tenth of an even network's share.
+        rates = [sum(fixed_won[k]) / len(fixed_won[k]) if fixed_won[k] else 0.5 for k in fixed]
+        return [w * max((1 - x) ** args.pfsp, 0.1 * 0.5 ** args.pfsp) for w, x in zip(fixed_weights, rates)]
 
     n = args.envs
     kinds_scripted = args.scripted_kinds.split(",")
@@ -475,7 +489,7 @@ def main():
         if r < rest + 0.55 * (1 - rest):
             return "latest"
         if fixed and (not league or rng.random() < args.league_fixed_share):
-            return rng.choices(fixed, fixed_weights)[0]
+            return rng.choices(fixed, fixed_pick_weights())[0]
         return rng.choice(league)
 
     # Each environment's opponent for its current episode: a drill, "scripted", "latest" or a checkpoint path.
@@ -578,6 +592,8 @@ def main():
                     dead = {d["side"] for d in info["deaths"]}
                     won = 1 in dead and 0 not in dead
                     results.append((kinds[i], won, 0 in dead and 1 not in dead))
+                    if kinds[i] in fixed_won:
+                        fixed_won[kinds[i]].append(won)
                     if stage < len(DRILLS) and kinds[i] == DRILLS[stage]:
                         stage_results.append(won)
                         recent = stage_results[-args.drill_window:]
@@ -710,6 +726,9 @@ def main():
                 record[f"vs_{fixed_names.get(kind, kind)}"] = {
                     "episodes": len(rs), "won": round(sum(r[1] for r in rs) / len(rs), 2),
                     "lost": round(sum(r[2] for r in rs) / len(rs), 2)}
+        if args.pfsp and fixed:
+            weights = fixed_pick_weights()
+            record["pfsp"] = {fixed_names[k]: round(w / sum(weights), 2) for k, w in zip(fixed, weights)}
         if iteration % args.eval_every == 0:
             w, l, d = evaluate(policy, eval_envs, args.eval_episodes, rng)
             wd, ld, dd = evaluate(policy, eval_envs, args.eval_episodes, rng, dodge=True)

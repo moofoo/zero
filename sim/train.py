@@ -22,6 +22,8 @@ KL divergence from the clone's choices to the learner's (or the reverse, --clone
 each weighted, name:weight), on the learner's own observations.
 --idle-cost charges each step after --idle-grace seconds without landing damage: stalling costs, a lure that pays off
 doesn't; in the red (--idle-red) it's off, as surviving comes first. --low-energy-cost charges time below half energy.
+--low-start starts a share of episodes with the learner low on energy and the opponent full, and --recover-bonus pays
+for getting from below 30% back to 60% alive: practice at getting away and recharging, which few episodes reach.
 """
 import argparse
 import collections
@@ -370,6 +372,10 @@ def main():
     p.add_argument("--idle-red", type=float, default=0.3, help="with --idle-cost: below this share of energy the "
                    "learner should be surviving, not dealing damage: no cost and the clock stops; the cost comes back "
                    "in full by half energy")
+    p.add_argument("--low-start", type=float, nargs=3, default=None, metavar=("SHARE", "LOW", "HIGH"), help="ticket 46: "
+                   "that share of episodes start the learner between LOW and HIGH of its maximum energy, the opponent full")
+    p.add_argument("--recover-bonus", type=float, default=0.0, help="ticket 46: paid each time the learner, having "
+                   "fallen below 30%% of its energy, gets back to 60%% alive")
     p.add_argument("--clone", default=None, help="ticket 46: a clone.py network of the player (no dial)")
     p.add_argument("--clone-share", type=float, default=0.0, help="with --clone: the share of the league's episodes "
                    "against it (sampling its choices, as a player varies)")
@@ -414,7 +420,8 @@ def main():
     envs = VecEnv(args.envs, workers=args.workers, seed=args.seed * 1000, map_dir=args.map_dir, bots=bot_count,
                   bot=bot_specs,
                   spawn_gap=tuple(args.spawn_gap), spawn_center=tuple(args.spawn_center),
-                  spawn_radius=args.spawn_radius, max_seconds=args.max_seconds)
+                  spawn_radius=args.spawn_radius, max_seconds=args.max_seconds,
+                  low_start=tuple(args.low_start) if args.low_start else None)
     eval_envs = VecEnv(8, seed=args.seed * 1000 + 500, map_dir=args.map_dir, max_seconds=args.max_seconds)
     eval_bot_envs = [VecEnv(4, seed=args.seed * 1000 + 700 + 10 * k, map_dir=args.map_dir, max_seconds=args.max_seconds,
                             spawn_gap=tuple(args.spawn_gap), spawn_center=tuple(args.spawn_center),
@@ -517,6 +524,7 @@ def main():
     episode_rewards, results = [], []
     running = [0.0] * n
     idle = [0] * n  # steps since the learner last landed damage, for --idle-cost
+    drained = [False] * n  # below 30% energy and not yet back to 60%, for --recover-bonus
     started = time.time()
     while total < args.steps:
         iteration += 1
@@ -578,6 +586,15 @@ def main():
                 if idle[i] > args.idle_grace * 10:
                     ra -= args.idle_cost * min(max((energy - args.idle_red) / max(0.5 - args.idle_red, 1e-6), 0.0), 1.0)
                 energy_log["idle"] += idle[i] > args.idle_grace * 10
+                if energy < 0.3 and not drained[i] and not done:
+                    drained[i] = True
+                    energy_log["drains"] += 1
+                elif energy >= 0.6 and drained[i] and not done:
+                    drained[i] = False
+                    ra += args.recover_bonus
+                    energy_log["recovered"] += 1
+                if done:
+                    drained[i] = False
                 energy_log["steps"] += 1
                 energy_log["below_half"] += rows[i][4] < 0.5
                 fired = sum(1 for x in info["shots"] if x["side"] == 0)
@@ -709,7 +726,9 @@ def main():
             record["energy"] = {"below_half": round(energy_log["below_half"] / energy_log["steps"], 3),
                                 "shots_a_minute": round(600 * energy_log["shots"] / energy_log["steps"], 1),
                                 "shots_below_half": round(energy_log["shots_below_half"] / max(energy_log["shots"], 1), 3),
-                                "idle": round(energy_log["idle"] / energy_log["steps"], 3)}
+                                "idle": round(energy_log["idle"] / energy_log["steps"], 3),
+                                "drains_a_minute": round(600 * energy_log["drains"] / energy_log["steps"], 2),
+                                "recovered": round(energy_log["recovered"] / max(energy_log["drains"], 1), 3)}
         energy_log.clear()
         if clone_log["chunks"]:
             record["clone"] = {"kl": round(clone_log["kl"] / clone_log["chunks"], 3),

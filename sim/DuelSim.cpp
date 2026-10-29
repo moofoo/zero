@@ -1029,6 +1029,14 @@ void ds_step(void* handle, unsigned int actions_a, unsigned int actions_b, int t
 
 void ds_seed(void* handle, unsigned int seed) { ((Env*)handle)->seed = seed; }
 
+// Sets a side's energy to `share` of its maximum, after ds_reset (bot-ai ticket 46: episodes that start in trouble).
+// Its own client holds it; the other side sees it as reported, with the next position packet.
+void ds_set_energy(void* handle, int side_index, float share) {
+  Game& g = *((Env*)handle)->sides[side_index].game;
+  Player* self = g.player_manager.GetSelf();
+  if (self) self->energy = share * (float)g.ship_controller.ship.energy;
+}
+
 // Where side 1's bot flies, with --behavior bench (the piloting test bench, ticket 45): the "bench_goal" position.
 void ds_bot_goal(void* handle, float x, float y) {
   Side& side = ((Env*)handle)->sides[1];

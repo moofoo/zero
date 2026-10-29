@@ -60,6 +60,7 @@ class _Lib:
             lib.ds_solid.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_int]
             lib.ds_seed.argtypes = [ctypes.c_void_p, ctypes.c_uint]
             lib.ds_ship_fields.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.POINTER(ctypes.c_uint)]
+            lib.ds_set_energy.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_float]
             lib.ds_bot_goal.argtypes = [ctypes.c_void_p, ctypes.c_float, ctypes.c_float]
             lib.ds_fair_size.restype = ctypes.c_int
             lib.ds_fair_observe.restype = ctypes.c_int
@@ -77,11 +78,14 @@ class DuelEnv:
     With `bot`, side 1 is a zero Chaos bot (ticket 45) and step()'s second action is ignored: bot={"skill": "veteran"},
     optionally "aggression" (default standard), "config" (a bot config; default chaos-offline's bots/chaos.cfg) and
     "args" (more of zero's command line).
+
+    With `low_start` (share, low, high), that share of episodes start side 0 between low and high of its maximum energy,
+    side 1 full (ticket 46: in trouble, where it has to get away and recharge).
     """
 
     def __init__(self, map_dir=None, captures=None, frame_skip=10, max_weapons=16, max_seconds=120.0,
                  kill_reward=1.0, spawn_center=(512.0, 512.0), spawn_radius=60.0, spawn_gap=(20.0, 40.0),
-                 seed=None, library=None, bot=None):
+                 seed=None, library=None, bot=None, low_start=None):
         self.lib = _Lib.get(library)
         self.frame_skip = frame_skip
         self.max_weapons = max_weapons
@@ -89,6 +93,7 @@ class DuelEnv:
         self.kill_reward = kill_reward
         self.spawn_center, self.spawn_radius, self.spawn_gap = spawn_center, spawn_radius, spawn_gap
         self.random = random.Random(seed)
+        self.low_start = low_start
         map_dir = Path(map_dir or Path.home() / "newcode/chaos-offline/work/bots")
         a, b = captures or (HERE / "data" / "duelbox_a.cap", HERE / "data" / "duelbox_b.cap")
         here = os.getcwd()
@@ -194,6 +199,8 @@ class DuelEnv:
     def reset(self, spawns=None):
         (ax, ay, ao), (bx, by, bo) = spawns or self._spawns()
         self.lib.ds_reset(self.handle, ax, ay, ao, bx, by, bo)
+        if self.low_start and self.random.random() < self.low_start[0]:
+            self.lib.ds_set_energy(self.handle, 0, self.random.uniform(*self.low_start[1:]))
         self.lib.ds_step(self.handle, 0, 0, 20)  # let each client hear where the other is, and fill the delay
         self.lib.ds_happenings(self.handle, self._events, 256)  # drop what the respawn caused
         self.ticks = 0

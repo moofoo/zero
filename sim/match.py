@@ -5,7 +5,8 @@
 Greedy play, one game a life, sides swapped every game (spawns 20 to 56 tiles apart). Each policy plays at --dial if it
 has one. Prints wins, losses and draws for the first, its kill share with a 95% interval, and each side's bombs a
 minute; then for each, as style.py measures it: bullets and bombs fired a minute and the share of each that hit, the
-time spent below half energy and the damage taken a minute.
+time spent below half energy and the damage taken a minute; and its drains below 30% energy a minute, with the share it
+got back to 60% from and the share it died in (ticket 46: energy management).
 """
 import argparse
 import collections
@@ -37,12 +38,19 @@ def main():
         sides = [0, 1] if game % 2 == 0 else [1, 0]  # sides[k]: the env side policy k flies
         hs = [net.initial(1) for net in nets]
         starts = torch.ones(1)
+        drained = [False, False]
         done = False
         while not done:
             chosen = [None, None]
             for k, net in enumerate(nets):
                 o = env.fair_array(sides[k])
                 s[f"below_half_{k}"] += o[7] > 0.5 and o[4] < 0.5
+                if o[7] > 0.5 and o[4] < 0.3 and not drained[k]:
+                    drained[k] = True
+                    s[f"drains_{k}"] += 1
+                elif o[4] >= 0.6 and drained[k]:
+                    drained[k] = False
+                    s[f"recovered_{k}"] += 1
                 x = torch.from_numpy(o).unsqueeze(0)
                 if net.extra:
                     x = torch.cat([x, torch.full((1, 1), args.dial)], 1)
@@ -59,6 +67,8 @@ def main():
                 if not hit["own"]:
                     s[f"landed_{hit['class']}_{1 - k}"] += 1
         dead = {sides.index(d["side"]) for d in info["deaths"]}
+        for k in dead:
+            s[f"died_drained_{k}"] += drained[k]
         s["won" if dead == {1} else "lost" if dead == {0} else "draw"] += 1
     kills = s["won"] + s["lost"]
     share = s["won"] / max(kills, 1)
@@ -71,7 +81,9 @@ def main():
         print(f"  {name}: bullets {s[f'bullets_{k}'] / minutes:.1f} a minute hitting "
               f"{s[f'landed_bullet_{k}'] / max(s[f'bullets_{k}'], 1):.2f}, bombs {s[f'bombs_{k}'] / minutes:.1f} hitting "
               f"{s[f'landed_bomb_{k}'] / max(s[f'bombs_{k}'], 1):.2f}; below half energy "
-              f"{s[f'below_half_{k}'] / s['steps']:.2f} of the time; damage taken {s[f'taken_{k}'] / minutes:.0f} a minute")
+              f"{s[f'below_half_{k}'] / s['steps']:.2f} of the time; damage taken {s[f'taken_{k}'] / minutes:.0f} a minute; drains below 30% "
+              f"{s[f'drains_{k}'] / minutes:.1f} a minute, recovered from {s[f'recovered_{k}'] / max(s[f'drains_{k}'], 1):.2f}, "
+              f"died in {s[f'died_drained_{k}'] / max(s[f'drains_{k}'], 1):.2f}")
 
 
 if __name__ == "__main__":

@@ -102,13 +102,20 @@ class ScriptedAimer:
     TURN_RATE = 0.45
     TURN_AMOUNT = (-1.0, -0.3, 0.0, 0.3, 1.0)  # each turn choice's share of a full step's turn
     BULLET_SPEED = 12.5  # tiles a second, the Warbird's in the duel profile
+    BOMB_SPEED = 10.0  # measured in the duel simulator
     DODGE_SECONDS, DODGE_TILES = 3.0, 7.0  # with dodge, bombs passing this near this soon are dodged
 
     # Styles: "hold" keeps about 12 tiles; "rush" closes to point-blank and fires bullets, as Veteran does when it
     # commits; "retreat" holds but, below half energy, turns and flies off until it has recharged, then comes back;
     # "punish" (ticket 51) holds, and rushes while its target's energy (target_energy, set by the caller each step
-    # from the target's own view: what a player would infer from the shots it fired) is below PUNISH_ENERGY.
+    # from the target's own view: what a player would infer from the shots it fired) is below PUNISH_ENERGY;
+    # "hunt" (ticket 46, the dodging drill) bombs from HUNT_RANGE tiles with its lead worked out for bombs, and while
+    # its target is below PUNISH_ENERGY closes to HUNT_CLOSE and bombs more readily: the finish a drained learner
+    # meets from the user (whose bombs hit 0.75), and that no other opponent gives it. It fires only when a bomb along
+    # its heading as it is now would pass within HUNT_MISS tiles of where the target is going (the headings are 9
+    # degrees apart, so lined up to the nearest one can miss by more than a tile at range).
     PUNISH_ENERGY = 0.4
+    HUNT_RANGE, HUNT_CLOSE, HUNT_MISS = 18.0, 10.0, 0.8
 
     def __init__(self, rng, dodge=False, style="hold"):
         self.rng = rng
@@ -168,7 +175,8 @@ class ScriptedAimer:
         # Where the enemy is now (the view is 0.15 s old), then where a bullet meets it: bullets carry the ship's own
         # velocity, so the lead is on the velocity relative to the ship.
         px, py = dx + dvx * 0.15, dy + dvy * 0.15
-        a = dvx * dvx + dvy * dvy - self.BULLET_SPEED ** 2
+        hunting = self.style == "hunt"
+        a = dvx * dvx + dvy * dvy - (self.BOMB_SPEED if hunting else self.BULLET_SPEED) ** 2
         b = 2.0 * (px * dvx + py * dvy)
         c = px * px + py * py
         disc = b * b - 4.0 * a * c
@@ -195,6 +203,28 @@ class ScriptedAimer:
         if self.fleeing:
             return turn, (0 if abs(angle) < 1.0 else 1), 0
         rushing = self.style == "rush" or (self.style == "punish" and self.target_energy < self.PUNISH_ENERGY)
+        if hunting:
+            finishing = self.target_energy < self.PUNISH_ENERGY
+            hold = self.HUNT_CLOSE if finishing else self.HUNT_RANGE
+            if dist > hold + 4:
+                thrust = 0 if closing < 8 else 1
+            elif dist < hold - 4 or closing > 4:
+                thrust = 2
+            else:
+                thrust = 1
+            # Where the target goes, in the frame of the heading as it is now (allowing for the turns not yet seen):
+            # a bomb flies along x at BOMB_SPEED relative to the ship.
+            lag = -self.TURN_RATE * (self.turns[1] + 0.5 * self.turns[0])
+            cos, sin = math.cos(lag), math.sin(lag)
+            qx, qy = dx + dvx * 0.15, dy + dvy * 0.15
+            qx, qy = qx * cos - qy * sin, qx * sin + qy * cos
+            wx, wy = dvx * cos - dvy * sin - self.BOMB_SPEED, dvx * sin + dvy * cos
+            t = max(-(qx * wx + qy * wy) / (wx * wx + wy * wy or 1.0), 0.0)
+            miss = math.hypot(qx + wx * t, qy + wy * t)
+            fire = 0
+            if miss < self.HUNT_MISS and dist > 5 and qx > 0:
+                fire = 2 if finishing or rng.random() < 0.5 else 0
+            return turn, thrust, fire
         if rushing:
             thrust = 2 if dist < 2 else (0 if dist > 4 and closing < 12 else 1)
         elif dist > 18:
@@ -232,7 +262,7 @@ class Drifter:
 # to the league.
 DRILLS = ("still", "drift", "scripted")
 # The scripted opponents a run can include (--scripted-kinds), by their ScriptedAimer style.
-SCRIPTED = {"scripted": "hold", "rusher": "rush", "retreater": "retreat", "punisher": "punish"}
+SCRIPTED = {"scripted": "hold", "rusher": "rush", "retreater": "retreat", "punisher": "punish", "hunter": "hunt"}
 
 
 def batch(arrays):

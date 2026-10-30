@@ -5,6 +5,7 @@
 #include <zero/game/Clock.h>
 #include <zero/game/Game.h>
 #include <zero/policy/DuelPolicy.h>
+#include <zero/zones/chaos/EnergyEstimate.h>
 
 #include <cmath>
 
@@ -46,22 +47,27 @@ ExecuteResult PolicyCombatNode::Execute(ExecuteContext& ctx) {
   active = true, target_id = target->id, last_tick = tick;
 
   if (history.empty() || TICK_DIFF(tick, history.back().first) >= (s32)kObsEvery) {
-    std::vector<float> obs(kFairSize);
+    std::vector<float> obs(kFairSize + 2, 0.0f);
     FairObserve(game, target->id, tick, obs.data());
+    if (estimate) estimate->PolicyInputs(*target, obs.data() + kFairSize);
     history.push_back({tick, std::move(obs)});
     while (history.size() > 16) history.pop_front();
   }
 
   if (TICK_DIFF(tick, decision_tick) >= (s32)kStepTicks) {
     // The latest observation at least the reaction delay old; none yet is all zeros, as in the simulator.
-    std::vector<float> obs(kFairSize, 0.0f);
+    std::vector<float> seen(kFairSize + 2, 0.0f);
     for (auto it = history.rbegin(); it != history.rend(); ++it) {
       if (TICK_DIFF(tick, it->first) >= (s32)kObsDelayTicks) {
-        obs = it->second;
+        seen = it->second;
         break;
       }
     }
-    obs.resize(policy->obs_size, aggression);  // a dial policy's extra input (train.py --dial)
+    // The observation, then a policy's extra inputs: the dial (train.py --dial), then the estimate (--estimate).
+    std::vector<float> obs(seen.begin(), seen.begin() + kFairSize);
+    obs.push_back(aggression);
+    obs.insert(obs.end(), seen.begin() + kFairSize, seen.end());
+    obs.resize(policy->obs_size, 0.0f);
     float logits[DuelPolicy::kLogits];
     policy->Step(obs.data(), state.data(), logits);
     DuelPolicy::Greedy(logits, choice);

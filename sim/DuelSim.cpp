@@ -26,6 +26,7 @@
 #include <zero/policy/DuelPolicy.h>
 #include <zero/zones/ZoneController.h>
 #include <zero/zones/chaos/Chaos.h>
+#include <zero/zones/chaos/EnergyEstimate.h>
 #include <zero/Seed.h>
 #include <zero/policy/FairObservation.h>
 
@@ -107,6 +108,9 @@ struct Side {
   std::unique_ptr<ZoneController> controller;
   std::vector<std::string> bot_argv;
   u32 bot_seed = 0;  // the next seed for the bot's random generators (ChaosRandom.h)
+  // A side without a bot: what it knows of the opponent's energy (ticket 46), as a policy in zero sees it, noticing
+  // every shot and hit on its screen (the policy skill's Awareness, 1).
+  std::unique_ptr<chaos::EnergyEstimate> estimate;
 };
 
 // Runs `work` in the side's event scope with the bot's seeds, then back to scope 0.
@@ -866,7 +870,8 @@ struct Env {
   // zero draws hit outcomes (a prize lost to damage) from the C library's rand(), one sequence for the process. Each
   // tick reseeds it from this and the tick, so an environment plays the same whatever else shares its process.
   u32 seed = 0;
-  // Fair observations kept every kObsEvery ticks, per side: (tick, observation), the latest last.
+  // Fair observations kept every kObsEvery ticks, per side: (tick, observation and the opponent's energy estimate,
+  // kFairSize + 2), the latest last.
   std::deque<std::pair<u32, std::vector<float>>> fair[2];
   struct Happening {
     int kind;  // 0 a hit taken, 1 a death, 2 a hit taken from one's own weapon, 3 a shot fired (ticket 51)
@@ -963,6 +968,12 @@ void* ds_create_bot(const char* capture_a, const char* capture_b, const char* bo
     env->sides[1].bot_seed = seed * 7919u + 1;
   }
   if (!SetupSide(env->sides[0], a, env->tick) || !SetupSide(env->sides[1], b, env->tick)) return nullptr;
+  for (Side& side : env->sides) {
+    if (side.bot) continue;
+    InScope(side, [&] {
+      side.estimate = std::make_unique<chaos::EnergyEstimate>(*side.game, 1.0f, Vector2f(kScreenX, kScreenY));
+    });
+  }
   env->relay.outbox.clear();
   envs.push_back(env);
   return env;
@@ -993,6 +1004,10 @@ void ds_reset(void* handle, float ax, float ay, float a_orientation, float bx, f
   env.happenings.clear();
   env.fair[0].clear();
   env.fair[1].clear();
+  for (int i = 0; i < 2; ++i) {
+    Player* other = env.sides[i].game->player_manager.GetPlayerById(env.sides[1 - i].pid);
+    if (env.sides[i].estimate && other) env.sides[i].estimate->Forget(*other);
+  }
 }
 
 // Steps `ticks` ticks (10 ms each) with each side's held actions (InputAction bits).
@@ -1018,8 +1033,10 @@ void ds_step(void* handle, unsigned int actions_a, unsigned int actions_b, int t
     Deliver(env);
     if (env.tick % kObsEvery == 0) {
       for (int i = 0; i < 2; ++i) {
-        std::vector<float> o(kFairSize);
+        std::vector<float> o(kFairSize + 2, 0.0f);
         FairObserve(*env.sides[i].game, env.sides[1 - i].pid, env.tick, o.data());
+        Player* other = env.sides[i].game->player_manager.GetPlayerById(env.sides[1 - i].pid);
+        if (env.sides[i].estimate && other) env.sides[i].estimate->PolicyInputs(*other, o.data() + kFairSize);
         env.fair[i].push_back({env.tick, std::move(o)});
         while (env.fair[i].size() > 16) env.fair[i].pop_front();
       }
@@ -1065,7 +1082,23 @@ int ds_fair_observe(void* handle, int side_index, float* out) {
   const auto& history = env.fair[side_index];
   for (auto it = history.rbegin(); it != history.rend(); ++it) {
     if (TICK_DIFF(env.tick, it->first) >= (s32)kObsDelayTicks) {
-      std::copy(it->second.begin(), it->second.end(), out);
+      std::copy(it->second.begin(), it->second.begin() + kFairSize, out);
+      return 1;
+    }
+  }
+  return 0;
+}
+
+// The opponent's energy estimate as of ds_fair_observe's observation (ticket 46): its mean and standard deviation as
+// shares of the ship's average maximum energy, from what this side noticed. Returns 0 (and writes nothing) until
+// there's an observation that old, or for a bot side.
+int ds_estimate_observe(void* handle, int side_index, float* out) {
+  Env& env = *(Env*)handle;
+  if (!env.sides[side_index].estimate) return 0;
+  const auto& history = env.fair[side_index];
+  for (auto it = history.rbegin(); it != history.rend(); ++it) {
+    if (TICK_DIFF(env.tick, it->first) >= (s32)kObsDelayTicks) {
+      std::copy(it->second.begin() + kFairSize, it->second.end(), out);
       return 1;
     }
   }

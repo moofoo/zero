@@ -17,7 +17,8 @@ struct DuelPolicy {
   // Loads the weights; false (with a log line) if the file is missing or doesn't match the network.
   bool Load(const char* path);
 
-  // Its inputs: the fair observation (kFairSize), then any extra inputs (train.py --dial: the aggression dial).
+  // Its inputs: the fair observation (kFairSize), then any extra inputs (train.py --dial: the aggression dial; then
+  // --estimate: the opponent's energy estimate, two).
   int obs_size = 0;
   int hidden = 0;
 

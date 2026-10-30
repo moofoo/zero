@@ -41,7 +41,22 @@ constexpr float kUnseenTicks = 500.0f;
 constexpr u32 kAdvanceInterval = 10;
 
 EnergyEstimate::EnergyEstimate(ZeroBot& bot, float attention, Vector2f view_extent)
-    : bot(bot), attention(attention), view_extent(view_extent), random(ChaosSeed()) {}
+    : EnergyEstimate(*bot.game, attention, view_extent) {}
+
+EnergyEstimate::EnergyEstimate(Game& game, float attention, Vector2f view_extent)
+    : game(&game), attention(attention), view_extent(view_extent), random(ChaosSeed()) {}
+
+void EnergyEstimate::PolicyInputs(Player& player, float* out) {
+  Belief& belief = Advance(player);
+  float average_max = player.ship < 8 ? AverageMaxEnergy(game->connection.settings.ShipSettings[player.ship]) : 0.0f;
+  if (average_max <= 0.0f) average_max = 1.0f;
+  out[0] = belief.mean / average_max;
+  out[1] = belief.sd / average_max;
+}
+
+void EnergyEstimate::Forget(Player& player) {
+  beliefs[player.id].valid = false;
+}
 
 EnergyEstimate::Reading EnergyEstimate::Get(Player& player) {
   // Energy the server sent, as it would show it to a player, while it's fresh.
@@ -58,7 +73,7 @@ void EnergyEstimate::Spawn(Player& player) {
   belief = Belief();
   if (player.ship >= 8) return;
 
-  auto& settings = bot.game->connection.settings.ShipSettings[player.ship];
+  auto& settings = game->connection.settings.ShipSettings[player.ship];
   belief.mean = AverageMaxEnergy(settings);
   belief.sd = MaxEnergySd(settings);
   belief.tick = GetCurrentTick();
@@ -78,7 +93,7 @@ EnergyEstimate::Belief& EnergyEstimate::Advance(Player& player) {
   if (ticks <= 0 || player.ship >= 8) return belief;
   if (ticks > kMaxAdvanceTicks) ticks = kMaxAdvanceTicks;
 
-  auto& settings = bot.game->connection.settings.ShipSettings[player.ship];
+  auto& settings = game->connection.settings.ShipSettings[player.ship];
   float average_max = AverageMaxEnergy(settings);
 
   if (!InView(player.position)) {
@@ -112,7 +127,7 @@ EnergyEstimate::Belief& EnergyEstimate::Advance(Player& player) {
 }
 
 bool EnergyEstimate::InView(Vector2f position) {
-  Player* self = bot.game->player_manager.GetSelf();
+  Player* self = game->player_manager.GetSelf();
   if (!self || self->ship >= 8) return false;
 
   Vector2f delta = position - self->position;
@@ -120,7 +135,7 @@ bool EnergyEstimate::InView(Vector2f position) {
 }
 
 float EnergyEstimate::NoticeChance(Vector2f position) {
-  Player* self = bot.game->player_manager.GetSelf();
+  Player* self = game->player_manager.GetSelf();
   if (!self || self->ship >= 8 || !InView(position)) return 0.0f;
 
   // Half as likely at the screen's edge as at its centre.
@@ -151,11 +166,11 @@ void EnergyEstimate::Spend(Player& player, float amount, float amount_sd, float 
 
 void EnergyEstimate::HandleEvent(const WeaponFireEvent& event) {
   Player& player = event.player;
-  if (player.ship >= 8 || player.id == bot.game->player_manager.player_id) return;
+  if (player.ship >= 8 || player.id == game->player_manager.player_id) return;
   float chance = Notices(player.position);
   if (chance <= 0.0f) return;
 
-  float cost = (float)GetWeaponFireCost(bot.game->connection.settings.ShipSettings[player.ship], event.data);
+  float cost = (float)GetWeaponFireCost(game->connection.settings.ShipSettings[player.ship], event.data);
   if (cost <= 0.0f) return;
 
   float judged = cost * std::normal_distribution<float>(1.0f, kShotCostNoise)(random);
@@ -164,8 +179,8 @@ void EnergyEstimate::HandleEvent(const WeaponFireEvent& event) {
 
 void EnergyEstimate::HandleEvent(const WeaponHitEvent& event) {
   Weapon& weapon = event.weapon;
-  auto& settings = bot.game->connection.settings;
-  auto& player_manager = bot.game->player_manager;
+  auto& settings = game->connection.settings;
+  auto& player_manager = game->player_manager;
 
   switch (weapon.data.type) {
     case WeaponType::Bomb:
@@ -233,7 +248,7 @@ void EnergyEstimate::HandleEvent(const BotController::UpdateEvent& event) {
   if (TICK_GT(next_advance_tick, now)) return;
   next_advance_tick = now + kAdvanceInterval;
 
-  auto& player_manager = bot.game->player_manager;
+  auto& player_manager = game->player_manager;
   for (size_t i = 0; i < player_manager.player_count; ++i) {
     Player& player = player_manager.players[i];
     if (player.ship >= 8 || player.id == player_manager.player_id) continue;

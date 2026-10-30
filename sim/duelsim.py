@@ -60,6 +60,8 @@ class _Lib:
             lib.ds_solid.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_int]
             lib.ds_seed.argtypes = [ctypes.c_void_p, ctypes.c_uint]
             lib.ds_ship_fields.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.POINTER(ctypes.c_uint)]
+            lib.ds_estimate_observe.restype = ctypes.c_int
+            lib.ds_estimate_observe.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.POINTER(ctypes.c_float)]
             lib.ds_set_energy.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_float]
             lib.ds_bot_goal.argtypes = [ctypes.c_void_p, ctypes.c_float, ctypes.c_float]
             lib.ds_fair_size.restype = ctypes.c_int
@@ -81,11 +83,15 @@ class DuelEnv:
 
     With `low_start` (share, low, high), that share of episodes start side 0 between low and high of its maximum energy,
     side 1 full (ticket 46: in trouble, where it has to get away and recharge).
+
+    With `estimate`, fair_array() has two more floats after the fair observation: the opponent's energy as this side
+    estimates it from the shots and hits it saw (zero's EnergyEstimate), mean and standard deviation as shares of its
+    average maximum, as of the same moment (ticket 46). fair_size stays the fair observation's.
     """
 
     def __init__(self, map_dir=None, captures=None, frame_skip=10, max_weapons=16, max_seconds=120.0,
                  kill_reward=1.0, spawn_center=(512.0, 512.0), spawn_radius=60.0, spawn_gap=(20.0, 40.0),
-                 seed=None, library=None, bot=None, low_start=None):
+                 seed=None, library=None, bot=None, low_start=None, estimate=False):
         self.lib = _Lib.get(library)
         self.frame_skip = frame_skip
         self.max_weapons = max_weapons
@@ -94,6 +100,8 @@ class DuelEnv:
         self.spawn_center, self.spawn_radius, self.spawn_gap = spawn_center, spawn_radius, spawn_gap
         self.random = random.Random(seed)
         self.low_start = low_start
+        self.estimate = estimate
+        self._estimate = (ctypes.c_float * 2)()
         map_dir = Path(map_dir or Path.home() / "newcode/chaos-offline/work/bots")
         a, b = captures or (HERE / "data" / "duelbox_a.cap", HERE / "data" / "duelbox_b.cap")
         here = os.getcwd()
@@ -159,9 +167,15 @@ class DuelEnv:
     def fair_array(self, side):
         """fair() as a numpy float32 array (numpy is imported only for this)."""
         import numpy as np
+        size = self.fair_size + (2 if self.estimate else 0)
         if not self.lib.ds_fair_observe(self.handle, side, self._fair):
-            return np.zeros(self.fair_size, dtype=np.float32)
-        return np.ctypeslib.as_array(self._fair).copy()
+            return np.zeros(size, dtype=np.float32)
+        fair = np.ctypeslib.as_array(self._fair).copy()
+        if not self.estimate:
+            return fair
+        if not self.lib.ds_estimate_observe(self.handle, side, self._estimate):
+            return np.concatenate([fair, np.zeros(2, dtype=np.float32)])
+        return np.concatenate([fair, np.ctypeslib.as_array(self._estimate)])
 
     SHIP_FIELDS = ("energy", "recharge", "rotation", "guns", "bombs", "thrust", "speed", "shrapnel", "repels", "bursts",
                    "decoys", "thors", "bricks", "rockets", "portals", "multifire", "capability")

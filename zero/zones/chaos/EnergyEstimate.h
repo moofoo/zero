@@ -9,6 +9,7 @@
 
 namespace zero {
 
+struct Game;
 struct Player;
 struct ZeroBot;
 
@@ -43,9 +44,17 @@ struct EnergyEstimate : EventHandler<WeaponFireEvent>,
   };
 
   EnergyEstimate(ZeroBot& bot, float attention, Vector2f view_extent);
+  // For a client with no bot: the duel simulator's policy sides (bot-ai ticket 46). Made in the client's event scope.
+  EnergyEstimate(Game& game, float attention, Vector2f view_extent);
 
   // The current estimate of a player's energy.
   Reading Get(Player& player);
+  // The estimate as the duel policy's inputs (ticket 46): its mean and standard deviation as shares of the ship's
+  // average maximum energy. Only what was noticed: never the energy the server sends (Get's, while fresh), which the
+  // arena sends every client (ExtraPositionData) but a player's screen doesn't show for an enemy.
+  void PolicyInputs(Player& player, float* out);
+  // Forgets a player, as if just spawned (the simulator's reset puts both ships back full).
+  void Forget(Player& player);
 
   void HandleEvent(const WeaponFireEvent& event) override;
   void HandleEvent(const WeaponHitEvent& event) override;
@@ -63,7 +72,7 @@ struct EnergyEstimate : EventHandler<WeaponFireEvent>,
     bool valid = false;
   };
 
-  ZeroBot& bot;
+  Game* game;
   float attention;
   Vector2f view_extent;  // half the screen, in tiles
   std::mt19937 random;

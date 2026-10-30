@@ -24,6 +24,8 @@ each weighted, name:weight), on the learner's own observations.
 doesn't; in the red (--idle-red) it's off, as surviving comes first. --low-energy-cost charges time below half energy.
 --low-start starts a share of episodes with the learner low on energy and the opponent full, and --recover-bonus pays
 for getting from below 30% back to 60% alive: practice at getting away and recharging, which few episodes reach.
+--estimate gives the policy the opponent's energy as it could judge it (zero's EnergyEstimate: from the shots and hits
+it saw), two inputs after the dial, and --risky-cost charges each risky shot (risky_shot: a wager it can't afford).
 """
 import argparse
 import collections
@@ -92,6 +94,47 @@ def load_policy(path, extra=None, device="cpu"):
 def with_dial(obs, dial):
     """The policy's input: the fair observations (n, fair) with the dial (n,) after them; None leaves them as they are."""
     return obs if dial is None else torch.cat([obs, dial.unsqueeze(1)], 1)
+
+
+def net_input(net, obs, dial=None):
+    """A network's input from observations (n, fair; or fair and the opponent's energy estimate, DuelEnv(estimate=True)):
+    the fair observation, then the extra inputs it was trained with, in order: the dial (0.5 without one), then the
+    estimate (ticket 46). A network from before either gets only what it had."""
+    fair = net.body[0].in_features - net.extra
+    parts = [obs[:, :fair]]
+    if net.extra >= 1:
+        parts.append((dial if dial is not None else torch.full((obs.shape[0],), 0.5)).unsqueeze(1))
+    if net.extra >= 3:
+        parts.append(obs[:, fair:fair + 2])
+    return torch.cat(parts, 1)
+
+
+# A risky shot (ticket 46, the user's definition, 2026-10-30): a bomb that leaves the shooter below RISKY_ENERGY of its
+# energy, or a bullet that leaves it below one bomb's cost, while the enemy is on screen within RISKY_RANGE tiles (2.5
+# times the range its own bomb's blast hurts it: about 8 tiles, measured), facing it (within RISKY_FACING radians), and
+# the shooter isn't ahead on energy by RISKY_LEAD (about 200 of 1700). "Fights are mostly decided by positioning and
+# using energy to fire weapons when it counts": a bomb missed below 55% and a direct hit back (43%) within two seconds
+# is nearly a death; going for the kill with the advantage, however small, isn't risky.
+RISKY_ENERGY, BOMB_COST, RISKY_RANGE, RISKY_FACING, RISKY_LEAD = 0.55, 350 / 1700, 20.0, math.pi / 4, 200 / 1700
+
+
+def risky_shot(obs, enemy_energy, weapon, share):
+    """Whether a shot of `weapon` ("bullet" or "bomb") costing `share` of the shooter's energy is risky, from its fair
+    observation `obs` as it fired, and the enemy's energy share (the truth, for the reward and the statistics)."""
+    if obs[8] < 0.5 or weapon not in ("bullet", "bomb"):
+        return False
+    after = float(obs[4]) - share
+    if after >= (RISKY_ENERGY if weapon == "bomb" else BOMB_COST):
+        return False
+    dx, dy = float(obs[10]) * 60.0, float(obs[11]) * 60.0
+    dist = math.hypot(dx, dy)
+    if dist > RISKY_RANGE or dist < 1e-6:
+        return False
+    # The enemy's heading against the line from it to the shooter.
+    facing = (-dx * float(obs[14]) - dy * float(obs[15])) / dist
+    if facing < math.cos(RISKY_FACING):
+        return False
+    return float(obs[4]) - enemy_energy < RISKY_LEAD
 
 
 class ScriptedAimer:
@@ -295,7 +338,7 @@ def evaluate(policy, envs, episodes, rng, dodge=False, style="hold", dial=0.0):
     dials = torch.full((n,), dial) if policy.extra else None
     done_count = 0
     while done_count < episodes:
-        choice, _, _, h = act(policy, with_dial(obs, dials), h, starts, greedy=True)
+        choice, _, _, h = act(policy, net_input(policy, obs, dials), h, starts, greedy=True)
         starts = torch.zeros(n)
         chosen = choice.tolist()
         actions_a = [DuelEnv.choice(*chosen[i]) for i in range(n)]
@@ -406,6 +449,9 @@ def main():
                    "that share of episodes start the learner between LOW and HIGH of its maximum energy, the opponent full")
     p.add_argument("--recover-bonus", type=float, default=0.0, help="ticket 46: paid each time the learner, having "
                    "fallen below 30%% of its energy, gets back to 60%% alive")
+    p.add_argument("--estimate", action="store_true", help="ticket 46: with --dial, the opponent's energy estimate as "
+                   "two more inputs (zero's EnergyEstimate, as the policy has it in zero)")
+    p.add_argument("--risky-cost", type=float, default=0.0, help="ticket 46: each risky shot (risky_shot) costs this")
     p.add_argument("--clone", default=None, help="ticket 46: a clone.py network of the player (no dial)")
     p.add_argument("--clone-share", type=float, default=0.0, help="with --clone: the share of the league's episodes "
                    "against it (sampling its choices, as a player varies)")
@@ -451,14 +497,17 @@ def main():
                   bot=bot_specs,
                   spawn_gap=tuple(args.spawn_gap), spawn_center=tuple(args.spawn_center),
                   spawn_radius=args.spawn_radius, max_seconds=args.max_seconds,
-                  low_start=tuple(args.low_start) if args.low_start else None)
-    eval_envs = VecEnv(8, seed=args.seed * 1000 + 500, map_dir=args.map_dir, max_seconds=args.max_seconds)
+                  low_start=tuple(args.low_start) if args.low_start else None, estimate=True)
+    eval_envs = VecEnv(8, seed=args.seed * 1000 + 500, map_dir=args.map_dir, max_seconds=args.max_seconds,
+                       estimate=True)
     eval_bot_envs = [VecEnv(4, seed=args.seed * 1000 + 700 + 10 * k, map_dir=args.map_dir, max_seconds=args.max_seconds,
                             spawn_gap=tuple(args.spawn_gap), spawn_center=tuple(args.spawn_center),
-                            spawn_radius=args.spawn_radius, bots=4, bot=spec)
+                            spawn_radius=args.spawn_radius, bots=4, bot=spec, estimate=True)
                      for k, spec in enumerate(bot_specs)] if bot_count else []
     size = envs.fair_size
-    extra = 1 if args.dial else 0
+    if args.estimate and not args.dial:
+        raise SystemExit("--estimate goes after the dial: use it with --dial")
+    extra = (1 if args.dial else 0) + (2 if args.estimate else 0)
     policy = load_policy(args.init, extra, device) if args.init else Policy(size, extra=extra).to(device)
     opponent = Policy(size, extra=extra).to(device)
     opponent.load_state_dict(policy.state_dict())
@@ -565,11 +614,11 @@ def main():
         buf_clone = []  # the clone's log-probabilities for each choice, on the learner's observations
         h0 = h.clone()
         for t in range(args.rollout):
-            inputs = with_dial(obs, dial)
+            inputs = net_input(policy, obs, dial)
             choice, logp, value, h = act(policy, inputs, h, starts)
             if clone is not None and args.clone_kl:
                 with torch.no_grad():
-                    lg, _, clone_h = clone(obs.unsqueeze(1), clone_h, starts.unsqueeze(1))
+                    lg, _, clone_h = clone(net_input(clone, obs).unsqueeze(1), clone_h, starts.unsqueeze(1))
                 buf_clone.append(torch.cat([torch.log_softmax(x[:, 0], -1) for x in lg], -1))
             # The opponents: group environments by opponent kind for batched play.
             opp_choice = [None] * n
@@ -589,7 +638,7 @@ def main():
                         opp_choice[i] = scripted[k][i](opp_rows[i])
                 else:
                     net = opponent_net(k)
-                    c, _, _, nh = act(net, with_dial(opp_obs[idx], opp_dial[idx] if net.extra else None),
+                    c, _, _, nh = act(net, net_input(net, opp_obs[idx], opp_dial[idx] if opp_dial is not None else None),
                                       opp_h[:, idx], starts[idx], greedy=args.league_fixed_greedy and k in fixed)
                     opp_h[:, idx] = nh
                     for j, row in zip(idx, c.tolist()):
@@ -609,6 +658,10 @@ def main():
                 # Ticket 51: each shot fired costs a share of its energy, so a shot pays only when it's likely to hit.
                 spent = sum(x["share"] for x in info["shots"] if x["side"] == 0)
                 ra -= args.shot_cost * spent
+                risky = sum(risky_shot(rows[i], float(opp_rows[i][4]), x["class"], x["share"])
+                            for x in info["shots"] if x["side"] == 0)
+                ra -= args.risky_cost * risky
+                energy_log["risky"] += risky
                 ra -= args.low_energy_cost * max(0.0, 0.5 - float(rows[i][4])) / 0.5
                 landed = any(x["side"] == 1 and not x["own"] for x in info["hits"])
                 energy = float(rows[i][4])
@@ -673,7 +726,7 @@ def main():
             total += n
         # Advantages (GAE), bootstrapped from the next value.
         with torch.no_grad():
-            _, last_value, _ = policy(with_dial(obs, dial).unsqueeze(1), h, starts.unsqueeze(1))
+            _, last_value, _ = policy(net_input(policy, obs, dial).unsqueeze(1), h, starts.unsqueeze(1))
             last_value = last_value[:, 0]
         T = args.rollout
         adv = torch.zeros(T, n)
@@ -758,7 +811,8 @@ def main():
                                 "shots_below_half": round(energy_log["shots_below_half"] / max(energy_log["shots"], 1), 3),
                                 "idle": round(energy_log["idle"] / energy_log["steps"], 3),
                                 "drains_a_minute": round(600 * energy_log["drains"] / energy_log["steps"], 2),
-                                "recovered": round(energy_log["recovered"] / max(energy_log["drains"], 1), 3)}
+                                "recovered": round(energy_log["recovered"] / max(energy_log["drains"], 1), 3),
+                                "risky_a_minute": round(600 * energy_log["risky"] / energy_log["steps"], 2)}
         energy_log.clear()
         if clone_log["chunks"]:
             record["clone"] = {"kl": round(clone_log["kl"] / clone_log["chunks"], 3),

@@ -6,7 +6,8 @@ Greedy play, one game a life, sides swapped every game (spawns 20 to 56 tiles ap
 has one. Prints wins, losses and draws for the first, its kill share with a 95% interval, and each side's bombs a
 minute; then for each, as style.py measures it: bullets and bombs fired a minute and the share of each that hit, the
 time spent below half energy and the damage taken a minute; and its drains below 30% energy a minute, with the share it
-got back to 60% from and the share it died in (ticket 46: energy management).
+got back to 60% from and the share it died in (ticket 46: energy management); and its risky shots a minute
+(train.risky_shot, the user's definition) with the share followed by its death within 3 s.
 """
 import argparse
 import collections
@@ -16,7 +17,7 @@ import sys
 import torch
 
 from duelsim import DuelEnv
-from train import act, load_policy
+from train import act, load_policy, net_input, risky_shot
 
 
 def main():
@@ -31,7 +32,7 @@ def main():
 
     nets = [load_policy(args.a), load_policy(args.b)]
     env = DuelEnv(seed=args.seed, max_seconds=90, map_dir=args.map_dir,
-                  spawn_center=(186, 144), spawn_radius=40, spawn_gap=(20, 56))
+                  spawn_center=(186, 144), spawn_radius=40, spawn_gap=(20, 56), estimate=True)
     s = collections.Counter()
     for game in range(args.games):
         env.reset()
@@ -39,11 +40,13 @@ def main():
         hs = [net.initial(1) for net in nets]
         starts = torch.ones(1)
         drained = [False, False]
+        last_risky = [None, None]  # the step of each policy's last risky shot
         done = False
         while not done:
             chosen = [None, None]
+            seen = [env.fair_array(sides[k]) for k in range(2)]
             for k, net in enumerate(nets):
-                o = env.fair_array(sides[k])
+                o = seen[k]
                 s[f"below_half_{k}"] += o[7] > 0.5 and o[4] < 0.5
                 if o[7] > 0.5 and o[4] < 0.3 and not drained[k]:
                     drained[k] = True
@@ -51,16 +54,18 @@ def main():
                 elif o[4] >= 0.6 and drained[k]:
                     drained[k] = False
                     s[f"recovered_{k}"] += 1
-                x = torch.from_numpy(o).unsqueeze(0)
-                if net.extra:
-                    x = torch.cat([x, torch.full((1, 1), args.dial)], 1)
+                x = net_input(net, torch.from_numpy(o).unsqueeze(0), torch.full((1,), args.dial))
                 c, _, _, hs[k] = act(net, x, hs[k], starts, greedy=True)
                 chosen[sides[k]] = DuelEnv.choice(*c[0].tolist())
             starts = torch.zeros(1)
             _, _, _, done, info = env.step(chosen[0], chosen[1])
             s["steps"] += 1
             for shot in info["shots"]:
-                s[f"{shot['class']}s_{sides.index(shot['side'])}"] += 1
+                k = sides.index(shot["side"])
+                s[f"{shot['class']}s_{k}"] += 1
+                if risky_shot(seen[k], float(seen[1 - k][4]), shot["class"], shot["share"]):
+                    s[f"risky_{k}"] += 1
+                    last_risky[k] = s["steps"]
             for hit in info["hits"]:
                 k = sides.index(hit["side"])  # the side hit
                 s[f"taken_{k}"] += hit["damage"]
@@ -69,6 +74,7 @@ def main():
         dead = {sides.index(d["side"]) for d in info["deaths"]}
         for k in dead:
             s[f"died_drained_{k}"] += drained[k]
+            s[f"died_risky_{k}"] += last_risky[k] is not None and s["steps"] - last_risky[k] <= 30
         s["won" if dead == {1} else "lost" if dead == {0} else "draw"] += 1
     kills = s["won"] + s["lost"]
     share = s["won"] / max(kills, 1)
@@ -83,7 +89,8 @@ def main():
               f"{s[f'landed_bomb_{k}'] / max(s[f'bombs_{k}'], 1):.2f}; below half energy "
               f"{s[f'below_half_{k}'] / s['steps']:.2f} of the time; damage taken {s[f'taken_{k}'] / minutes:.0f} a minute; drains below 30% "
               f"{s[f'drains_{k}'] / minutes:.1f} a minute, recovered from {s[f'recovered_{k}'] / max(s[f'drains_{k}'], 1):.2f}, "
-              f"died in {s[f'died_drained_{k}'] / max(s[f'drains_{k}'], 1):.2f}")
+              f"died in {s[f'died_drained_{k}'] / max(s[f'drains_{k}'], 1):.2f}; risky shots {s[f'risky_{k}'] / minutes:.1f} a "
+              f"minute, died within 3 s after {s[f'died_risky_{k}'] / max(s[f'risky_{k}'], 1):.2f}")
 
 
 if __name__ == "__main__":

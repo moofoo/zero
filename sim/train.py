@@ -109,13 +109,13 @@ def net_input(net, obs, dial=None):
     return torch.cat(parts, 1)
 
 
-# A risky shot (ticket 46, the user's definition, 2026-10-30): a bomb that leaves the shooter below RISKY_ENERGY of its
-# energy, or a bullet that leaves it below one bomb's cost, while the enemy is on screen within RISKY_RANGE tiles (2.5
-# times the range its own bomb's blast hurts it: about 8 tiles, measured), facing it (within RISKY_FACING radians), and
-# the shooter isn't ahead on energy by RISKY_LEAD (about 200 of 1700). "Fights are mostly decided by positioning and
-# using energy to fire weapons when it counts": a bomb missed below 55% and a direct hit back (43%) within two seconds
-# is nearly a death; going for the kill with the advantage, however small, isn't risky.
-RISKY_ENERGY, BOMB_COST, RISKY_RANGE, RISKY_FACING, RISKY_LEAD = 0.55, 350 / 1700, 20.0, math.pi / 4, 200 / 1700
+# A risky shot (ticket 46, the user's definition, 2026-10-30, revised the same day): a bomb that leaves the shooter
+# below RISKY_ENERGY of its energy, or a bullet that leaves it below one bomb's cost, while the enemy is on screen
+# within RISKY_RANGE tiles (its own bomb's blast hurts it out to about 8 tiles, measured), facing it (within
+# RISKY_FACING radians), and the shooter isn't ahead on energy by RISKY_LEAD (400 of 1700). "Fights are mostly decided
+# by positioning and using energy to fire weapons when it counts": a bomb missed low and a direct hit back (43%)
+# within two seconds is nearly a death; going for the kill with the advantage isn't risky.
+RISKY_ENERGY, BOMB_COST, RISKY_RANGE, RISKY_FACING, RISKY_LEAD = 0.5, 350 / 1700, 17.0, math.pi / 4, 400 / 1700
 
 
 def risky_shot(obs, enemy_energy, weapon, share):

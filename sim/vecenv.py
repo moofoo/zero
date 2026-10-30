@@ -7,7 +7,8 @@
 Each environment's own seed is seed + its index. With bots=k and bot={...}, the first k environments' side 1 is a zero
 bot (DuelEnv's bot; a list of them is spread over those environments in turn), spread over the workers. An environment that finishes an episode is reset at once, and step()
 returns the new episode's first observations with the finished one's reward, done and info. Observations are numpy
-float32 arrays (DuelEnv.fair_array).
+float32 arrays (DuelEnv.fair_array). step()'s refill, one flag an environment, puts side 1 back at full energy first
+(ticket 46: the dodging drill's turret, which can't be killed).
 """
 import multiprocessing as mp
 
@@ -22,7 +23,9 @@ def _make(index, seed, kwargs):
     return DuelEnv(seed=seed + index, bot=bot if index < bots else None, **rest)
 
 
-def _step(env, a, b):
+def _step(env, a, b, refill=False):
+    if refill:
+        env.set_energy(1, 1.0)
     _, _, (ra, _), done, info = env.step(a, b)
     if done:
         env.reset()
@@ -39,7 +42,7 @@ def _worker(conn, indices, seed, kwargs):
                 e.reset()
             conn.send([(e.fair_array(0), e.fair_array(1)) for e in envs])
         elif message[0] == "step":
-            conn.send([_step(e, a, b) for e, a, b in zip(envs, message[1], message[2])])
+            conn.send([_step(e, a, b, r) for e, a, b, r in zip(envs, message[1], message[2], message[3])])
         else:
             conn.close()
             return
@@ -80,11 +83,12 @@ class VecEnv:
                 pairs[i] = pair
         return [p[0] for p in pairs], [p[1] for p in pairs]
 
-    def step(self, actions_a, actions_b):
+    def step(self, actions_a, actions_b, refill=None):
+        refill = refill or [False] * self.count
         if self.envs is not None:
-            return [_step(e, a, b) for e, a, b in zip(self.envs, actions_a, actions_b)]
+            return [_step(e, a, b, r) for e, a, b, r in zip(self.envs, actions_a, actions_b, refill)]
         for indices, c in zip(self.slices, self.conns):
-            c.send(("step", [actions_a[i] for i in indices], [actions_b[i] for i in indices]))
+            c.send(("step", [actions_a[i] for i in indices], [actions_b[i] for i in indices], [refill[i] for i in indices]))
         out = [None] * self.count
         for indices, c in zip(self.slices, self.conns):
             for i, r in zip(indices, c.recv()):

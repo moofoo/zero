@@ -210,6 +210,10 @@ class DuelEnv:
                 return (ax, ay, self.random.random()), (bx, by, self.random.random())
         raise RuntimeError("no open spawn spots found")
 
+    def set_energy(self, side, share):
+        """Sets a side's energy to `share` of its maximum (ds_set_energy)."""
+        self.lib.ds_set_energy(self.handle, side, share)
+
     def reset(self, spawns=None):
         (ax, ay, ao), (bx, by, bo) = spawns or self._spawns()
         self.lib.ds_reset(self.handle, ax, ay, ao, bx, by, bo)

@@ -26,6 +26,10 @@ doesn't; in the red (--idle-red) it's off, as surviving comes first. --low-energ
 for getting from below 30% back to 60% alive: practice at getting away and recharging, which few episodes reach.
 --estimate gives the policy the opponent's energy as it could judge it (zero's EnergyEstimate: from the shots and hits
 it saw), two inputs after the dial, and --risky-cost charges each risky shot (risky_shot: a wager it can't afford).
+--dodge-drill runs the dodging drill first: a turret that can't be killed bombs the learner with a firing solution,
+scored only on the damage it takes, until the turret's bombs hit under that share; --danger-cost charges each step low
+on energy inside the enemy's danger zone (danger_zone), and nothing further out, so retreating means leaving the zone
+rather than running.
 """
 import argparse
 import collections
@@ -137,6 +141,34 @@ def risky_shot(obs, enemy_energy, weapon, share):
     return float(obs[4]) - enemy_energy < RISKY_LEAD
 
 
+# The danger zone (ticket 46, the user, 2026-10-30): "If they decided to charge me right now would I probably die? Am I
+# in range that I wouldn't be able to dodge a bomb at its baseline exit velocity? If yes, move further away." A bomb
+# the enemy fired now, along its heading at BOMB_SPEED plus its velocity relative to the ship, would reach the ship in
+# under DANGER_SECONDS (the user dodges most bombs from 12 tiles out, a 1.2 s flight; s9-low is hit about two in three
+# from anywhere within 32), while the enemy faces it within RISKY_FACING and has a bomb's energy. It counts against a
+# ship below CAUTIOUS_ENERGY ("below around 55% energy ... the bots should be acting more cautious") that isn't ahead
+# by RISKY_LEAD.
+BOMB_SPEED, DANGER_SECONDS, CAUTIOUS_ENERGY = 10.0, 1.2, 0.55
+
+
+def danger_zone(obs, enemy_energy):
+    """Whether the ship, from its fair observation `obs`, is inside the enemy's danger zone, low on energy without the
+    lead; the enemy's energy share is the truth, for the reward and the statistics."""
+    if obs[8] < 0.5 or enemy_energy < BOMB_COST:
+        return False
+    if float(obs[4]) >= CAUTIOUS_ENERGY or float(obs[4]) - enemy_energy >= RISKY_LEAD:
+        return False
+    dx, dy = float(obs[10]) * 60.0, float(obs[11]) * 60.0
+    dist = math.hypot(dx, dy)
+    if dist < 1e-6:
+        return True
+    ux, uy = -dx / dist, -dy / dist  # from the enemy towards the ship
+    if ux * float(obs[14]) + uy * float(obs[15]) < math.cos(RISKY_FACING):
+        return False
+    closing = (float(obs[12]) * 20.0 + BOMB_SPEED * float(obs[14])) * ux + (float(obs[13]) * 20.0 + BOMB_SPEED * float(obs[15])) * uy
+    return closing > 0 and dist / closing < DANGER_SECONDS
+
+
 class ScriptedAimer:
     """Turns toward the enemy it sees, holds about 12 tiles (braking when closing fast), and fires when lined up;
     otherwise wanders. Uses only the fair observation's own and opponent fields. It sees its own heading 1.5 steps
@@ -157,6 +189,8 @@ class ScriptedAimer:
     # meets from the user (whose bombs hit 0.75), and that no other opponent gives it. It fires only when a bomb along
     # its heading as it is now would pass within HUNT_MISS tiles of where the target is going (the headings are 9
     # degrees apart, so lined up to the nearest one can miss by more than a tile at range).
+    # "turret" (ticket 46, the dodging drill) sits still, aims with the hunter's firing solution, and bombs whenever it
+    # has one; the caller keeps it at full energy.
     PUNISH_ENERGY = 0.4
     HUNT_RANGE, HUNT_CLOSE, HUNT_MISS = 18.0, 10.0, 0.8
 
@@ -218,7 +252,7 @@ class ScriptedAimer:
         # Where the enemy is now (the view is 0.15 s old), then where a bullet meets it: bullets carry the ship's own
         # velocity, so the lead is on the velocity relative to the ship.
         px, py = dx + dvx * 0.15, dy + dvy * 0.15
-        hunting = self.style == "hunt"
+        hunting = self.style in ("hunt", "turret")
         a = dvx * dvx + dvy * dvy - (self.BOMB_SPEED if hunting else self.BULLET_SPEED) ** 2
         b = 2.0 * (px * dvx + py * dvy)
         c = px * px + py * py
@@ -266,8 +300,8 @@ class ScriptedAimer:
             miss = math.hypot(qx + wx * t, qy + wy * t)
             fire = 0
             if miss < self.HUNT_MISS and dist > 5 and qx > 0:
-                fire = 2 if finishing or rng.random() < 0.5 else 0
-            return turn, thrust, fire
+                fire = 2 if finishing or self.style == "turret" or rng.random() < 0.5 else 0
+            return turn, (1 if self.style == "turret" else thrust), fire
         if rushing:
             thrust = 2 if dist < 2 else (0 if dist > 4 and closing < 12 else 1)
         elif dist > 18:
@@ -305,7 +339,8 @@ class Drifter:
 # to the league.
 DRILLS = ("still", "drift", "scripted")
 # The scripted opponents a run can include (--scripted-kinds), by their ScriptedAimer style.
-SCRIPTED = {"scripted": "hold", "rusher": "rush", "retreater": "retreat", "punisher": "punish", "hunter": "hunt"}
+SCRIPTED = {"scripted": "hold", "rusher": "rush", "retreater": "retreat", "punisher": "punish", "hunter": "hunt",
+            "turret": "turret"}
 
 
 def batch(arrays):
@@ -452,6 +487,12 @@ def main():
     p.add_argument("--estimate", action="store_true", help="ticket 46: with --dial, the opponent's energy estimate as "
                    "two more inputs (zero's EnergyEstimate, as the policy has it in zero)")
     p.add_argument("--risky-cost", type=float, default=0.0, help="ticket 46: each risky shot (risky_shot) costs this")
+    p.add_argument("--danger-cost", type=float, default=0.0, help="ticket 46: each step in the danger zone (danger_zone) "
+                   "costs this")
+    p.add_argument("--dodge-drill", type=float, default=0.0, help="ticket 46: before the league, the dodging drill until "
+                   "the turret's bombs hit under this share of the time (over its last 300 or more)")
+    p.add_argument("--dodge-drill-steps", type=int, default=4000000, help="with --dodge-drill: the drill ends after "
+                   "this many steps whether passed or not")
     p.add_argument("--clone", default=None, help="ticket 46: a clone.py network of the player (no dial)")
     p.add_argument("--clone-share", type=float, default=0.0, help="with --clone: the share of the league's episodes "
                    "against it (sampling its choices, as a player varies)")
@@ -539,6 +580,8 @@ def main():
     drifters = [Drifter(rng) for _ in range(n)]
     stage = len(DRILLS) if args.no_drills else 0
     stage_results = []
+    dodging = args.dodge_drill > 0  # in the dodging drill (ticket 46), before the aiming drills or the league
+    turret_bombs = collections.deque()  # (bombs the turret fired, bombs that hit), an iteration each, the latest last
     fair_a, fair_b = envs.reset()
     obs, opp_obs = batch(fair_a), batch(fair_b)
     rows = fair_a  # the learner's observations as arrays, for the dial's costs
@@ -560,6 +603,8 @@ def main():
     def pick_opponent(i):
         if i < bot_count:
             return bot_names[i % len(bot_names)]  # a bot environment: its zero bot, always
+        if dodging:
+            return "turret"
         if stage < len(DRILLS):
             return DRILLS[stage]
         r = rng.random()
@@ -612,6 +657,7 @@ def main():
                 group["lr"] = args.lr + (args.lr_final - args.lr) * min(total / args.steps, 1.0)
         buf_obs, buf_act, buf_logp, buf_val, buf_rew, buf_done, buf_start = [], [], [], [], [], [], []
         buf_clone = []  # the clone's log-probabilities for each choice, on the learner's observations
+        turret_fired = [0, 0]  # this iteration's turret bombs fired and hit
         h0 = h.clone()
         for t in range(args.rollout):
             inputs = net_input(policy, obs, dial)
@@ -649,7 +695,8 @@ def main():
             starts = torch.zeros(n)
             chosen = choice.tolist()
             steps = envs.step([DuelEnv.choice(*chosen[i]) for i in range(n)],
-                              [DuelEnv.choice(*opp_choice[i]) for i in range(n)])
+                              [DuelEnv.choice(*opp_choice[i]) for i in range(n)],
+                              refill=[k == "turret" for k in kinds])  # the turret can't be killed
             dials = dial.tolist() if args.dial else None
             for i, (ra, done, info, fair_a, fair_b) in enumerate(steps):
                 ra -= args.time_cost
@@ -685,6 +732,17 @@ def main():
                 energy_log["shots_below_half"] += fired if rows[i][4] < 0.5 else 0
                 if done and not info["deaths"]:
                     ra -= args.draw_penalty
+                in_danger = danger_zone(rows[i], float(opp_rows[i][4]))
+                ra -= args.danger_cost * in_danger
+                energy_log["danger"] += in_danger
+                energy_log["cautious"] += rows[i][4] < CAUTIOUS_ENERGY
+                if kinds[i] == "turret":
+                    # The dodging drill is scored only on getting out of the way: the damage taken, and a death.
+                    ra = -sum(x["share"] for x in info["hits"] if x["side"] == 0)
+                    ra -= 1.0 if any(d["side"] == 0 for d in info["deaths"]) else 0.0
+                    turret_fired[0] += sum(1 for x in info["shots"] if x["side"] == 1 and x["class"] == "bomb")
+                    turret_fired[1] += sum(1 for x in info["hits"]
+                                           if x["side"] == 0 and not x["own"] and x["class"] == "bomb")
                 rewards[i] = ra
                 running[i] += ra
                 if done:
@@ -799,7 +857,19 @@ def main():
             league.append(str(path))
         record = {"iteration": iteration, "steps": total, "seconds": round(time.time() - started),
                   "episode_reward": round(sum(episode_rewards[-100:]) / max(len(episode_rewards[-100:]), 1), 3)}
-        record["stage"] = DRILLS[stage] if stage < len(DRILLS) else "league"
+        record["stage"] = "turret" if dodging else DRILLS[stage] if stage < len(DRILLS) else "league"
+        if turret_fired[0]:
+            turret_bombs.append(tuple(turret_fired))
+            while sum(f for f, _ in turret_bombs) - turret_bombs[0][0] >= 300:
+                turret_bombs.popleft()
+            fired_recent = sum(f for f, _ in turret_bombs)
+            record["turret_hit"] = round(sum(h for _, h in turret_bombs) / fired_recent, 3)
+            if dodging and ((fired_recent >= 300 and record["turret_hit"] < args.dodge_drill)
+                            or total >= args.dodge_drill_steps):
+                dodging = False
+                passed = {"passed": "turret", "hit": record["turret_hit"], "iteration": iteration, "steps": total}
+                print(json.dumps(passed), flush=True)
+                log.write(json.dumps(passed) + "\n")
         for band in ("low", "high"):
             if style[band]:
                 record[f"dial_{band}"] = {"beyond": round(style[band + "_beyond"] / style[band], 2),
@@ -812,7 +882,8 @@ def main():
                                 "idle": round(energy_log["idle"] / energy_log["steps"], 3),
                                 "drains_a_minute": round(600 * energy_log["drains"] / energy_log["steps"], 2),
                                 "recovered": round(energy_log["recovered"] / max(energy_log["drains"], 1), 3),
-                                "risky_a_minute": round(600 * energy_log["risky"] / energy_log["steps"], 2)}
+                                "risky_a_minute": round(600 * energy_log["risky"] / energy_log["steps"], 2),
+                                "danger_when_cautious": round(energy_log["danger"] / max(energy_log["cautious"], 1), 3)}
         energy_log.clear()
         if clone_log["chunks"]:
             record["clone"] = {"kl": round(clone_log["kl"] / clone_log["chunks"], 3),

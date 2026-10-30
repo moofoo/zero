@@ -7,7 +7,8 @@ has one. Prints wins, losses and draws for the first, its kill share with a 95% 
 minute; then for each, as style.py measures it: bullets and bombs fired a minute and the share of each that hit, the
 time spent below half energy and the damage taken a minute; and its drains below 30% energy a minute, with the share it
 got back to 60% from and the share it died in (ticket 46: energy management); and its risky shots a minute
-(train.risky_shot, the user's definition) with the share followed by its death within 3 s.
+(train.risky_shot, the user's definition) with the share followed by its death within 3 s; and the share of its time
+below 55% energy it spends in the enemy's danger zone (train.danger_zone).
 """
 import argparse
 import collections
@@ -17,7 +18,7 @@ import sys
 import torch
 
 from duelsim import DuelEnv
-from train import act, load_policy, net_input, risky_shot
+from train import CAUTIOUS_ENERGY, act, danger_zone, load_policy, net_input, risky_shot
 
 
 def main():
@@ -47,6 +48,8 @@ def main():
             seen = [env.fair_array(sides[k]) for k in range(2)]
             for k, net in enumerate(nets):
                 o = seen[k]
+                s[f"cautious_{k}"] += o[7] > 0.5 and o[4] < CAUTIOUS_ENERGY
+                s[f"danger_{k}"] += o[7] > 0.5 and danger_zone(o, float(seen[1 - k][4]))
                 s[f"below_half_{k}"] += o[7] > 0.5 and o[4] < 0.5
                 if o[7] > 0.5 and o[4] < 0.3 and not drained[k]:
                     drained[k] = True
@@ -90,7 +93,8 @@ def main():
               f"{s[f'below_half_{k}'] / s['steps']:.2f} of the time; damage taken {s[f'taken_{k}'] / minutes:.0f} a minute; drains below 30% "
               f"{s[f'drains_{k}'] / minutes:.1f} a minute, recovered from {s[f'recovered_{k}'] / max(s[f'drains_{k}'], 1):.2f}, "
               f"died in {s[f'died_drained_{k}'] / max(s[f'drains_{k}'], 1):.2f}; risky shots {s[f'risky_{k}'] / minutes:.1f} a "
-              f"minute, died within 3 s after {s[f'died_risky_{k}'] / max(s[f'risky_{k}'], 1):.2f}")
+              f"minute, died within 3 s after {s[f'died_risky_{k}'] / max(s[f'risky_{k}'], 1):.2f}; in the danger zone "
+              f"{s[f'danger_{k}'] / max(s[f'cautious_{k}'], 1):.2f} of its time below 55%")
 
 
 if __name__ == "__main__":
